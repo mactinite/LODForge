@@ -10,7 +10,7 @@ pub mod vfs;
 use std::path::PathBuf;
 
 pub use bsa::{Bsa, BsaFile};
-pub use vfs::{archive_load_order, ini_archive_list, Mo2Layout, Origin, Vfs};
+pub use vfs::{archive_load_order, ini_archive_list, DirSnapshot, Mo2Layout, Origin, Vfs};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -2,14 +2,16 @@
 
 Latest: [full-output qualification](validation-full-20261019.md).
 Fresh full generation preserves the previous geometry/material assets and
-confirms the runtime counts below. **In-place full rebuilds drift** despite
-stable runtime IDs; a clean plugin-only-seeded build reproduces every file.
+confirms the runtime counts below. **In-place full rebuilds are byte-identical**
+since the `rebuild-determinism` fix (the earlier 585-file drift came from the
+build reading its own previous output; see the
+[baseline entry](baseline.md#in-place-rebuild-determinism-2026-10-19-branch-rebuild-determinism)).
 User-observed distant glacier/terrain flicker remains unresolved. Acceptance is
 functional compatibility: renderable, visually consistent output and safe
 supported save upgrades. Exact grass triangles and rebuilt asset hashes are
-diagnostics, not independent release gates. The drifting full rebuild has not
-yet been tested with a pre-rebuild save; byte-identical runtime files are strong
-supporting evidence, not a blanket save-safety certification.
+diagnostics, not independent release gates. A rebuilt output has not yet been
+tested with a pre-rebuild save; byte-identical rebuilds are strong supporting
+evidence, not a blanket save-safety certification.
 
 Original code review baseline: `2737410`. P3/G2 are merged.
 The [post-merge validation at f1a31e6](validation-20261019.md) now includes a fresh
@@ -81,7 +83,7 @@ the next measurable result rather than prescribing a speculative implementation.
 
 | Priority | Gap / ownership | Current evidence | Completion test |
 |---|---|---|---|
-| Medium; qualification | Rebuilt-output save compatibility | Same full command changes 585 asset/occlusion files, but DynDOLOD plugins/data remain identical. A clean plugin-only seed reproduces all 8,524 files. | Load pre-rebuild saves on rebuilt output, exercise runtime state/lifecycle, and save/reload. Accept asset variation without format, coverage or visual regressions; exact byte equality is not required. |
+| Medium; qualification | Rebuilt-output save compatibility | Rebuilds are byte-identical in place since 2026-10-19 (branch `rebuild-determinism`, [baseline](baseline.md#in-place-rebuild-determinism-2026-10-19-branch-rebuild-determinism)): the same full command run into the existing output and work folders reproduces all 8,524 files and the whole work folder, keeping DynDOLOD.esm/.esp form ids and the run token. The earlier 585-file drift was the build reading its own previous output through the VFS (four MiniAtlasExport mini atlases taken as already installed); only DynDOLOD.esm/.esp are read from the output now. | Save compatibility is not certified by this: still load pre-rebuild saves on rebuilt output, exercise runtime state/lifecycle, and save/reload. With identical assets that check is about the retained ids and token, not about asset drift. |
 | Triaged; not output-specific (tabled) | Distant glacier/terrain flicker | [Consecutive-frame A/B + live session (2026-10-19/20)](validation-flicker-20261019.md): the distant LOD alternates between a hazy and a crisp rendering every 2-4 s, re-armed on demand 3 of 3 at the tundra spot by a teleport-and-weather sequence, identically with LODForge and DynDOLOD outputs; persists at native with no upscaler, with DynDOLOD inactive, with SSGI off, at 5% game time and after a weather snap; full models never change; never seen in normal play. | Not a LODForge generation defect: meshes and textures are not implicated; the renderer lights or fogs the distant LOD two ways in turn. Open and tabled by the user: which Community Shaders feature (Volumetric Lighting, Cloud Shadows, Skylighting, Terrain Shadows) and what arms it. Keep uLargeRefLODGridSize=11; still ship terrain mips for quality. |
 | Implemented; residuals measured | PBR mini atlases; object page size/alpha split/mip cap; billboards on the alpha page (P3, G2, G29, G30) | Fresh full build confirms four matching object atlas files. Mini diffuse PSNR 33.78-40.91 dB. Follow-up fixes `snow01noalphalinear` from 10.20 to 48.73 dB, with 46 unchanged linear textures. Named HD groups including snow/ash: LOD4 863/867, LOD8 108/108; old narrower HD counts are not comparable. G29 now covers grass as well as tree billboards: the `_Alpha` map has 98 rows (golden 113), 64 of them the `_1`/`_2` grass views, page still 2048² BC7 with 8 mips. | Trace remaining HD membership, tree packing and mip coverage; do not reopen merged atlas production or the fixed snow scale. |
 | High | DLL runtime sections / dynamic semantics (G35) | `[Bases]` 510/593; `[Disabled]` 19/39; resets **57/57**, all zero extras. Source originals 3,060/3,078 matched, plus one explained Katla identity/transform difference; four generated patch originals remain absent. Delay mismatches **352** after 33 isolated NearLOD TREE fixes, no regressions. New reset overrides match golden fields and source-world grouping. | Preserve reset parity; finish missing cross-world originals, base-selection, patch and destruction fixtures. Extend the verified single-save upgrade and Solitude transition coverage to remaining families/worlds. |

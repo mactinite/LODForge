@@ -146,6 +146,15 @@ separated. Investigate the early whole-output VFS registration in
 [build.rs](../apps/cli/src/build.rs) and generated-asset discovery before fixing.
 The older runtime-overlay-only determinism result remains valid within its scope.
 
+**Resolved 2026-10-19 (branch `rebuild-determinism`,
+[baseline](baseline.md#in-place-rebuild-determinism-2026-10-19-branch-rebuild-determinism)):**
+the output folder alone caused it (an existing work folder with a fresh output reproduced all
+files). The early whole-output VFS registration let `mini_atlas_export` take the previous run's
+four MiniAtlasExport mini atlases as already installed, which dropped their atlas-map rows and
+shifted the main atlas page; the BTO, height-map and TVDT changes followed. A build now sees only
+the files it wrote itself (plus DynDOLOD.esm/.esp for their ids). The same command in place
+reproduces all 8,524 files and the whole work folder byte for byte.
+
 ## In game
 
 Skyrim 1.7.104.0, SKSE 2.3.1.0, DynDOLOD DLL NG 3.0.43.0; TruePBR loaded.

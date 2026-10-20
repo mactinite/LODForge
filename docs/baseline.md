@@ -30,6 +30,73 @@ Smoke, MarkarthWorld, LODForge-E2E, `--mode dyndolod --texgen --no-plugins --no-
   or `*linear.dds`; AltTextures, re-uv and atlas map name no `pbr`/`linear.dds` path; with plugins,
   DynDOLOD.esm has no `_DynDOLOD_TXST`.
 
+## In-place rebuild determinism (2026-10-19, branch `rebuild-determinism`)
+
+The [full-output qualification](validation-full-20261019.md#in-place-full-rebuild-variation)
+found that the identical `build --mode dyndolod` command run into its own output and work
+folders changed 585 of 8,524 files while a fresh folder seeded with the previous
+DynDOLOD.esm/.esp reproduced everything. Fixed: a build now reads nothing of an earlier
+output in its folder except DynDOLOD.esm/.esp (form ids and run token, as before) and, with
+`--no-terrain`, the terrain LOD. Evidence (small files; the outputs stay in
+`D:\Modlists\LODForge-out\determinism-20261019`): `bench\determinism-20261019`.
+
+**Separation** (release binary at `07c8e1a`, the full-validation command of
+[validation-20261019.md](validation-20261019.md#reproduction-and-scope), `RAYON_NUM_THREADS=8`,
+SHA256 of every output file; A = fresh output and work folders, 189 s):
+
+| Rebuild | Output folder | Work folder | Files changed vs A |
+|---|---|---|---|
+| B | A's (existing) | fresh | **585** of 8,524 (581 BTO, `DynDOLOD_Tamriel.dds` + `_n`, `Tamriel.objects.heightmap.dat`, Occlusion.esp): the exact set of the qualification's repeat |
+| C | fresh, seeded with A's DynDOLOD.esm/.esp | A's (existing) | 0 |
+| D | A's (existing) | A's (existing) | 585, the same files as B; 1 of 32,296 work files (`LODGen_SSE_ObjectAtlasMap_Tamriel.txt`, 714 -> 710 rows) |
+
+So the output folder alone causes the drift; the work folder contributes nothing.
+
+**Mechanism.** [build.rs](../apps/cli/src/build.rs) registered the whole output folder as the
+top loose layer of the VFS after the TexGen stage (again after `--lod-models` and before the
+plugin stages), so every file of the earlier build was visible to discovery. The one read that
+mattered: `texgen_stitched::mini_atlas_export` leaves out a destination the VFS already has
+(meant for an installed TexGen output), and the four MiniAtlasExport mini atlases of the
+earlier run (`textures\lod\bricks01lod.dds`, `groundmud01lod.dds`, `frozenmarshice02pbr_lod.dds`,
+`volcanictundradirtcliffs01pbr_lod.dds`) counted as present. They were not
+re-made, their four rows were missing from the atlas map (714 -> 710 rows; the qualification's
+650 -> 646 atlas entries), the four source textures were packed on the main page as 256² tiles
+instead and every later tile moved 256 px (`bricks02` from x 4096 to 4352). Hence 581 BTOs with
+other UVs and re-cut triangles (the mini-atlas re-UV splits shapes along UV seams, which is the
+triangle-count change), both main atlas pages, the object height map (from the BTOs) and one
+TVDT cell (from the height map). Traced with the fixed binary and `LODFORGE_TRACE_STALE=1`
+(every lookup that the earlier output would have answered, in place over the drifted output B;
+478 paths, `bench\determinism-20261019\T-stale-lookups.txt`): the four mini-atlas existence
+checks during `dyndolod-export`; the LOD-model discovery listing of `meshes\` during
+`dyndolod-config` (417 old tree LOD tiles and their list, two BTOs, the height map, the
+underside: none with `_lod` in its name, so none entered the index); and the objects stage's
+listing of `textures\` for the normal-map names (47 PBR `...linear.dds` copies written by this
+run's `pbr-linear` stage but registered only before the plugin stages, the four atlas pages, the
+tree LOD ini). The atlas map was the only work-folder difference, so the listings changed
+nothing, consistent with C.
+
+**Fix.** `lodforge_archive::DirSnapshot` records the output folder (size and modification time
+per file) before any stage writes; `Vfs::add_loose_root_since` registers only files new or
+changed since then (`own_output` in build.rs, at the three places that registered the whole
+folder). `--no-terrain` registers the terrain LOD already in the output explicitly (object LOD
+clipping reads the BTRs from the folder directly, occlusion through the VFS). The per-world
+LODGen export folder and the grass-billboard scratch folder in the work folder are cleared
+before they are rewritten. Unit tests: two builds into one folder through the VFS
+(`crates/archive/src/vfs.rs`); opt-in `apps/cli/tests/rebuild.rs` runs `lodforge build` twice
+into the same folders and asserts byte-identical output.
+
+**After** (same command, fixed binary):
+
+| Run | Folders | Result |
+|---|---|---|
+| T | B's drifted output (existing) + fresh work | all 8,524 files identical to A: the drift is undone in place, the old plugins' form ids and token kept |
+| A2 | fresh output and work, 186 s | 8,520 of 8,524 identical to A; DynDOLOD.esm, DynDOLOD.esp, `DynDOLOD_NG_Tamriel.txt`, `DynDOLOD_NG_Worlds.txt` differ in the 31 bytes of the random run token of an unseeded fresh build |
+| D2 | A2's output and work (existing, in place), 178 s | **8,524 of 8,524 output files and 32,296 of 32,296 work files byte-identical** |
+
+`cargo test --workspace --exclude lodforge-ui`: 145 pass, 3 ignored (the opt-in fixtures and
+the new opt-in rebuild test). Save compatibility of a rebuilt output is unchanged and still not
+certified; see [parity.md](parity.md).
+
 ## Terrain LOD mips and grass billboards on the alpha atlas (2026-10-19, branch `terrain-mips-grass-atlas`)
 
 Two output-side candidates for the distant terrain shimmer the user sees with both LODForge and

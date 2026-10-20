@@ -1052,6 +1052,9 @@ pub fn prepare_grass(p: &Profile, c: &Config, prof: &crate::profile::ProfileArgs
     // Billboards (TexGen's grass rule) and the grass map, rendered into a scratch Data folder and
     // copied into the output.
     let bb = work.join("grass-billboards").join(w);
+    if bb.exists() {
+        std::fs::remove_dir_all(&bb)?;
+    }
     let bb_data = bb.join("Data");
     let args = crate::texgen_billboards::GrassArgs { profile: prof.clone(), grass: dir.clone(), world: w.clone(), out: bb_data.clone(), all_types: false, hd: complex_grass(p) };
     crate::texgen_billboards::run_grass(&args)?;

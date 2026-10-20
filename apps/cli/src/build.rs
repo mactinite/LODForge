@@ -7,7 +7,10 @@
 //! `--mode dyndolod` replaces the object LOD stage with DynDOLOD's (its object LOD export and
 //! LODGen 3.1.8, see `dyndolod_build`) and adds DynDOLOD.esm/.esp and Occlusion.esp at the end.
 //! Earlier LOD output enabled in the profile (mods LODForge generated, DynDOLOD output) and the
-//! DynDOLOD plugins are left out of the input.
+//! DynDOLOD plugins are left out of the input. So is an earlier build's output in the output
+//! folder itself: the stages see only the files this run wrote (`own_output`), plus
+//! DynDOLOD.esm/.esp for their form ids and run token, so a rebuild in place writes the same
+//! files as a fresh build.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -187,6 +190,15 @@ pub fn run(a: &Args) -> Result<()> {
         bail!("--grass bto puts grass into DynDOLOD's object LOD; use it with --mode dyndolod (or --grass go)");
     }
     let mut p = prof.open()?;
+    // What the output folder holds before this build writes into it (an earlier build's output,
+    // or anything else). The stages see their own files through the VFS (`own_output` below),
+    // never these: a rebuild into the same folder reads the load order, the DynDOLOD.esm/.esp
+    // kept for their form ids (`dyndolod_build::previous_plugins`) and, with --no-terrain, the
+    // terrain LOD already in the output; nothing else of the earlier output.
+    let before = lodforge_archive::DirSnapshot::take(&out).with_context(|| format!("listing {}", out.display()))?;
+    if !a.json && !before.is_empty() {
+        println!("output folder already holds {} files: not read (only DynDOLOD.esm/.esp for their form ids{})", before.len(), if a.no_terrain { ", and the terrain LOD with --no-terrain" } else { "" });
+    }
     let worlds = if a.worlds.is_empty() { lod_worlds(&p)? } else { a.worlds.clone() };
     if !a.json {
         println!("LODForge build: {} worldspace(s) {:?}, seasons {:?}, output {}", worlds.len(), worlds, a.seasons, out.display());
@@ -230,7 +242,20 @@ pub fn run(a: &Args) -> Result<()> {
             }
         }
         // Later stages read the new billboards and textures through the VFS.
-        p.vfs.add_loose_root(&out)?;
+        own_output(&mut p, &out, &before)?;
+    }
+    if a.no_terrain {
+        // Object LOD clipping and occlusion use the terrain LOD already in the output (the
+        // object LOD stage reads the BTRs from the output folder directly, occlusion through
+        // the VFS).
+        let rels: Vec<String> = worlds
+            .iter()
+            .flat_map(|w| {
+                let dir = out.join("meshes").join("terrain").join(w);
+                std::fs::read_dir(&dir).ok().into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str().map(str::to_string)).filter(|f| f.to_ascii_lowercase().ends_with(".btr")).map(move |f| format!("meshes\\terrain\\{w}\\{f}")).collect::<Vec<_>>()
+            })
+            .collect();
+        p.vfs.add_loose_files(&out, rels.iter().map(String::as_str));
     }
     // DynDOLOD mode: configuration, worldspaces and the work folder for LODGen's input files.
     let dyn_mode = a.mode == Mode::Dyndolod;
@@ -264,7 +289,7 @@ pub fn run(a: &Args) -> Result<()> {
                     let cache = a.dyn_opts.lod_model_cache.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(".lodforge-cache"));
                     let rep = crate::lod_models::generate(&p, &items, &out, Some(&cache), &lodforge_lodmodel::LEVELS);
                     // Discovery and the object LOD stage read them through the VFS.
-                    p.vfs.add_loose_root(&out)?;
+                    own_output(&mut p, &out, &before)?;
                     c.rescan(&p);
                     if !a.json {
                         println!("LOD models: {} generated for {} full models ({} from cache, {} without geometry), {} LOD models now", rep.made.len(), items.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len(), c.index.len());
@@ -338,6 +363,10 @@ pub fn run(a: &Args) -> Result<()> {
             let mut world_mini = mini_rows.clone();
             let mut mini_written: Vec<String> = Vec::new();
             step("dyndolod-export", None, &mut || {
+                // LODGen's input files are all written below; nothing of an earlier run stays.
+                if export_dir.is_dir() {
+                    std::fs::remove_dir_all(&export_dir).with_context(|| format!("clearing {}", export_dir.display()))?;
+                }
                 let export_text = format!("{}\\", export_dir.display()).replace('/', "\\");
                 let path_output = format!("{}\\", out.join("meshes").join("terrain").join(world).join("Objects").display()).replace('/', "\\");
                 let h = crate::dyndolod_build::header(&p, c, ws, &export_text, &a.profile.game_dir().join("Data"), &path_output);
@@ -543,7 +572,7 @@ pub fn run(a: &Args) -> Result<()> {
     }
     if dyn_mode && let Some(c) = &dyn_cfg {
         // The DynDOLOD stages read the build's own terrain LOD and plugins.
-        p.vfs.add_loose_root(&out)?;
+        own_output(&mut p, &out, &before)?;
         if !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod {
             let t = Instant::now();
             let refs: Vec<crate::dyndolod_build::PluginWorld<'_>> = dynamic
@@ -594,6 +623,14 @@ pub fn run(a: &Args) -> Result<()> {
     if !failed.is_empty() {
         bail!("{} stage(s) failed", failed.len());
     }
+    Ok(())
+}
+
+/// Makes the files this build has written into `out` so far visible to the later stages: those
+/// new or changed since `before` (the folder's state when the build started). An earlier
+/// build's output in the same folder is never an input (see [`run`]).
+fn own_output(p: &mut Profile, out: &std::path::Path, before: &lodforge_archive::DirSnapshot) -> Result<()> {
+    p.vfs.add_loose_root_since(out, before).with_context(|| format!("listing {}", out.display()))?;
     Ok(())
 }
 
