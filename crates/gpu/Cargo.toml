@@ -1,0 +1,15 @@
+[package]
+name = "lodforge-gpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "GPU compute (wgpu): BC7 encoding and terrain baking"
+
+[dependencies]
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+lodforge-dds.workspace = true

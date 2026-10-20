@@ -1,0 +1,142 @@
+name: Draft release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    name: Verify release clearance
+    runs-on: windows-2022
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.clearance.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - name: Check tag, versions, licenses and approved commit
+        id: clearance
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_APPROVED_COMMIT: ${{ vars.RELEASE_APPROVED_COMMIT }}
+        run: |
+          .\scripts\Test-Release.ps1 -Tag $env:RELEASE_TAG -ApprovedCommit $env:RELEASE_APPROVED_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw 'Release clearance failed.' }
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve release commit.' }
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+
+  build:
+    name: Build cleared source
+    needs: approve
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.approve.outputs.commit }}
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
+      - name: Validate cleared source
+        run: |
+          .\scripts\Test-ReleaseTools.ps1
+          cargo test --locked --workspace --all-targets
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace tests failed.' }
+          cargo clippy --locked --workspace --all-targets
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace lint failed.' }
+      - name: Build production CLI and UI
+        run: |
+          cargo build --locked --release -p lodforge -p lodforge-ui --features lodforge-ui/custom-protocol
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
+      - name: Package binaries and matching source
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          .\scripts\New-ReleaseArchive.ps1
+          $source = "target\dist\LODForge-$env:RELEASE_TAG-source.zip"
+          git archive --format=zip --output=$source HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive failed.' }
+          $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $source -Leaf)" | Add-Content -LiteralPath target\dist\SHA256SUMS.txt -Encoding ascii
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: |
+            target/dist/*.zip
+            target/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  draft:
+    name: Create draft prerelease
+    needs: [approve, build]
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download assets and create draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_COMMIT: ${{ needs.approve.outputs.commit }}
+          RELEASE_APPROVED_COMMIT: ${{ vars.RELEASE_APPROVED_COMMIT }}
+        run: |
+          if ($env:RELEASE_APPROVED_COMMIT -cne $env:RELEASE_COMMIT) {
+            throw 'Release approval was revoked or changed.'
+          }
+          $refJson = gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve release tag.' }
+          $object = ($refJson | ConvertFrom-Json).object
+          for ($depth = 0; $object.type -eq 'tag' -and $depth -lt 10; $depth++) {
+            $tagJson = gh api "repos/$env:GH_REPO/git/tags/$($object.sha)"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve annotated tag.' }
+            $object = ($tagJson | ConvertFrom-Json).object
+          }
+          if ($object.type -ne 'commit' -or $object.sha -cne $env:RELEASE_COMMIT) {
+            throw 'Release tag moved after clearance.'
+          }
+          gh run download $env:GITHUB_RUN_ID --name release-assets --dir assets
+          if ($LASTEXITCODE -ne 0) { throw 'Asset download failed.' }
+          $notes = @"
+          Experimental Windows x64 portable build. Extract the complete ZIP and keep both executables together.
+          Requires WebView2 for the UI and the Microsoft Visual C++ v14 x64 Redistributable for the CLI.
+          Game/mod resources and compatible runtimes are not included.
+          Source commit: $env:RELEASE_COMMIT. Matching source and SHA-256 checksums are attached.
+          Read README.md and docs/parity.md before using a separate test profile and backed-up saves.
+          Unsigned binaries may trigger Windows SmartScreen. Checksums detect corruption, not publisher identity.
+          Review licensing clearance and release qualification before publishing this draft.
+          "@
+          $notes | Set-Content -LiteralPath notes.txt -Encoding utf8
+          $assets = @(Get-ChildItem -LiteralPath assets -File | ForEach-Object FullName)
+          if ($assets.Count -ne 3) { throw 'Expected two archives and one checksum file.' }
+          gh release create $env:RELEASE_TAG @assets --verify-tag --draft --prerelease --title "LODForge $env:RELEASE_TAG (experimental)" --notes-file notes.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Draft creation failed; inspect any existing draft before retrying.' }

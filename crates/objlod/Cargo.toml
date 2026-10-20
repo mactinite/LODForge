@@ -1,0 +1,15 @@
+[package]
+name = "lodforge-objlod"
+version = "0.1.0"
+edition.workspace = true
+license = "GPL-3.0-only"
+description = "Object LOD meshes (.bto): export and atlas-map parsing, reference placement, LOD model merging and BTO writing, from the scrubbed object LOD specification; contains MPL-2.0 xEdit-derived files (atlas_build.rs, source.rs) and AnvilLOD-derived code (GPL-3.0-only)"
+
+[dependencies]
+rayon.workspace = true
+thiserror.workspace = true
+lodforge-nif.workspace = true
+lodforge-btr.workspace = true
+lodforge-grass.workspace = true
+half.workspace = true
+lodforge-esp.workspace = true

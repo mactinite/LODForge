@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LODForge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">LODForge <span class="sub">distant LOD for Skyrim SE</span></div>
+  <ol class="steps" id="steps">
+    <li data-step="0">Instance</li>
+    <li data-step="1">Worldspaces</li>
+    <li data-step="2">Options</li>
+    <li data-step="3">Output</li>
+    <li data-step="4">Build</li>
+  </ol>
+</header>
+
+<main>
+  <section class="page" data-page="0">
+    <h1>Which Mod Organizer instance?</h1>
+    <p class="hint">Point at the portable MO2 folder (the one with ModOrganizer.exe, mods\ and profiles\). The game is taken from its Stock Game folder.</p>
+    <label>Instance folder <input id="instance" placeholder="D:\Modlists\skyrim-cs" spellcheck="false"></label>
+    <div class="row">
+      <label>Profile <select id="profile"></select></label>
+      <button id="scan" class="secondary">Scan load order</button>
+    </div>
+    <div id="scanResult" class="card hidden"></div>
+  </section>
+
+  <section class="page hidden" data-page="1">
+    <h1>Which worldspaces?</h1>
+    <p class="hint">Only worldspaces with a lodsettings file can have LOD. Tamriel is the big one; the rest take seconds.</p>
+    <div class="row"><button id="allWorlds" class="link">Select all</button><button id="noWorlds" class="link">None</button></div>
+    <div id="worlds" class="grid"></div>
+  </section>
+
+  <section class="page hidden" data-page="2">
+    <h1>What to generate</h1>
+    <h2>LOD style</h2>
+    <div class="grid two">
+      <label class="check card"><input type="radio" name="mode" value="xlodgen" checked><span><b>xLODGen style</b><br>Terrain, object and tree LOD like xLODGen. No plugins.</span></label>
+      <label class="check card"><input type="radio" name="mode" value="dyndolod"><span><b>DynDOLOD style</b><br>Object LOD with DynDOLOD's rules and LOD models, plus dynamic LOD plugins and occlusion. Reads DynDOLOD's configuration from tools\DynDOLOD.</span></label>
+    </div>
+    <div id="dynOptions" class="indent hidden">
+      <div class="row">
+        <label>Preset <select id="preset"><option>Low</option><option selected>Medium</option><option>High</option></select></label>
+      </div>
+      <label class="check"><input type="checkbox" id="plugins" checked> <span>Dynamic LOD: DynDOLOD.esm, DynDOLOD.esp and the DynDOLOD DLL NG data files</span></label>
+      <label class="check"><input type="checkbox" id="occlusion" checked> <span>Occlusion: Occlusion.esp from the new terrain and object LOD</span></label>
+      <p class="hint">Earlier LOD output enabled in the profile (LODForge mods, DynDOLOD output) is not read.</p>
+    </div>
+    <h2>Stages</h2>
+    <div class="grid two">
+      <label class="check card"><input type="checkbox" id="terrain" checked><span><b>Terrain LOD</b><br>Meshes plus diffuse and normal textures for every LOD level.</span></label>
+      <label class="check card"><input type="checkbox" id="objects" checked><span><b>Object LOD</b><br>Distant buildings, rocks and mountains with the texture atlas.</span></label>
+      <label class="check card"><input type="checkbox" id="trees" checked><span><b>Tree LOD</b><br>Billboard trees. Needs billboards: from the option below, or installed ones (e.g. TexGen output).</span></label>
+      <label class="check card"><input type="checkbox" id="texgen"><span><b>Tree billboards</b><br>Render tree and trunk billboards from the load order first (LODForge's TexGen), so Tree LOD does not depend on installed billboards.</span></label>
+    </div>
+    <h2>Grass LOD</h2>
+    <div class="row">
+      <label>Grass <select id="grass">
+        <option value="off" selected>No grass LOD</option>
+        <option value="go">Grass Optimizations LOD meshes (Community Shaders)</option>
+        <option value="bto">Grass in object LOD (DynDOLOD style)</option>
+      </select></label>
+      <label id="grassSourceBox" class="hidden">Placements <select id="grassSource">
+        <option value="auto" selected>Grass cache (NGIO precache)</option>
+        <option value="cache">Grass cache only</option>
+      </select></label>
+      <label id="grassDensityBox" class="hidden">Density % <input id="grassDensity" type="number" min="1" max="100" value="50" style="width:90px"></label>
+    </div>
+    <p class="hint" id="grassHint">Grass Optimizations (Community Shaders) shows grass far out with NGIO's extended grass distance and swaps in these crossed-plane meshes; no grass cache is needed.</p>
+    <h2>Seasons</h2>
+    <p class="hint" id="seasonHint">Seasons need swap files in Data\Seasons. The default season is always built.</p>
+    <div id="seasons" class="row"></div>
+  </section>
+
+  <section class="page hidden" data-page="3">
+    <h1>Where should the output go?</h1>
+    <label class="check"><input type="radio" name="dest" value="mo2" checked> <span>Into an MO2 mod</span></label>
+    <div class="indent">
+      <label>Mod name <input id="modName" value="LODForge Output" spellcheck="false"></label>
+      <label class="check"><input type="checkbox" id="enable"> <span>Enable it in the profile (MO2 must be closed)</span></label>
+    </div>
+    <label class="check"><input type="radio" name="dest" value="folder"> <span>Into a folder</span></label>
+    <div class="indent"><label>Folder <input id="outFolder" placeholder="D:\LOD\Data" spellcheck="false"></label></div>
+    <div id="review" class="card"></div>
+  </section>
+
+  <section class="page hidden" data-page="4">
+    <h1 id="buildTitle">Building&hellip;</h1>
+    <div class="progress"><div id="bar"></div></div>
+    <p id="buildSummary" class="hint"></p>
+    <table id="stages"><thead><tr><th>Worldspace</th><th>Stage</th><th>Season</th><th class="num">Time</th></tr></thead><tbody></tbody></table>
+    <details><summary>Log</summary><pre id="log"></pre></details>
+  </section>
+</main>
+
+<footer>
+  <span id="status"></span>
+  <div>
+    <button id="back" class="secondary">Back</button>
+    <button id="next">Next</button>
+    <button id="cancel" class="danger hidden">Cancel</button>
+  </div>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>

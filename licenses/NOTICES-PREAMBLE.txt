@@ -1,0 +1,106 @@
+LODForge - third-party notices
+==============================
+
+LODForge is free software, released under the GNU General Public License,
+version 3 only (GPL-3.0-only). The license text is in LICENSE. This file lists
+the third-party material LODForge incorporates or depends on and the terms it
+is used under. It is kept current by scripts/third_party_notices.py (part 2 is
+generated; this preamble is maintained by hand).
+
+------------------------------------------------------------------------------
+PART 1. SOURCE-LEVEL COMPONENTS INCORPORATED INTO LODFORGE
+------------------------------------------------------------------------------
+
+1. AnvilLOD - GPL-3.0-only
+   Copyright (c) 2026 CageTV
+   https://github.com/CageTV/AnvilLOD (commit 606eece, v0.2.60)
+
+   Parts of LODForge's occlusion and object-LOD code were ported from AnvilLOD
+   (C#) to Rust. Each affected file names its AnvilLOD source file in its
+   header and marks the modifications, as GPL-3.0 section 5(a) requires:
+
+     crates/dyndolod/src/occlusion/grid.rs        (Core/Occlusion/OcclusionGrid.cs)
+     crates/dyndolod/src/occlusion/tvdt.rs        (Core/Occlusion/TvdtData.cs)
+     crates/dyndolod/src/occlusion/visibility.rs  (Core/Occlusion/OcclusionCalculator.cs)
+     crates/objlod/src/build.rs                   (Meshes/BtoBuilder.cs)
+     crates/objlod/src/grid.rs                    (Core/World/LodSettings.cs, LodGrid.cs)
+     crates/objlod/src/hidden.rs                  (Meshes/BtoBuilder.cs, terrain test)
+     crates/objlod/src/lib.rs                     (summary of the ports in this crate)
+     crates/objlod/src/material.rs                (Meshes/ShaderGuard.cs)
+     crates/objlod/src/mesh.rs                    (Meshes/Nif/NifGeometryReader.cs)
+     crates/objlod/src/refs.rs                    (Core/World/QuadBucketer.cs)
+     crates/objlod/src/transform.rs               (Meshes/Transforms.cs)
+
+   AnvilLOD's license is the same GPL-3.0-only as LODForge's; its full text is
+   licenses/GPL-3.0-only.txt.
+
+2. xEdit (TES5Edit) - Mozilla Public License 2.0
+   Copyright the xEdit contributors (ElminsterAU, Hlp, Zilav, Sharlikran,
+   Sheson and others); https://github.com/TES5Edit/TES5Edit
+   (Core/wbLOD.pas at commit 9fb016884bec138ea6c7b872cec831537d464c3e)
+
+   Three LODForge files are Rust ports of the tree LOD, texture-atlas layout
+   and object-LOD export routines of wbLOD.pas:
+
+     crates/treelod/src/lib.rs
+     crates/objlod/src/atlas_build.rs
+     crates/objlod/src/source.rs
+
+   These files remain under the MPL-2.0 (licenses/MPL-2.0.txt). The MPL 2.0 is
+   not "Incompatible With Secondary Licenses", so under its section 3.3 they are
+   distributed as part of this GPL-3.0-only Larger Work; recipients may use these
+   three files under either the MPL-2.0 or the GPL-3.0. Their source form is
+   this repository. Modifications are marked in the files.
+
+3. S-hull Delaunay triangulator - "contributors beerware license"
+   Copyright s-hull.org 2011; contributors: Phil Atkin, Dr Sinclair
+   http://www.s-hull.org/
+
+   crates/objlod/src/delaunay.rs is a Rust port of the s-hull.org C#
+   triangulator (the same component LODGen bundles, whose license file names
+   these terms). The notice is kept in the file header.
+
+4. Terra 0.7 - public domain
+   Michael Garland and Paul Heckbert, https://mgarland.org/software/terra.html
+
+   The greedy-insertion terrain mesher in crates/btr follows Terra's published
+   algorithm and sources (GreedyInsert, Heap, Map, Subdivision, Quadedge),
+   which the authors placed in the public domain. Credited, no license terms.
+
+5. "Linear-Speed Vertex Cache Optimisation" - algorithm credit
+   Tom Forsyth, 2006. crates/btr/src/vcache.rs implements the published
+   algorithm from its description; no code was copied.
+
+6. NIF format specification (niftools nif.xml, commit 028cb35b)
+   https://github.com/niftools/nifxml
+
+   Used as the specification for crates/nif's reader and writer. No text or
+   code from nif.xml is included in LODForge.
+
+------------------------------------------------------------------------------
+NOT COVERED BY THESE NOTICES
+------------------------------------------------------------------------------
+
+- DynDOLOD, TexGen, xLODGen and LODGen (sheson, zilav, Ehamloptiran and the
+  xEdit team): LODForge contains no code from these tools and ships none of
+  their files. It reads the LOD meshes, rule files, configuration and
+  billboards installed in the user's own setup (DynDOLOD Resources, LOD packs,
+  TexGen output) at run time, the way those tools themselves do. Their licenses
+  (DynDOLOD Resources: CC BY-NC-SA; the tools: MPL 1.1 per their shipped
+  license file) govern those files, not LODForge.
+- The Elder Scrolls V: Skyrim Special Edition and its game data: LODForge
+  reads the user's installed plugins and archives; it includes no game assets.
+- Microsoft Edge WebView2 Runtime: the LODForge UI (Tauri) renders in the
+  WebView2 runtime installed on the user's system. It is not distributed with
+  LODForge.
+- What LODForge generates: generated LOD files can contain other mods' assets
+  (textures, meshes) and must not be redistributed without those authors'
+  permission.
+- Reference and golden data used during development (outputs of the reference
+  tools, test profiles, reverse-engineering notes) are not part of the
+  repository or the releases.
+
+Corresponding Source for binary releases: every release carries the source
+archive of the exact tagged commit (see docs/releases.md); third-party crates
+are fetched by Cargo from crates.io at the versions pinned in Cargo.lock and
+their source can be vendored with `cargo vendor`.

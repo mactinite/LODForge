@@ -1,0 +1,394 @@
+//! `lodforge lod-models` and the `build --lod-models` stage: LOD models generated from the full
+//! models (`lodforge-lodmodel`) for the bases DynDOLOD's rules would give object LOD but no LOD
+//! model is installed for, so a build does not need DynDOLOD Resources
+//! (docs/re/own-lod-resources.md).
+//!
+//! Output: `meshes\lod\lodforge\<folder of the full model>\<stem>_lod_<N>.nif` in a Data folder,
+//! the names DynDOLOD's own LOD model discovery uses (`Folder4=meshes\lod`, bare file name), plus
+//! `<stem>_<CRC32>_lod_<N>.nif` where several different full models share a file name. A cache
+//! folder keyed by the full model's CRC32 and the generator version avoids regenerating.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use rayon::prelude::*;
+
+use lodforge_dyndolod::lodmodels::{LodIndex, Snow, crc32, lod_set};
+use lodforge_dyndolod::rules::{Level, select_mask_rule};
+use lodforge_esp::Worldspace;
+use lodforge_esp::record::FLAG_DELETED;
+
+use crate::dyndolod_build::Config;
+use crate::profile::{Profile, ProfileArgs};
+
+/// Selection policy: the smallest base size (largest OBND extent times the largest reference
+/// scale, game units) that gets a generated model level 0, 1, 2.
+#[derive(Debug, Clone, Copy)]
+pub struct Policy {
+    pub min_size: [f32; 3],
+    /// Generate every level the rules ask for, also where an installed LOD model exists (for
+    /// comparisons; written under `meshes\lod\lodforge` all the same).
+    pub all: bool,
+}
+
+pub const DEFAULT_MIN_SIZE: [f32; 3] = [256.0, 512.0, 1024.0];
+
+#[derive(clap::Args)]
+pub struct Args {
+    #[command(flatten)]
+    pub profile: ProfileArgs,
+    #[arg(long, value_delimiter = ',', default_value = "Tamriel")]
+    pub worlds: Vec<String>,
+    /// DynDOLOD's `Edit Scripts\DynDOLOD` folder (default: `<instance>\tools\DynDOLOD\Edit Scripts\DynDOLOD`).
+    #[arg(long)]
+    pub dyndolod_config: Option<PathBuf>,
+    #[arg(long, default_value = "Medium")]
+    pub preset: String,
+    /// Data folder to write the models into.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Cache folder (default: none).
+    #[arg(long)]
+    pub cache: Option<PathBuf>,
+    /// Smallest base size for levels 0, 1, 2 (comma separated).
+    #[arg(long, value_delimiter = ',')]
+    pub min_size: Option<Vec<f32>>,
+    /// Generate every level the rules use, also where a LOD model is installed.
+    #[arg(long)]
+    pub all: bool,
+    /// Compare triangle counts and coverage with the LOD models of this mod (e.g. DynDOLOD
+    /// Resources), read from `<instance>\mods\<name>` (never copied).
+    #[arg(long)]
+    pub reference_mod: Option<String>,
+    /// Geometric error limit per level 0, 1, 2 in game units (default: `lodforge_lodmodel::LEVELS`).
+    #[arg(long, value_delimiter = ',')]
+    pub max_error: Option<Vec<f32>>,
+    /// Triangle cap per level as a share of the source.
+    #[arg(long, value_delimiter = ',')]
+    pub max_ratio: Option<Vec<f32>>,
+    /// Write per-model results as JSON.
+    #[arg(long)]
+    pub json: Option<PathBuf>,
+}
+
+/// Level parameters with command-line overrides.
+pub fn level_params(max_error: Option<&[f32]>, max_ratio: Option<&[f32]>) -> [lodforge_lodmodel::LevelParams; 3] {
+    let mut l = lodforge_lodmodel::LEVELS;
+    for (k, p) in l.iter_mut().enumerate() {
+        if let Some(v) = max_error.and_then(|v| v.get(k).or(v.last())) {
+            p.max_error = *v;
+        }
+        if let Some(v) = max_ratio.and_then(|v| v.get(k).or(v.last())) {
+            p.max_ratio = *v;
+        }
+    }
+    l
+}
+
+/// One full model to make LOD levels for.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Item {
+    /// Data-relative full model path, lower-case.
+    pub model: String,
+    pub stem: String,
+    pub crc: u32,
+    /// Name prefix of the output files: `<stem>` or `<stem>_<CRC32>`.
+    pub name: String,
+    /// Model levels to generate.
+    pub levels: Vec<u8>,
+    /// Size used for the policy (game units).
+    pub size: f32,
+    /// OBND extent (x, y, z) times the largest reference scale.
+    pub extent: [f32; 3],
+    pub refs: usize,
+    pub bases: Vec<String>,
+}
+
+/// Bases the rules give object LOD levels to that have no installed LOD model for them.
+pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) -> Vec<Item> {
+    // Per base: references and the largest scale.
+    let mut used: HashMap<u32, (usize, f32)> = HashMap::new();
+    for w in worlds {
+        for q in w.refs.values() {
+            if q.flags & FLAG_DELETED != 0 {
+                continue;
+            }
+            let e = used.entry(q.base).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 = e.1.max(if q.has_scale { q.scale } else { 1.0 });
+        }
+    }
+    // Per full model: the levels any of its bases needs.
+    let mut by_model: BTreeMap<String, (HashSet<u8>, [f32; 3], usize, Vec<String>)> = BTreeMap::new();
+    crate::dyndolod_build::with_resolver(p, c, |r| {
+        for (id, (refs, scale)) in &used {
+            let Some(b) = c.bases.get(id) else { continue };
+            if lodforge_dyndolod::assign::is_tree(b) || b.model.is_empty() {
+                continue;
+            }
+            let edid = b.editor_id.to_ascii_lowercase();
+            if c.ignore_edid.iter().any(|e| edid.contains(e.as_str())) {
+                continue;
+            }
+            let model = lodforge_dyndolod::bases::model_path(&b.model);
+            if !policy.all && skip_model(&model) {
+                continue;
+            }
+            let below = model.strip_prefix("meshes\\").unwrap_or(&model).to_string();
+            // The rule as it would apply if every model level existed.
+            let Some(rule) = select_mask_rule(&c.rules, &below, false, &|l| !matches!(l, Level::Billboard(_) | Level::None)) else { continue };
+            let lod = r.resolve(b);
+            let ext = [0, 1, 2].map(|k| f32::from(b.bounds[k + 3]) - f32::from(b.bounds[k]));
+            let size = ext.iter().copied().fold(0.0f32, f32::max) * scale;
+            let mut need = HashSet::new();
+            for l in &rule.levels[..3] {
+                if let Level::Model(k) = *l
+                    && k < 3
+                    && (policy.all || lod.levels[usize::from(k)].is_none())
+                    && size >= policy.min_size[usize::from(k)]
+                {
+                    need.insert(k);
+                }
+            }
+            if need.is_empty() {
+                continue;
+            }
+            let e = by_model.entry(model).or_insert((HashSet::new(), [0.0; 3], 0, Vec::new()));
+            e.0.extend(need);
+            for k in 0..3 {
+                e.1[k] = e.1[k].max(ext[k] * scale);
+            }
+            e.2 += refs;
+            e.3.push(b.editor_id.clone());
+        }
+    });
+    // CRC32 of each full model (the original one for a PGPatcher-patched mesh, as discovery
+    // uses it); several full models with one file name get CRC-named outputs.
+    let models: Vec<(String, (HashSet<u8>, [f32; 3], usize, Vec<String>))> = by_model.into_iter().collect();
+    let crcs: Vec<Option<u32>> = models.par_iter().map(|(m, _)| p.vfs.read(m).ok().flatten().map(|b| c.parallax.discovery_crc(m, crc32(&b)))).collect();
+    let mut stems: HashMap<String, HashSet<u32>> = HashMap::new();
+    for ((m, _), crc) in models.iter().zip(&crcs) {
+        if let Some(c) = crc {
+            stems.entry(stem_of(m)).or_default().insert(*c);
+        }
+    }
+    let mut out = Vec::new();
+    for ((model, (levels, extent, refs, bases)), crc) in models.into_iter().zip(crcs) {
+        let size = extent.iter().copied().fold(0.0f32, f32::max);
+        let Some(crc) = crc else { continue };
+        let stem = stem_of(&model);
+        let name = if stems[&stem].len() > 1 { format!("{stem}_{crc:08x}") } else { stem.clone() };
+        let mut levels: Vec<u8> = levels.into_iter().collect();
+        levels.sort_unstable();
+        out.push(Item { model, stem, crc, name, levels, size, extent, refs, bases });
+    }
+    out
+}
+
+/// Models that never get a generated static LOD model: markers (invisible in game) and
+/// effects (animated or effect-shader meshes, which belong to dynamic LOD).
+fn skip_model(model: &str) -> bool {
+    let name = model.rsplit('\\').next().unwrap_or(model);
+    name.contains("marker") || model.contains("\\markers\\") || model.contains("\\effects\\")
+}
+
+fn stem_of(model: &str) -> String {
+    model.rsplit('\\').next().unwrap_or(model).trim_end_matches(".nif").to_string()
+}
+
+/// `meshes\lod\lodforge\<folder of the full model below meshes>\`.
+fn out_dir(model: &str) -> String {
+    let below = model.strip_prefix("meshes\\").unwrap_or(model);
+    let dir = below.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+    if dir.is_empty() { "meshes\\lod\\lodforge".into() } else { format!("meshes\\lod\\lodforge\\{dir}") }
+}
+
+/// One generated level.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Made {
+    pub path: String,
+    pub level: u8,
+    pub source_triangles: usize,
+    pub triangles: usize,
+    pub cached: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct Report {
+    pub made: Vec<(usize, Made)>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Generates the planned levels into `out` (a Data folder), through `cache` when given.
+pub fn generate(p: &Profile, items: &[Item], out: &Path, cache: Option<&Path>, params: &[lodforge_lodmodel::LevelParams; 3]) -> Report {
+    let results: Vec<(usize, Result<Vec<Made>, String>)> = items
+        .par_iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let r = (|| -> Result<Vec<Made>, String> {
+                let bytes = p.vfs.read(&it.model).ok().flatten().ok_or("full model missing")?;
+                let mut made = Vec::new();
+                let dir = out_dir(&it.model);
+                for &k in &it.levels {
+                    let rel = format!("{dir}\\{}_lod_{k}.nif", it.name);
+                    let dest = out.join(&rel);
+                    let pk = params[usize::from(k)];
+                    let key = cache.map(|c| c.join(format!("v{}", lodforge_lodmodel::GENERATOR_VERSION)).join(format!("{:08x}_{k}_{:08x}.nif", it.crc, crc32(format!("{pk:?}").as_bytes()))));
+                    let (data, st, cached) = match key.as_ref().and_then(|k| std::fs::read(k).ok()) {
+                        Some(d) => {
+                            let tris = lodforge_nif::parse(&d).map(|n| n.blocks.iter().map(|b| if let lodforge_nif::Block::TriShape(s) = b { s.triangles.len() } else { 0 }).sum()).unwrap_or(0);
+                            (d, lodforge_lodmodel::Stats { triangles: tris, ..Default::default() }, true)
+                        }
+                        None => {
+                            let (d, st) = lodforge_lodmodel::generate(&bytes, &params[usize::from(k)], &it.name).map_err(|e| format!("{e:?}"))?;
+                            if let Some(k) = &key {
+                                let _ = std::fs::create_dir_all(k.parent().unwrap()).and_then(|_| std::fs::write(k, &d));
+                            }
+                            (d, st, false)
+                        }
+                    };
+                    std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+                    std::fs::write(&dest, &data).map_err(|e| e.to_string())?;
+                    made.push(Made { path: rel, level: k, source_triangles: st.source_triangles, triangles: st.triangles, cached });
+                }
+                Ok(made)
+            })();
+            (i, r)
+        })
+        .collect();
+    let mut rep = Report::default();
+    for (i, r) in results {
+        match r {
+            Ok(m) => rep.made.extend(m.into_iter().map(|m| (i, m))),
+            Err(e) => rep.failed.push((items[i].model.clone(), e)),
+        }
+    }
+    rep
+}
+
+/// LOD models of a mod folder (reference for comparisons): an index over its `meshes`.
+fn reference_index(root: &Path) -> (LodIndex, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut stack = vec![(root.join("meshes"), "meshes".to_string())];
+    while let Some((dir, rel)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            let r = format!("{rel}\\{n}");
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push((e.path(), r));
+            } else if n.ends_with(".nif") {
+                paths.push(r);
+            }
+        }
+    }
+    let idx = LodIndex::scan(paths.iter().map(String::as_str), &["meshes".to_string()], &[], &Default::default());
+    (idx, paths)
+}
+
+fn find_dir_ci(root: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(root).ok()?.flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name)).map(|e| e.path())
+}
+
+fn nif_triangles(path: &Path) -> usize {
+    std::fs::read(path).ok().and_then(|b| lodforge_nif::parse(&b).ok()).map(|n| n.blocks.iter().map(|b| if let lodforge_nif::Block::TriShape(s) = b { s.triangles.len() } else { 0 }).sum()).unwrap_or(0)
+}
+
+pub fn run(a: &Args) -> Result<()> {
+    let t = Instant::now();
+    let p = a.profile.open()?;
+    let dir = a.dyndolod_config.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
+    let c = Config::load(&p, &dir, &a.preset, false)?;
+    let all_worlds = lodforge_esp::scan_worldspaces(&p.load_order)?;
+    let worlds: Vec<&Worldspace> = a.worlds.iter().filter_map(|n| all_worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(n))).collect();
+    let min_size = a.min_size.as_ref().map(|v| [0, 1, 2].map(|k| v.get(k).or(v.last()).copied().unwrap_or(0.0))).unwrap_or(DEFAULT_MIN_SIZE);
+    let policy = Policy { min_size, all: a.all };
+    let items = plan(&p, &c, &worlds, &policy);
+    let n_levels: usize = items.iter().map(|i| i.levels.len()).sum();
+    println!("plan: {} full models, {} levels, {} references (min size {:?}) in {} ms", items.len(), n_levels, items.iter().map(|i| i.refs).sum::<usize>(), min_size, t.elapsed().as_millis());
+    let t = Instant::now();
+    let params = level_params(a.max_error.as_deref(), a.max_ratio.as_deref());
+    let rep = generate(&p, &items, &a.out, a.cache.as_deref(), &params);
+    let gen_ms = t.elapsed().as_millis();
+    let mut src = [0usize; 3];
+    let mut ours = [0usize; 3];
+    let mut count = [0usize; 3];
+    for (_, m) in &rep.made {
+        let k = usize::from(m.level);
+        src[k] += m.source_triangles;
+        ours[k] += m.triangles;
+        count[k] += 1;
+    }
+    println!("generated {} files in {gen_ms} ms ({} from cache), {} models failed", rep.made.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len());
+    for k in 0..3 {
+        println!("  level {k}: {:>5} models, {:>9} source triangles -> {:>8} ({:.1}%), {:.0} per model", count[k], src[k], ours[k], 100.0 * ours[k] as f64 / src[k].max(1) as f64, ours[k] as f64 / count[k].max(1) as f64);
+    }
+    for (m, e) in rep.failed.iter().take(10) {
+        println!("  failed {m}: {e}");
+    }
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    if let Some(name) = &a.reference_mod {
+        let root = a.profile.instance.join("mods").join(name);
+        let (ridx, _) = reference_index(&root);
+        let mroot = find_dir_ci(&root, "meshes").unwrap_or(root.join("meshes"));
+        // Per level: models where both exist, triangles ours vs reference; coverage both ways.
+        let mut both = [0usize; 3];
+        let mut ours_t = [0usize; 3];
+        let mut ref_t = [0usize; 3];
+        let mut only_ours = [0usize; 3];
+        let mut covered = 0usize;
+        let mut ref_items = 0usize;
+        let mut sizes: BTreeMap<u32, [usize; 2]> = BTreeMap::new();
+        let made_by: HashMap<(usize, u8), &Made> = rep.made.iter().map(|(i, m)| ((*i, m.level), m)).collect();
+        for (i, it) in items.iter().enumerate() {
+            let rl = lod_set(&ridx, &it.stem, Some(it.crc), [Snow::None; 4], false);
+            let has_ref = rl.iter().any(Option::is_some);
+            ref_items += usize::from(has_ref);
+            let bucket = (it.size.max(1.0).log2().floor() as u32).min(16);
+            let e = sizes.entry(bucket).or_default();
+            e[0] += 1;
+            e[1] += usize::from(has_ref);
+            let mut rt = [0usize; 3];
+            for &k in &it.levels {
+                let ku = usize::from(k);
+                let Some(m) = made_by.get(&(i, k)) else { continue };
+                match &rl[ku] {
+                    Some(r) => {
+                        let rel = r.strip_prefix("meshes\\").unwrap_or(r);
+                        let tris = nif_triangles(&mroot.join(rel));
+                        rt[ku] = tris;
+                        both[ku] += 1;
+                        ours_t[ku] += m.triangles;
+                        ref_t[ku] += tris;
+                    }
+                    None => only_ours[ku] += 1,
+                }
+            }
+            if has_ref {
+                covered += 1;
+            }
+            if a.json.is_some() {
+                rows.push(serde_json::json!({ "item": it, "reference_levels": rl, "reference_triangles": rt }));
+            }
+        }
+        println!("\nagainst {name}: {covered}/{} planned models have a reference LOD model", items.len());
+        for k in 0..3 {
+            println!(
+                "  level {k}: {:>5} with both, triangles ours {:>8} vs reference {:>8} (x{:.2}); {:>5} ours only",
+                both[k], ours_t[k], ref_t[k], ours_t[k] as f64 / ref_t[k].max(1) as f64, only_ours[k]
+            );
+        }
+        println!("  planned models by size (2^n units): share with a reference model");
+        for (b, [n, r]) in &sizes {
+            println!("    2^{b:<2} {n:>5} models, {r:>5} with reference ({:.0}%)", 100.0 * *r as f64 / (*n).max(1) as f64);
+        }
+        let _ = ref_items;
+    }
+    if let Some(j) = &a.json {
+        let made: Vec<serde_json::Value> = rep.made.iter().map(|(i, m)| serde_json::json!({ "model": items[*i].model, "made": m })).collect();
+        std::fs::write(j, serde_json::to_vec_pretty(&serde_json::json!({ "items": rows, "made": made }))?).with_context(|| format!("writing {}", j.display()))?;
+    }
+    Ok(())
+}

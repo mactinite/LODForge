@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
+      - name: Test release guards
+        run: .\scripts\Test-ReleaseTools.ps1
+      - name: Check third-party notices are current
+        run: |
+          python -I scripts/third_party_notices.py --check
+          if ($LASTEXITCODE -ne 0) { throw 'THIRD-PARTY-NOTICES.txt is stale: run scripts/third_party_notices.py and commit the result.' }
+      - name: Test workspace
+        run: |
+          cargo test --locked --workspace --all-targets
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace tests failed.' }
+      - name: Lint workspace
+        run: |
+          cargo clippy --locked --workspace --all-targets
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace lint failed.' }
+      - name: Build API documentation
+        run: .\scripts\Check.ps1 -Check Docs
+      - name: Formatting (advisory until existing debt is resolved)
+        continue-on-error: true
+        run: .\scripts\Check.ps1 -Check Format
+      - name: Build production CLI and UI
+        run: |
+          cargo build --locked --release -p lodforge -p lodforge-ui --features lodforge-ui/custom-protocol
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
+      - name: Verify portable packaging without distributing it
+        run: .\scripts\New-ReleaseArchive.ps1
