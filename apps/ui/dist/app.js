@@ -122,7 +122,7 @@ function selection() {
 function review() {
   const s = selection();
   const grass = { go: "Grass Optimizations meshes", bto: "grass in object LOD" }[s.grass];
-  const materials = s.materials === "pbr" ? "PBR (Community Shaders)" : "complex material";
+  const materials = s.materials === "pbr" ? "PBR (Community Shaders)" : "standard (non-PBR)";
   const stages = [s.texgen && "billboards", s.terrain && "terrain", s.objects && `objects (DynDOLOD ${s.preset})`, s.trees && "trees",
     grass, s.objects && s.plugins && "dynamic LOD plugins", s.objects && s.occlusion && "occlusion"].filter(Boolean);
   $("review").innerHTML = `<b>Review</b><br>${s.worlds.length} worldspace(s): ${s.worlds.join(", ") || "none"}<br>Stages: ${stages.join(", ") || "none"}<br>Materials: ${materials}<br>Seasons: default${s.seasons.length ? " + " + s.seasons.join(", ") : ""}<br>Output: ${s.mo2_mod ? `MO2 mod "${s.mo2_mod}"${s.enable ? " (enabled)" : ""}` : s.out || "(choose a folder)"}`;
@@ -207,7 +207,8 @@ if (!$("grass").value) $("grass").value = "off";
 syncGrass();
 try { localStorage.removeItem("lodforge.mode"); } catch (_) {}
 {
-  const r = document.querySelector(`input[name=materials][value="${load("materials", "pbr")}"]`);
+  const saved = load("materials", "pbr");
+  const r = document.querySelector(`input[name=materials][value="${saved === "complex" ? "standard" : saved}"]`);
   if (r) r.checked = true;
   document.querySelectorAll("input[name=materials]").forEach((el) => el.addEventListener("change", () => store("materials", el.value)));
 }

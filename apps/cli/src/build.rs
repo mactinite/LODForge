@@ -69,11 +69,12 @@ pub struct Args {
     /// diffuse only) or `none`.
     #[arg(long, value_enum, default_value = "full")]
     pub terrain_mips: crate::terrain_textures::TerrainMips,
-    /// Material setup of the list. PBR (Community Shaders with PBR): pbr_lod texture twins, PBR
-    /// texture sets and linear copies from the textures\pbr\ sources. Complex material: plain
-    /// (ENB complex material or vanilla) textures only; textures\pbr\ sources are ignored.
-    /// `complex` means "not PBR": DynDOLOD documents no extra object-LOD handling for ENB
-    /// complex material (complex grass is detected per shader either way).
+    /// Material setup of the list. `pbr` (Community Shaders with PBR): pbr_lod texture twins,
+    /// PBR texture sets and linear copies from the textures\pbr\ sources. `standard` (non-PBR:
+    /// ENB complex material, parallax or vanilla): plain textures only, textures\pbr\ sources
+    /// ignored. LOD carries no complex-material or parallax maps in either case, so `standard`
+    /// is simply "not PBR" (`complex` is accepted as an alias). Complex grass is detected per
+    /// shader either way.
     #[arg(long, value_enum, default_value = "pbr")]
     pub materials: Materials,
 }
@@ -90,8 +91,9 @@ pub enum Materials {
     /// Community Shaders with PBR (`textures\pbr\` sources, `pbr_lod` twins, `linear.dds` copies).
     #[default]
     Pbr,
-    /// ENB complex material or vanilla shading: plain textures only.
-    Complex,
+    /// Non-PBR (ENB complex material, parallax or vanilla shading): plain textures only.
+    #[value(alias = "complex")]
+    Standard,
 }
 
 impl Materials {
@@ -188,8 +190,8 @@ pub fn run(a: &Args) -> Result<()> {
     let worlds = if a.worlds.is_empty() { lod_worlds(&p)? } else { a.worlds.clone() };
     if !a.json {
         println!("LODForge build: {} worldspace(s) {:?}, seasons {:?}, output {}", worlds.len(), worlds, a.seasons, out.display());
-        if a.materials == Materials::Complex {
-            println!(r"materials: complex (plain textures; textures\pbr\ sources ignored)");
+        if a.materials == Materials::Standard {
+            println!(r"materials: standard (non-PBR; plain textures, textures\pbr\ sources ignored)");
         }
     }
     let seasons: Vec<Option<String>> = std::iter::once(None).chain(a.seasons.iter().map(|s| Some(s.to_uppercase()))).collect();

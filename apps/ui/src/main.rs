@@ -203,7 +203,8 @@ struct BuildRequest {
     /// Occlusion.esp (`--no-occlusion` when false).
     #[serde(default = "yes")]
     occlusion: bool,
-    /// `pbr` (Community Shaders with PBR) or `complex` (ENB or no shader mod): `build --materials`.
+    /// `pbr` (Community Shaders with PBR) or `standard` (non-PBR: ENB complex material, parallax or
+    /// vanilla): `build --materials`.
     #[serde(default)]
     materials: Option<String>,
     /// Grass LOD: `off`, `bto` (grass in object LOD) or `go` (Grass Optimizations meshes).

@@ -21,7 +21,7 @@ Use a separate test profile and backed-up saves. See the
 
 PBR-compatible output follows DynDOLOD's treatment of PBR inputs. It does **not**
 mean every distant mesh uses a True PBR shader. Lists without Community Shaders
-PBR use `--materials complex` for plain output (see below). Grass Optimizations meshes and
+PBR use `--materials standard` for plain output (see below). Grass Optimizations meshes and
 DynDOLOD BTO grass are different output modes, not interchangeable parity tests.
 
 ## Requirements
@@ -72,12 +72,14 @@ Start with one worldspace and a new output folder:
 - Override nonstandard tool paths with `--dyndolod` (installation root) and
   `--dyndolod-config` (the `Edit Scripts\DynDOLOD` directory).
 - Use `--lod-models` to generate missing models, not to eliminate all external dependencies.
-- `--materials pbr|complex` (default `pbr`) picks the list's material setup. `pbr`
+- `--materials pbr|standard` (default `pbr`) picks the list's material setup. `pbr`
   (Community Shaders with PBR) makes `pbr_lod` texture twins, PBR texture sets and
-  `linear.dds` copies wherever a `textures\pbr\` source exists. `complex` (ENB complex
-  material or vanilla shading) writes plain textures only and ignores `textures\pbr\`
-  sources. It means "not PBR": DynDOLOD documents no extra object-LOD handling for
-  ENB complex material, and complex grass is detected per shader in both modes.
+  `linear.dds` copies wherever a `textures\pbr\` source exists. `standard` (non-PBR:
+  ENB complex material, parallax or vanilla shading) writes plain textures only and
+  ignores `textures\pbr\` sources. LOD carries no complex-material or parallax maps
+  (DynDOLOD documents no such object-LOD handling), so `standard` simply means "not
+  PBR"; `complex` is accepted as an alias. Complex grass is detected per shader in
+  both modes.
 
 Output is a **Data-layout folder**, suitable for installing as an MO2 mod.
 Alternatively, replace `--out` with `--mo2-mod 'LODForge Trial'`.

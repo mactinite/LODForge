@@ -51,10 +51,10 @@
     </div>
     <h2>Materials</h2>
     <div class="grid two">
-      <label class="check card"><input type="radio" name="materials" value="pbr" checked><span><b>PBR</b> (Community Shaders with PBR)</span></label>
-      <label class="check card"><input type="radio" name="materials" value="complex"><span><b>Complex material</b> (ENB, or no shader mod)</span></label>
+      <label class="check card"><input type="radio" name="materials" value="pbr" checked><span><b>PBR</b><br>Community Shaders with PBR</span></label>
+      <label class="check card"><input type="radio" name="materials" value="standard"><span><b>Standard (non-PBR)</b><br>ENB complex material, parallax or vanilla</span></label>
     </div>
-    <p class="hint">PBR builds the pbr_lod texture twins and PBR texture sets for Community Shaders; complex material keeps plain textures for ENB or vanilla lists.</p>
+    <p class="hint">PBR builds the pbr_lod texture twins and PBR texture sets from the textures\pbr\ sources. Standard writes plain textures only: LOD carries no complex-material or parallax maps, so this is what any non-PBR list gets.</p>
     <h2>Stages</h2>
     <div class="grid two">
       <label class="check card"><input type="checkbox" id="terrain" checked><span><b>Terrain LOD</b><br>Meshes plus diffuse and normal textures for every LOD level.</span></label>
