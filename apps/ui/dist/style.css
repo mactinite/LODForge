@@ -9,8 +9,10 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 "Segoe UI", system-ui, sans-serif; display: flex; flex-direction: column; height: 100vh; }
 header { padding: 14px 24px 0; background: var(--panel); border-bottom: 1px solid var(--line); }
-.brand { font-size: 18px; font-weight: 600; }
-.brand .sub { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .logo { width: 52px; height: 52px; flex: none; margin: -6px 0 -4px -6px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.18)); }
+.brand .name { font-size: 18px; font-weight: 600; line-height: 1.2; }
+.brand .sub { font-size: 13px; color: var(--muted); line-height: 1.2; }
 .steps { display: flex; gap: 4px; list-style: none; padding: 0; margin: 12px 0 0; counter-reset: s; }
 .steps li { counter-increment: s; padding: 8px 14px; color: var(--muted); border-bottom: 2px solid transparent; }
 .steps li::before { content: counter(s) ". "; }
