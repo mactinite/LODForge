@@ -14,7 +14,9 @@
 
 // The atlas planning (glow page included) lives in `object_atlas_plan` (object LOD stage
 // B2.4), the FlatTextures list, the grass header and the complex-grass lines below (B2.5 /
-// B2.6); `grass_lod1_nif` (`--grass go`) is still a stub. Helpers kept for it.
+// B2.6); `grass_lod1_nif` (`--grass go`, the Grass Optimizations far-LOD meshes) was rewritten
+// from Community Shaders' loader requirements (object-lod-spec 11.9). The allow below still
+// covers test-only helpers and atlas imports kept for the B2 stages.
 #![allow(dead_code, unused_imports)]
 
 use std::collections::{HashMap, HashSet};
@@ -1148,9 +1150,98 @@ impl BillboardDims {
 /// quad 1 rotated -90 degrees at `ShiftX`, bottom at `ShiftZ`; u = 0 at +X, v = 0 at the top),
 /// normals straight up like DynDOLOD's fixed-normal grass billboards, alpha tested, two-sided,
 /// under a BSFadeNode.
-#[allow(unused_variables)]
+///
+/// Every size and shift is multiplied by the sidecar's `Scale`. File layout (written from the
+/// requirements of Community Shaders' Grass Optimizations, `GrassMeshLibrary::LoadLODMesh` /
+/// `FindLODShape`, and the RunGrass vertex input; see object-lod-spec 11.9):
+///
+/// ```text
+/// BSFadeNode "<texture stem>"          identity transform
+/// └─ BSTriShape "GrassLOD1"            identity transform, 8 vertices / 4 triangles,
+///    │                                 position + UV + normal + colour (white, alpha 255)
+///    ├─ BSLightingShaderProperty       type 0, flags1 ZBuffer_Test, flags2 ZBuffer_Write |
+///    │  └─ BSShaderTextureSet          Double_Sided | Vertex_Colors; slot 0 `texture`, slot 1 `normal`
+///    └─ NiAlphaProperty                alpha test (> 128), no blending
+/// ```
+///
+/// Grass Optimizations accepts a LOD file only with exactly one BSTriShape and identity
+/// transforms on every object on the way to it, and draws it with the source grass shape's
+/// material (the LOD file's shader and textures are not used there; they matter to other
+/// readers of the file). The grass vertex shader reads POSITION, TEXCOORD0, NORMAL and COLOR,
+/// with colour alpha both scaling the texture alpha and weighting the wind, so the shape carries
+/// opaque white vertex colours.
 pub fn grass_lod1_nif(texture: &str, normal: Option<&str>, d: &BillboardDims) -> Result<Vec<u8>> {
-    todo!("stage B2 rewrite: grass_lod1_nif removed with the LODGen-derived object LOD builder")
+    use lodforge_nif::{AvObject, Block, LightingShader, Nif, Node, ObjectNet, TriShape, VertexDesc};
+
+    let s = if d.scale > 0.0 { d.scale } else { 1.0 };
+    let (hw, hd, h) = (d.width * s / 2.0, d.depth * s / 2.0, d.height * s);
+    let (sx, sy, z0) = (d.shift[0] * s, d.shift[1] * s, d.shift[2] * s);
+    let z1 = z0 + h;
+    anyhow::ensure!(hw > 0.0 && hd > 0.0 && h > 0.0, "grass LOD1 billboard without a size ({d:?})");
+    // Quad 0 in the XZ plane at y = ShiftY, u running from +X to -X; quad 1 is quad 0 turned
+    // -90 degrees about Z ((x, y) -> (y, -x)) at x = ShiftX, so its u runs from -Y to +Y.
+    // Per quad: top u0, top u1, bottom u1, bottom u0.
+    let positions = vec![
+        [hw, sy, z1],
+        [-hw, sy, z1],
+        [-hw, sy, z0],
+        [hw, sy, z0],
+        [sx, -hd, z1],
+        [sx, hd, z1],
+        [sx, hd, z0],
+        [sx, -hd, z0],
+    ];
+    let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].repeat(2);
+    let triangles = vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]];
+    let (lo, hi) = positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
+        (std::array::from_fn(|k| lo[k].min(p[k])), std::array::from_fn(|k| hi[k].max(p[k])))
+    });
+    let center: [f32; 3] = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
+    let radius = positions.iter().map(|p| (0..3).map(|k| (p[k] - center[k]).powi(2)).sum::<f32>().sqrt()).fold(0.0, f32::max);
+
+    let file = texture.rsplit(['\\', '/']).next().unwrap_or(texture);
+    let stem = file.rsplit_once('.').map_or(file, |(a, _)| a);
+    let mut nif = Nif::new();
+    let root = nif.add_block(Block::Node(Node { av: AvObject { net: ObjectNet::named(stem), ..Default::default() }, ..Default::default() }));
+    let shape = TriShape {
+        av: AvObject { net: ObjectNet::named("GrassLOD1"), ..Default::default() },
+        bound_center: center,
+        bound_radius: radius,
+        shader_property: Some(root + 2),
+        alpha_property: Some(root + 4),
+        vertex_desc: VertexDesc::with_attributes(true, true, true, false, true).0,
+        normals: vec![[0.0, 0.0, 1.0]; 8],
+        colors: vec![[255; 4]; 8],
+        positions,
+        uvs,
+        triangles,
+        ..Default::default()
+    };
+    let shape = nif.add_block(Block::TriShape(shape));
+    nif.add_block(Block::LightingShader(LightingShader {
+        flags1: 0x8000_0000,
+        flags2: 0x31,
+        texture_set: Some(root + 3),
+        emissive_multiple: 0.0,
+        texture_clamp_mode: 0,
+        specular_color: [0.0; 3],
+        lighting_effect_1: 0.0,
+        lighting_effect_2: 0.0,
+        ..Default::default()
+    }));
+    let mut slots = vec![String::new(); 9];
+    slots[0] = texture.to_string();
+    slots[1] = normal.unwrap_or_default().to_string();
+    nif.add_block(Block::TextureSet(slots));
+    nif.add_block(Block::Alpha { net: ObjectNet::default(), flags: 0x12EC, threshold: 128 });
+    if let Some(Block::Node(n)) = nif.blocks.get_mut(root as usize) {
+        n.children.push(Some(shape));
+    }
+    // The reader's Node carries no type of its own, and the writer takes the header's type
+    // table only when it covers every block: name all five, one block each.
+    nif.header.block_types = ["BSFadeNode", "BSTriShape", "BSLightingShaderProperty", "BSShaderTextureSet", "NiAlphaProperty"].map(String::from).to_vec();
+    nif.header.block_type_index = (0..nif.blocks.len() as u16).collect();
+    Ok(nif.to_bytes()?)
 }
 
 /// `--grass go`: a `meshes\LOD\Grass\<model>_lod1.nif` for every grass model a landscape texture
@@ -1311,5 +1402,64 @@ mod tests {
         assert!(ignored_texture("textures\\lod\\x_dyndolod_atlas.dds", &m));
         assert!(ignored_texture("textures\\terrain\\tamriel\\trees\\treelod02.dds", &m));
         assert!(!ignored_texture("textures\\lod\\farmhouselod01.dds", &m));
+    }
+
+    #[test]
+    fn grass_lod1_mesh() {
+        use lodforge_nif::{Block, VertexDesc, va};
+        let d = BillboardDims::parse("[LOD]\r\nWidth=40.0\r\nDepth=30.0\r\nHeight=50.0\r\nShiftX=2.0\r\nShiftY=-3.0\r\nShiftZ=-1.5\r\nScale=2.0\r\n");
+        let tex = "textures\\terrain\\lodgen\\skyrim.esm\\fieldgrass01_0000abcd.dds";
+        let nrm = "textures\\terrain\\lodgen\\skyrim.esm\\fieldgrass01_0000abcd_n.dds";
+        let nif = lodforge_nif::parse(&grass_lod1_nif(tex, Some(nrm), &d).unwrap()).unwrap();
+        assert_eq!(nif.block_type(0), "BSFadeNode");
+        assert_eq!(nif.roots, vec![Some(0)]);
+        let Block::Node(root) = &nif.blocks[0] else { panic!("root") };
+        assert_eq!(root.av.net.name.as_deref(), Some("fieldgrass01_0000abcd"));
+        assert_eq!(root.children.len(), 1);
+        // Grass Optimizations: exactly one BSTriShape, identity transforms.
+        let shapes: Vec<_> = nif.blocks.iter().filter_map(|b| if let Block::TriShape(s) = b { Some(s) } else { None }).collect();
+        assert_eq!(shapes.len(), 1);
+        let s = shapes[0];
+        assert_eq!(nif.block_type(root.children[0].unwrap() as usize), "BSTriShape");
+        assert_eq!(root.av.transform, lodforge_nif::Transform::default());
+        assert_eq!(s.av.transform, lodforge_nif::Transform::default());
+        assert_eq!((s.positions.len(), s.triangles.len()), (8, 4));
+        let desc = VertexDesc(s.vertex_desc);
+        for a in [va::VERTEX, va::UVS, va::NORMALS, va::COLORS] {
+            assert!(desc.has(a), "{a:#x}");
+        }
+        assert_eq!(nif.shape_textures(s)[..2], [tex.to_string(), nrm.to_string()]);
+        assert!(s.normals.iter().all(|n| n[2] > 0.99 && n[0].abs() < 0.01 && n[1].abs() < 0.01), "{:?}", s.normals);
+        assert!(s.colors.iter().all(|c| *c == [255; 4]));
+        for uv in &s.uvs {
+            assert!((0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1]));
+        }
+        let (umin, umax) = s.uvs.iter().fold((1f32, 0f32), |(a, b), uv| (a.min(uv[0]), b.max(uv[0])));
+        assert_eq!((umin, umax), (0.0, 1.0));
+        // Scaled sizes: bottom at ShiftZ x Scale, top Height x Scale above it.
+        let zmin = s.positions.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
+        let zmax = s.positions.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
+        assert!((zmin - -3.0).abs() < 1e-4 && (zmax - 97.0).abs() < 1e-4, "{zmin} {zmax}");
+        // v = 0 at the top, u = 0 at +X (quad 0, y = ShiftY) / -Y (quad 1, x = ShiftX).
+        for (p, uv) in s.positions.iter().zip(&s.uvs) {
+            assert_eq!(uv[1] == 0.0, p[2] > 0.0);
+        }
+        for (i, (p, uv)) in s.positions.iter().zip(&s.uvs).enumerate() {
+            if i < 4 {
+                assert!((p[1] - -6.0).abs() < 1e-4 && (p[0].abs() - 40.0).abs() < 1e-4);
+                assert_eq!(uv[0] == 0.0, p[0] > 0.0);
+            } else {
+                assert!((p[0] - 4.0).abs() < 1e-4 && (p[1].abs() - 30.0).abs() < 1e-4);
+                assert_eq!(uv[0] == 0.0, p[1] < 0.0);
+            }
+        }
+        let Some(Block::LightingShader(sh)) = nif.get(s.shader_property) else { panic!("shader") };
+        assert_eq!((sh.shader_type, sh.flags2 & 0x10, sh.flags2 & 0x20), (0, 0x10, 0x20));
+        let Some(Block::Alpha { flags, threshold, .. }) = nif.get(s.alpha_property) else { panic!("alpha") };
+        assert_eq!((flags & 0x201, *threshold), (0x200, 128));
+        // Without a normal map slot 1 stays empty.
+        let nif = lodforge_nif::parse(&grass_lod1_nif(tex, None, &d).unwrap()).unwrap();
+        let s = nif.blocks.iter().find_map(|b| if let Block::TriShape(s) = b { Some(s) } else { None }).unwrap();
+        assert_eq!(nif.shape_textures(s)[1], "");
     }
 }
