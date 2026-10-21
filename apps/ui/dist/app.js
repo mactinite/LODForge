@@ -91,7 +91,7 @@ function renderWorlds() {
   const box = $("worlds"); box.innerHTML = "";
   for (const w of state.info.worlds) {
     const id = "w-" + w;
-    box.insertAdjacentHTML("beforeend", `<label class="check card"><input type="checkbox" id="${id}" data-world="${w}" ${w === "Tamriel" ? "checked" : ""}><span>${w}</span></label>`);
+    box.insertAdjacentHTML("beforeend", `<label class="check card"><input type="checkbox" id="${id}" data-world="${w}" checked><span>${w}</span></label>`);
   }
 }
 
