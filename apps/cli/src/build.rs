@@ -105,6 +105,13 @@ impl Materials {
     }
 }
 
+/// `--json`: one line when a stage starts, so a front end can show what is running.
+fn begin(json: bool, world: &str, stage: &str, season: Option<&str>) {
+    if json {
+        println!("{{\"event\":\"begin\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()));
+    }
+}
+
 fn event(json: bool, world: &str, stage: &str, season: Option<&str>, ms: u128) {
     if json {
         println!("{{\"event\":\"stage\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{},\"ms\":{ms}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()));
@@ -212,6 +219,7 @@ pub fn run(a: &Args) -> Result<()> {
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
     if a.texgen {
         let t = Instant::now();
+        begin(a.json, "all", "texgen", None);
         match texgen_stage(a, &p, &out) {
             Ok(()) => event(a.json, "all", "texgen", None, t.elapsed().as_millis()),
             Err(e) => {
@@ -223,6 +231,7 @@ pub fn run(a: &Args) -> Result<()> {
             // The mini atlases DynDOLOD's LOD models use (textures\lod\..., stitched from full
             // textures by the TexGen rules), so no installed TexGen output is needed.
             let t = Instant::now();
+            begin(a.json, "all", "texgen-stitched", None);
             let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
             let reuv = work.join("DynDOLOD_SSE_re-uv-miniatlas.txt");
             match lodforge_gpu::Gpu::new().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, &gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr())) {
@@ -272,6 +281,7 @@ pub fn run(a: &Args) -> Result<()> {
     let mut tree_billboards: Vec<String> = Vec::new();
     if dyn_mode && !a.no_objects {
         let t = Instant::now();
+        begin(a.json, "all", "dyndolod-config", None);
         let dir = a.dyn_opts.dyndolod_config.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
         match crate::dyndolod_build::Config::load(&p, &dir, &a.dyn_opts.preset, a.dyn_opts.static_lod) {
             Ok(mut c) => {
@@ -283,6 +293,7 @@ pub fn run(a: &Args) -> Result<()> {
                 dyn_worlds = scan_worldspaces(&p.load_order)?;
                 if a.dyn_opts.lod_models {
                     let t = Instant::now();
+                    begin(a.json, "all", "lod-models", None);
                     let selected: Vec<&lodforge_esp::Worldspace> = dyn_worlds.iter().filter(|w| worlds.iter().any(|n| n.eq_ignore_ascii_case(&w.editor_id))).collect();
                     let min_size = a.dyn_opts.lod_model_min_size.as_ref().map(|v| [0, 1, 2].map(|k| v.get(k).or(v.last()).copied().unwrap_or(0.0))).unwrap_or(crate::lod_models::DEFAULT_MIN_SIZE);
                     let items = crate::lod_models::plan(&p, &c, &selected, &crate::lod_models::Policy { min_size, all: false });
@@ -321,6 +332,7 @@ pub fn run(a: &Args) -> Result<()> {
     for world in &worlds {
         let mut step = |stage: &str, season: Option<&str>, f: &mut dyn FnMut() -> Result<()>| {
             let t = Instant::now();
+            begin(a.json, world, stage, season);
             match f() {
                 Ok(()) => event(a.json, world, stage, season, t.elapsed().as_millis()),
                 Err(e) => {
@@ -551,6 +563,7 @@ pub fn run(a: &Args) -> Result<()> {
     if a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Go {
         // Grass LOD meshes are per grass model, not per worldspace.
         let t = Instant::now();
+        begin(a.json, "all", "grass-lod1", None);
         let r = (|| -> Result<(usize, usize)> {
             let all = if dyn_worlds.is_empty() { scan_worldspaces(&p.load_order)? } else { Vec::new() };
             let list = if dyn_worlds.is_empty() { &all } else { &dyn_worlds };
@@ -575,6 +588,7 @@ pub fn run(a: &Args) -> Result<()> {
         own_output(&mut p, &out, &before)?;
         if !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod {
             let t = Instant::now();
+            begin(a.json, "all", "plugins", None);
             let refs: Vec<crate::dyndolod_build::PluginWorld<'_>> = dynamic
                 .drain(..)
                 .filter_map(|(w, dynamic, seasonal, child_copies, lod_refs, lod_bases)| dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(&w)).map(|world| crate::dyndolod_build::PluginWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases }))
@@ -594,6 +608,7 @@ pub fn run(a: &Args) -> Result<()> {
         }
         if !a.dyn_opts.no_occlusion {
             let t = Instant::now();
+            begin(a.json, "all", "occlusion", None);
             match crate::dyndolod_build::write_occlusion(&p, c, &worlds, &out) {
                 Ok(done) => {
                     if !a.json {

@@ -51,4 +51,9 @@ table { width: 100%; border-collapse: collapse; margin-top: 12px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr.failed td { color: var(--bad); }
+tr.running td { color: var(--muted); }
+tr.running td:first-child { color: var(--text); font-weight: 600; }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#doneDetail ul { margin: 6px 0 0; padding-left: 20px; }
 pre { max-height: 260px; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: 12px/1.4 Consolas, monospace; white-space: pre-wrap; }

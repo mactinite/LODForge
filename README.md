@@ -132,7 +132,9 @@ cargo build --locked --release -p lodforge -p lodforge-ui --features lodforge-ui
 
 The UI launches the neighboring CLI executable, or the path in `LODFORGE_CLI`.
 The frontend is checked-in HTML/CSS/JavaScript; no npm build is required.
-The CLI exposes more options than the UI.
+The CLI exposes more options than the UI. The UI builds DynDOLOD-style output, renders the tree
+billboards and stitched LOD textures itself by default (no TexGen output needs to be installed),
+shows the running stage in the build table and ends on a Done screen that can close the program.
 
 `lodforge-ui.exe --instance <MO2 folder> [--profile <name>]` prefills the first step and
 scans the load order at start. For an MO2 tool entry, set the arguments to

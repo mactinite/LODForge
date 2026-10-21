@@ -16,6 +16,7 @@
     <li data-step="2">Options</li>
     <li data-step="3">Output</li>
     <li data-step="4">Build</li>
+    <li data-step="5">Done</li>
   </ol>
 </header>
 
@@ -61,7 +62,7 @@
       <label class="check card"><input type="checkbox" id="terrain" checked><span><b>Terrain LOD</b><br>Meshes plus diffuse and normal textures for every LOD level.</span></label>
       <label class="check card"><input type="checkbox" id="objects" checked><span><b>Object LOD</b><br>Distant buildings, rocks and mountains with the texture atlas.</span></label>
       <label class="check card"><input type="checkbox" id="trees" checked><span><b>Tree LOD</b><br>Billboard trees. Needs billboards: from the option below, or installed ones (e.g. TexGen output).</span></label>
-      <label class="check card"><input type="checkbox" id="texgen"><span><b>Tree billboards</b><br>Render tree and trunk billboards from the load order first (LODForge's TexGen), so Tree LOD does not depend on installed billboards.</span></label>
+      <label class="check card"><input type="checkbox" id="texgen" checked><span><b>Tree billboards</b><br>Render tree and trunk billboards and the stitched LOD textures from the load order first (LODForge's TexGen), so no TexGen output needs to be installed.</span></label>
     </div>
     <h2>Grass LOD</h2>
     <div class="row">
@@ -100,6 +101,17 @@
     <p id="buildSummary" class="hint"></p>
     <table id="stages"><thead><tr><th>Worldspace</th><th>Stage</th><th>Season</th><th class="num">Time</th></tr></thead><tbody></tbody></table>
     <details><summary>Log</summary><pre id="log"></pre></details>
+  </section>
+
+  <section class="page hidden" data-page="5">
+    <h1 id="doneTitle">Build complete</h1>
+    <p id="doneSummary" class="hint"></p>
+    <div id="doneDetail" class="card"></div>
+    <p class="hint">The Build step keeps the stage table and the log (Back). You can close LODForge now, or start another build with the same instance.</p>
+    <div class="row">
+      <button id="closeApp">Close LODForge</button>
+      <button id="again" class="secondary">Start another build</button>
+    </div>
   </section>
 </main>
 

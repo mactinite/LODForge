@@ -14,11 +14,14 @@ if (!window.__TAURI__) {
         if (cmd === "mo2_running") return false;
         if (cmd === "start_build") {
           polls = 0;
-          [["Tamriel", "terrain-meshes", null, 3600], ["Tamriel", "terrain-textures", null, 17500], ["Tamriel", "dyndolod-export", null, 3300], ["Tamriel", "objects", null, 8800], ["all", "plugins", null, 10], ["all", "occlusion", null, 10000]].forEach(([world, stage, season, ms], i) =>
-            setTimeout(() => fire("build-line", JSON.stringify({ event: "stage", world, stage, season, ms })), 300 * (i + 1)));
+          [["Tamriel", "terrain-meshes", null, 3600], ["Tamriel", "terrain-textures", null, 17500], ["Tamriel", "dyndolod-export", null, 3300], ["Tamriel", "objects", null, 8800], ["all", "plugins", null, 10], ["all", "occlusion", null, 10000]].forEach(([world, stage, season, ms], i) => {
+            setTimeout(() => fire("build-line", JSON.stringify({ event: "begin", world, stage, season })), 600 * i + 50);
+            setTimeout(() => fire("build-line", JSON.stringify({ event: "stage", world, stage, season, ms })), 600 * (i + 1));
+          });
           return null;
         }
-        if (cmd === "build_status") return ++polls > 4 ? 0 : null;
+        if (cmd === "quit") { document.body.innerHTML = "<p style='padding:24px'>(mock) LODForge closed.</p>"; return null; }
+        if (cmd === "build_status") return ++polls > 8 ? 0 : null;
         return null;
       },
     },
@@ -29,7 +32,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const $ = (id) => document.getElementById(id);
 
-const state = { step: 0, info: null, worlds: [], seasons: [], expected: 0, done: 0, building: false };
+const state = { step: 0, info: null, worlds: [], seasons: [], expected: 0, done: 0, building: false, running: new Map(), failed: [] };
 
 function store(key, value) { try { localStorage.setItem("lodforge." + key, value); } catch (_) {} }
 function load(key, fallback) { try { return localStorage.getItem("lodforge." + key) ?? fallback; } catch (_) { return fallback; } }
@@ -45,7 +48,7 @@ function show(step) {
     li.classList.toggle("done", s < step);
   });
   $("back").disabled = step === 0 || state.building;
-  $("next").classList.toggle("hidden", step === 4);
+  $("next").classList.toggle("hidden", step >= 4);
   $("next").textContent = step === 3 ? "Start build" : "Next";
   $("next").disabled = step === 0 && !state.info;
   if (step === 3) review();
@@ -136,28 +139,59 @@ async function startBuild() {
   if (req.enable && await invoke("mo2_running")) return status("Close Mod Organizer before enabling the mod, or untick “Enable”", true);
   // DynDOLOD object LOD per worldspace: export, atlas, (grass,) objects.
   const objects = req.objects ? 3 + (req.grass === "bto" ? 1 : 0) : 0;
-  const perWorld = (req.terrain ? 1 + 1 + req.seasons.length : 0) + objects + (req.trees ? 1 : 0);
-  // Once per build: TexGen, DynDOLOD configuration, plugins, occlusion, Grass Optimizations meshes.
-  const once = (req.texgen ? 1 : 0) + (req.objects ? 1 + (req.plugins ? 1 : 0) + (req.occlusion ? 1 : 0) : 0) + (req.grass === "go" ? 1 : 0);
-  state.expected = perWorld * req.worlds.length + once; state.done = 0;
+  const perWorld = (req.terrain ? 1 + 1 + req.seasons.length + 1 : 0) + objects + (req.trees ? 1 : 0);
+  // Once per build: TexGen (billboards + stitched textures), DynDOLOD configuration, plugins, occlusion, Grass Optimizations meshes.
+  const once = (req.texgen ? 2 : 0) + (req.objects ? 1 + (req.plugins ? 1 : 0) + (req.occlusion ? 1 : 0) : 0) + (req.grass === "go" ? 1 : 0);
+  state.expected = perWorld * req.worlds.length + once; state.done = 0; state.running = new Map(); state.failed = [];
   $("stages").tBodies[0].innerHTML = ""; $("log").textContent = ""; $("bar").style.width = "0";
   $("buildTitle").textContent = "Building…"; $("buildSummary").textContent = "";
   try {
     await invoke("start_build", { req });
   } catch (e) { return status(String(e), true); }
-  state.building = true; state.started = Date.now();
+  state.building = true; state.started = Date.now(); state.lastRequest = req;
   show(4);
   $("cancel").classList.remove("hidden");
   status("Build running");
   poll();
 }
 
-function addStage(ev, failed = false) {
+const stageKey = (ev) => `${ev.world}|${ev.stage}|${ev.season ?? ""}`;
+const stageLabel = (ev) => `${ev.world === "all" ? "" : ev.world + " "}${ev.stage}${ev.season ? " [" + ev.season + "]" : ""}`;
+
+// A stage that began but never reported its time did not finish (its error is in the log).
+function settleRunning() {
+  for (const [key, tr] of state.running) {
+    tr.className = "failed";
+    tr.lastElementChild.textContent = "failed";
+    state.failed.push(key.replace(/\|/g, " ").trim());
+  }
+  state.running.clear();
+}
+
+function beginStage(ev) {
+  settleRunning();
+  const tr = document.createElement("tr");
+  tr.className = "running";
+  tr.innerHTML = `<td>${ev.world}</td><td>${ev.stage}</td><td>${ev.season ?? ""}</td><td class="num"><span class="spinner"></span></td>`;
+  $("stages").tBodies[0].appendChild(tr);
+  state.running.set(stageKey(ev), tr);
+  status(`Working on ${stageLabel(ev)}…`);
+  tr.scrollIntoView({ block: "nearest" });
+}
+
+function addStage(ev) {
   state.done += 1;
   $("bar").style.width = Math.min(100, (100 * state.done) / Math.max(1, state.expected)) + "%";
+  const time = `${(ev.ms / 1000).toFixed(1)} s`;
+  const running = state.running.get(stageKey(ev));
+  if (running) {
+    state.running.delete(stageKey(ev));
+    running.className = "";
+    running.lastElementChild.textContent = time;
+    return;
+  }
   const tr = document.createElement("tr");
-  if (failed) tr.className = "failed";
-  tr.innerHTML = `<td>${ev.world}</td><td>${ev.stage}</td><td>${ev.season ?? ""}</td><td class="num">${(ev.ms / 1000).toFixed(1)} s</td>`;
+  tr.innerHTML = `<td>${ev.world}</td><td>${ev.stage}</td><td>${ev.season ?? ""}</td><td class="num">${time}</td>`;
   $("stages").tBodies[0].appendChild(tr);
 }
 
@@ -165,20 +199,33 @@ async function poll() {
   const code = await invoke("build_status");
   if (code === null) { setTimeout(poll, 500); return; }
   state.building = false;
+  settleRunning();
   $("cancel").classList.add("hidden");
   const secs = ((Date.now() - state.started) / 1000).toFixed(1);
+  const mins = secs >= 90 ? ` (${(secs / 60).toFixed(1)} min)` : "";
   $("bar").style.width = "100%";
-  $("buildTitle").textContent = code === 0 ? "Done" : "Finished with errors";
-  $("buildSummary").textContent = `${state.done} stage(s) in ${secs} s` + (code === 0 ? "." : ` (exit code ${code}); see the log.`);
-  status(code === 0 ? "Build finished" : "Build failed", code !== 0);
+  const ok = code === 0 && state.failed.length === 0;
+  const summary = `${state.done} stage(s) in ${secs} s${mins}` + (ok ? "." : code === 0 ? "; some stages did not finish." : ` (exit code ${code}).`);
+  $("buildTitle").textContent = ok ? "Done" : "Finished with errors";
+  $("buildSummary").textContent = summary;
+  status(ok ? "Build finished" : "Build failed", !ok);
   $("back").disabled = false;
+  // Done screen.
+  const s = state.lastRequest || {};
+  $("doneTitle").textContent = ok ? "Build complete" : "Build finished with errors";
+  $("doneSummary").textContent = summary;
+  $("doneDetail").innerHTML = `<b>Output</b>: ${s.mo2_mod ? `MO2 mod "${s.mo2_mod}"${s.enable ? ", enabled in the profile" : " (enable it in MO2)"}` : s.out || ""}` +
+    `<br><b>Worldspaces</b>: ${(s.worlds || []).join(", ")}` +
+    (state.failed.length ? `<br><b>Did not finish</b>:<ul>${state.failed.map((f) => `<li>${f}</li>`).join("")}</ul>` : "") +
+    (!ok ? `<br><span class="hint">Details are in the log on the Build step.</span>` : "");
+  show(5);
 }
 
 listen("build-line", (e) => {
   const line = e.payload;
   $("log").textContent += line + "\n";
   if (line.startsWith("{")) {
-    try { const ev = JSON.parse(line); if (ev.event === "stage") addStage(ev); } catch (_) {}
+    try { const ev = JSON.parse(line); if (ev.event === "stage") addStage(ev); else if (ev.event === "begin") beginStage(ev); } catch (_) {}
   }
 });
 listen("build-error", (e) => { $("log").textContent += e.payload + "\n"; });
@@ -191,6 +238,8 @@ $("noWorlds").addEventListener("click", () => document.querySelectorAll("[data-w
 $("back").addEventListener("click", () => show(Math.max(0, state.step - 1)));
 $("next").addEventListener("click", () => (state.step === 3 ? startBuild() : show(state.step + 1)));
 $("cancel").addEventListener("click", async () => { await invoke("cancel_build"); status("Cancelled", true); });
+$("closeApp").addEventListener("click", () => invoke("quit"));
+$("again").addEventListener("click", () => show(2));
 document.querySelectorAll("input[name=dest], #modName, #outFolder, #enable").forEach((el) => el.addEventListener("input", review));
 function syncGrass() {
   const g = $("grass").value;

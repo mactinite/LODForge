@@ -322,6 +322,12 @@ fn build_status(running: State<'_, Running>) -> Option<i32> {
     done
 }
 
+/// The Done screen's "Close LODForge".
+#[tauri::command]
+fn quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
 fn cancel_build(running: State<'_, Running>) {
     if let Some(mut c) = running.0.lock().unwrap().take() {
@@ -399,7 +405,7 @@ fn main() {
     tauri::Builder::default()
         .manage(Running::default())
         .manage(args)
-        .invoke_handler(tauri::generate_handler![launch_args, list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build])
+        .invoke_handler(tauri::generate_handler![launch_args, list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build, quit])
         .run(tauri::generate_context!())
         .expect("error while running LODForge UI");
 }
