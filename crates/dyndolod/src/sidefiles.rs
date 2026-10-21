@@ -112,6 +112,19 @@ pub struct Sources<'a> {
     pub texture_sets: &'a HashMap<u32, Vec<String>>,
     pub read: &'a (dyn Fn(&str) -> Option<Vec<u8>> + Sync),
     pub exists: &'a (dyn Fn(&str) -> bool + Sync),
+    /// PBR materials (`--materials pbr`, Community Shaders with PBR): PBR diffuses become their
+    /// `...linear.dds` copies and LOD textures take TexGen's `pbr_lod` variants. Off
+    /// (`--materials complex`), no swap names a `textures\pbr\` path, a `linear.dds` copy or a
+    /// `pbr_lod` texture: texture sets and full-model textures under `textures\pbr\` are ignored.
+    pub pbr: bool,
+}
+
+impl Sources<'_> {
+    /// Whether a texture set may be swapped in: always with PBR materials, otherwise only when
+    /// no slot is under `textures\pbr\`.
+    fn usable(&self, t: &[String]) -> bool {
+        self.pbr || !t.iter().any(|x| is_pbr(x))
+    }
 }
 
 /// Shapes per model path, shared by every season of a worldspace.
@@ -183,7 +196,7 @@ pub fn pbr_lod_name(t: &str) -> Option<String> {
 /// trigger).
 fn entry_textures(t: &[String], whole_set: bool, src: &Sources<'_>) -> Vec<String> {
     let mut out: Vec<String> = (0..10).map(|i| if i < 2 || (whole_set && i != 3) { t.get(i).map(|s| texture_path(s)).unwrap_or_default() } else { String::new() }).collect();
-    if is_pbr(&out[0]) && out[0].strip_suffix(".dds").is_some_and(|s| (src.exists)(&format!("{s}_rmaos.dds"))) {
+    if src.pbr && is_pbr(&out[0]) && out[0].strip_suffix(".dds").is_some_and(|s| (src.exists)(&format!("{s}_rmaos.dds"))) {
         out[0] = linear_texture_name(&out[0]);
     }
     out
@@ -211,10 +224,10 @@ fn lod_entries(base: Option<&Base>, full: Option<&Arc<Vec<ShapeInfo>>>, model: &
         return out;
     }
     let Some(shapes) = cache.shapes(src.read, model) else { return out };
-    let full_pbr = full.is_some_and(|f| f.iter().any(|s| s.textures.first().is_some_and(|t| is_pbr(t))));
+    let full_pbr = src.pbr && full.is_some_and(|f| f.iter().any(|s| s.textures.first().is_some_and(|t| is_pbr(t))));
     let alt = |name: &str| -> Option<&Vec<String>> {
         let a = base?.alt_textures.iter().find(|a| a.shape.eq_ignore_ascii_case(name))?;
-        src.texture_sets.get(&a.txst)
+        src.texture_sets.get(&a.txst).filter(|t| src.usable(t))
     };
     for s in shapes.iter().filter(|s| s.index >= 0) {
         let own = s.textures.first().map(String::as_str).unwrap_or("");
@@ -245,7 +258,7 @@ fn lod_entries(base: Option<&Base>, full: Option<&Arc<Vec<ShapeInfo>>>, model: &
             })
         } else {
             let source = full.and_then(|f| f.iter().find(|f| f.name.eq_ignore_ascii_case(&s.name))).map(|f| &f.textures);
-            source.filter(|t| !t.is_empty() && !same_texture(&t[0], own)).map(|t| entry_textures(t, false, src))
+            source.filter(|t| !t.is_empty() && !same_texture(&t[0], own) && src.usable(t)).map(|t| entry_textures(t, false, src))
         };
         if let Some(t) = tex {
             out.push((s.index, s.name.clone(), t));
@@ -349,7 +362,7 @@ pub fn alt_textures_line(ref_lines: &[&RefLine], base: Option<&Base>, cache: &Mo
         .unwrap_or_default()
         .iter()
         .rev()
-        .filter_map(|a| src.texture_sets.get(&a.txst).map(|t| entry(a.index, &a.shape, &entry_textures(t, true, src))))
+        .filter_map(|a| src.texture_sets.get(&a.txst).filter(|t| src.usable(t)).map(|t| entry(a.index, &a.shape, &entry_textures(t, true, src))))
         .collect();
     let lods = models.iter().flat_map(|m| lod_entries(base, full.as_ref(), m, false, cache, src)).map(|(i, n, t)| entry(i, &n, &t));
     // The same key may come twice with different textures (full and LOD model); LODGen uses the
@@ -435,7 +448,7 @@ mod tests {
         let bases = HashMap::from([(0x800, base)]);
         let read = |_: &str| None;
         let exists = |p: &str| p == "textures\\lod\\rockpbr_lod.dds" || p.ends_with("_rmaos.dds");
-        let src = Sources { bases: &bases, texture_sets: &texture_sets, read: &read, exists: &exists };
+        let src = Sources { bases: &bases, texture_sets: &texture_sets, read: &read, exists: &exists, pbr: true };
         let line = RefLine { ref_id: 0x1234, full_model: "Meshes\\rock.nif".into(), columns: ["meshes\\lod\\rock_lod_0.nif".into(), String::new(), String::new(), String::new()], base: 0x800, ..Default::default() };
         assert_eq!(vc_text(std::slice::from_ref(&line), &cache, &src), "Meshes\\rock.nif\tRock:0\tFalse\r\nMeshes\\rock.nif\tSkirt\tTrue\r\n");
         let alt = alt_textures_text(std::slice::from_ref(&line), &cache, &src);
@@ -449,6 +462,11 @@ mod tests {
         assert_eq!(e[3], "1=Skirt=textures\\pbr\\landscape\\riverbededgelinear.dds,textures\\pbr\\landscape\\riverbededge_n.dds,,,,,,,,,");
         assert_eq!(e[4], "2=Rock_LOD:2=textures\\lod\\rockpbr_lod.dds,textures\\lod\\rockpbr_lod_n.dds,,,,,,,,,");
         assert_eq!(e.len(), 5);
+        // `--materials complex`: the PBR texture set, the PBR full-model textures and the
+        // `pbr_lod` variant are all ignored; the VC file does not change.
+        let plain = Sources { pbr: false, ..src };
+        assert_eq!(vc_text(std::slice::from_ref(&line), &cache, &plain), "Meshes\\rock.nif\tRock:0\tFalse\r\nMeshes\\rock.nif\tSkirt\tTrue\r\n");
+        assert_eq!(alt_textures_text(std::slice::from_ref(&line), &cache, &plain), "");
     }
 
     #[test]
@@ -472,7 +490,7 @@ mod tests {
         let bc7 = lodforge_dds::write_bc7(4, 4, &[vec![0u8; 16]]);
         let read = move |p: &str| (p == "textures\\pbr\\landscape\\snow01.dds").then(|| bc7.clone());
         let exists = |p: &str| p.ends_with("_rmaos.dds") || p.ends_with("snow01noalpha.dds") || p.ends_with("snow01.dds");
-        let src = Sources { bases: &bases, texture_sets: &texture_sets, read: &read, exists: &exists };
+        let src = Sources { bases: &bases, texture_sets: &texture_sets, read: &read, exists: &exists, pbr: true };
         let line = |lod: &str| RefLine { ref_id: 0x1234, full_model: "Meshes\\pond.nif".into(), columns: [lod.into(), String::new(), String::new(), String::new()], base: 0x800, ..Default::default() };
         let lines = [line("meshes\\lod\\pond_lod_0.nif")];
         let alt = alt_textures_text(&lines, &cache, &src);
@@ -486,6 +504,16 @@ mod tests {
         let pairs: Vec<(&str, &str)> = q.iter().map(|r| (r.base.as_str(), r.texture.as_str())).collect();
         assert_eq!(pairs, vec![("textures\\landscape\\mountainslab02.dds", "textures\\pbr\\landscape\\snow01.dds"), ("textures\\landscape\\dirtcliffs01.dds", "textures\\pbr\\landscape\\cliff.dds")]);
         assert_eq!(q[1].normal, "textures\\pbr\\landscape\\cliff_n.dds");
+        // `--materials complex`: the PBR MODS set and the PBR full texture are ignored, so the
+        // shape takes the full model's plain texture; no `textures\pbr\` or `linear.dds` path.
+        let plain = Sources { pbr: false, ..src };
+        let alt = alt_textures_text(&lines, &cache, &plain);
+        assert_eq!(alt, "00001234\t0=Rock:1=textures\\landscape\\mountainslab01.dds,,,,,,,,,,\r\n");
+        let q = mini_atlas_requests(&lines, &cache, &plain);
+        let pairs: Vec<(&str, &str)> = q.iter().map(|r| (r.base.as_str(), r.texture.as_str())).collect();
+        assert_eq!(pairs, vec![("textures\\landscape\\mountainslab02.dds", "textures\\landscape\\mountainslab01.dds")]);
+        let base = &bases[&0x800];
+        assert!(lod_model_swaps(base, "meshes\\lod\\pond_lod_0.nif", &cache, &plain).iter().all(|s| !is_pbr(&s.diffuse) && !is_pbr(&s.normal) && !s.diffuse.ends_with("linear.dds")));
     }
 }
 

@@ -144,6 +144,8 @@ pub struct Config {
     pub ignore_edid: Vec<String>,
     pub xesp_lod: HashSet<u32>,
     pub swaps: SeasonSwaps,
+    /// `--materials pbr` (default): PBR texture swaps in the side files and base copies.
+    pub pbr: bool,
     /// `Windows` (glow LOD windows).
     pub windows: bool,
     /// Winning TXST texture sets (MODS alternate textures).
@@ -170,7 +172,7 @@ impl Config {
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
         let reference_states = lodforge_dyndolod::export::read_reference_states(lo)?;
-        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, texture_sets, reference_states })
+        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, pbr: true, texture_sets, reference_states })
     }
 
     /// Re-reads LOD model discovery after files were added to the VFS (generated LOD models).
@@ -670,7 +672,7 @@ pub fn atlas_key_diffuse(key: &str) -> String {
 pub fn side_texts(p: &Profile, c: &Config, cache: &lodforge_dyndolod::sidefiles::ModelCache, lines: &[RefLine]) -> (String, String) {
     let read = |path: &str| p.vfs.read(path).ok().flatten();
     let exists = |path: &str| p.vfs.exists(path);
-    let src = lodforge_dyndolod::sidefiles::Sources { bases: &c.bases, texture_sets: &c.texture_sets, read: &read, exists: &exists };
+    let src = lodforge_dyndolod::sidefiles::Sources { bases: &c.bases, texture_sets: &c.texture_sets, read: &read, exists: &exists, pbr: c.pbr };
     (lodforge_dyndolod::sidefiles::vc_text(lines, cache, &src), lodforge_dyndolod::sidefiles::alt_textures_text(lines, cache, &src))
 }
 
@@ -680,7 +682,7 @@ pub fn add_side_files(p: &Profile, c: &Config, exports: &mut WorldExport) -> Vec
     let cache = lodforge_dyndolod::sidefiles::ModelCache::default();
     let read = |path: &str| p.vfs.read(path).ok().flatten();
     let exists = |path: &str| p.vfs.exists(path);
-    let src = lodforge_dyndolod::sidefiles::Sources { bases: &c.bases, texture_sets: &c.texture_sets, read: &read, exists: &exists };
+    let src = lodforge_dyndolod::sidefiles::Sources { bases: &c.bases, texture_sets: &c.texture_sets, read: &read, exists: &exists, pbr: c.pbr };
     let mut requests = Vec::new();
     for s in &mut exports.seasons {
         (s.vc, s.alt_textures) = side_texts(p, c, &cache, &s.lines);
@@ -788,7 +790,7 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
     let cache = lodforge_dyndolod::sidefiles::ModelCache::default();
     let read = |path: &str| p.vfs.read(path).ok().flatten();
     let exists = |path: &str| p.vfs.exists(path);
-    let src = lodforge_dyndolod::sidefiles::Sources { bases: &c.bases, texture_sets: &c.texture_sets, read: &read, exists: &exists };
+    let src = lodforge_dyndolod::sidefiles::Sources { bases: &c.bases, texture_sets: &c.texture_sets, read: &read, exists: &exists, pbr: c.pbr };
     let swaps = |b: &Base, model: &str| lodforge_dyndolod::sidefiles::lod_model_swaps(b, model, &cache, &src);
     let base_data = base_lod_data(p, c, worlds.iter().flat_map(|w| w.lod_bases.iter().copied()))?;
     let mut m = lodforge_dyndolod::dynplugins::build_worlds(&p.load_order, &inputs, &c.bases, c.num("NearGrid", 11), c.num("FarGrid", 21), &token, &rolling, workarounds, Some(&swaps)).map_err(anyhow::Error::msg)?;
