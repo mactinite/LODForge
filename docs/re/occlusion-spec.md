@@ -707,8 +707,17 @@ object height map port changes 4 blocks); Occlusion.esp 4,059,328 bytes against 
 - **Solstheim** was generated as a smoke test only: 34,383 LAND cells, `-Flat +Border` selects
   599 cells (x 0..23, y −1..27), grid (−64, −64) stride 256 from its lodsettings, 48 s, no object
   height map (none in the golden), `Check-TvdtLayout.py --origin -64,-64` PASS.
-- **Performance**: Tamriel's 5,697 cells take 11 min at quality 2 (the reference: 25 min).
-  Bidirectional marching or a per-eye horizon would cut the hidden-block cost; not done.
+- **Performance**: Tamriel's 5,697 cells took 11 min at quality 2 (the reference: 25 min)
+  with the plain sample-by-sample march. Since 2026-10-21 the line of sight is tested
+  hierarchically (`visibility.rs` `Field` / `Calculator::blocked`): the occluder layer is
+  baked once with a max pyramid, a span of steps is skipped when its highest sample cannot
+  rise above the line's lowest point by more than the clearance, and only spans of 8 steps or
+  fewer are marched with the reference arithmetic (`f32::round` replaced by an exact integer
+  equivalent). The answer is bit-identical (unit test against the reference march on 80,000
+  random lines; `Occlusion.esp` byte-identical on a 300-cell Tamriel subset): 300 cells
+  27.9 s -> 6.4 s, of which 1.2 s is setup; all of Tamriel 494 s -> 91 s, plugin byte-identical (see docs/baseline.md).
+  Hidden blocks still try all 256 rays; a per-(eye, block) lower-bound test (min pyramid over
+  the cone of rays) or a per-eye horizon would cut that further; not done.
 - **`THIRD-PARTY-NOTICES`** entry for the AnvilLOD-derived files: with the license mechanics
   stage of the plan.
 

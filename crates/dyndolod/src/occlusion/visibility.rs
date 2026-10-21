@@ -21,8 +21,113 @@
 //! This file is part of LODForge and is distributed under the GNU General Public License,
 //! version 3 only.
 
+use rayon::prelude::*;
+
 use super::grid::{HeightMap, SAMPLES};
 use super::tvdt::{Layout, Tvdt};
+
+/// `f32::round` (half away from zero) for |x| < 2^23, without the libm call: the fraction
+/// `x - trunc(x)` is exact (Sterbenz), so the tie test is exact too.
+#[inline(always)]
+fn round_i32(x: f32) -> i32 {
+    let r = x as i32;
+    let f = x - r as f32;
+    r + (f >= 0.5) as i32 - (f <= -0.5) as i32
+}
+
+/// The occluder layer of a height map (`ground_at` or `top_at` semantics: the default where
+/// there is no data) baked once, with a max pyramid over it: level `k` holds the highest sample
+/// of every `2^k x 2^k` tile. Lets a line of sight skip whole spans whose highest sample cannot
+/// rise above the line (`Calculator::blocked`).
+struct Field {
+    outside: f32,
+    /// `levels[k]`: (width, height, samples) at tile size `2^k`; level 0 is the baked layer.
+    levels: Vec<(usize, usize, Vec<f32>)>,
+}
+
+impl Field {
+    fn build(map: &HeightMap, occluder: Occluder) -> Field {
+        let (w, h) = (map.width(), map.height());
+        let mut base = vec![f32::NEG_INFINITY; w * h];
+        base.par_chunks_mut(w.max(1)).enumerate().for_each(|(y, row)| {
+            for (x, v) in row.iter_mut().enumerate() {
+                *v = match occluder {
+                    Occluder::Ground => map.ground_at(x as i32, y as i32),
+                    Occluder::Top => map.top_at(x as i32, y as i32),
+                };
+            }
+        });
+        let mut levels = vec![(w, h, base)];
+        while let Some(&(lw, lh, _)) = levels.last() {
+            if lw <= 1 && lh <= 1 {
+                break;
+            }
+            let (nw, nh) = (lw.div_ceil(2), lh.div_ceil(2));
+            let prev = &levels.last().unwrap().2;
+            let mut next = vec![f32::NEG_INFINITY; nw * nh];
+            for y in 0..nh {
+                for x in 0..nw {
+                    let mut m = f32::NEG_INFINITY;
+                    for (sx, sy) in [(2 * x, 2 * y), (2 * x + 1, 2 * y), (2 * x, 2 * y + 1), (2 * x + 1, 2 * y + 1)] {
+                        if sx < lw && sy < lh {
+                            m = m.max(prev[sy * lw + sx]);
+                        }
+                    }
+                    next[y * nw + x] = m;
+                }
+            }
+            levels.push((nw, nh, next));
+        }
+        Field { outside: map.outside, levels }
+    }
+
+    #[inline(always)]
+    fn width(&self) -> usize {
+        self.levels[0].0
+    }
+
+    #[inline(always)]
+    fn height(&self) -> usize {
+        self.levels[0].1
+    }
+
+    #[inline(always)]
+    fn contains(&self, x: i32, y: i32) -> bool {
+        x >= 0 && y >= 0 && (x as usize) < self.width() && (y as usize) < self.height()
+    }
+
+    /// The occluder height at a sample, the outside height beyond the map (`occluder_at`).
+    #[inline(always)]
+    fn at(&self, x: i32, y: i32) -> f32 {
+        if self.contains(x, y) { self.levels[0].2[y as usize * self.width() + x as usize] } else { self.outside }
+    }
+
+    /// An upper bound of the occluder over the inclusive rectangle: `(inside, outside)` where
+    /// `inside` is the highest sample of the rectangle's part inside the map (`-inf` if none)
+    /// and `outside` whether any of the rectangle lies beyond the map.
+    #[inline]
+    fn max_rect(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> (f32, bool) {
+        let (w, h) = (self.width() as i32, self.height() as i32);
+        let outside = x0 < 0 || y0 < 0 || x1 >= w || y1 >= h;
+        let (x0, y0, x1, y1) = (x0.max(0), y0.max(0), x1.min(w - 1), y1.min(h - 1));
+        if x0 > x1 || y0 > y1 {
+            return (f32::NEG_INFINITY, outside);
+        }
+        let span = (x1 - x0).max(y1 - y0) as u32;
+        let k = if span == 0 { 0 } else { (31 - span.leading_zeros()) as usize }.min(self.levels.len() - 1);
+        let (lw, _, v) = &self.levels[k];
+        let mut m = f32::NEG_INFINITY;
+        for ty in (y0 as usize >> k)..=(y1 as usize >> k) {
+            for tx in (x0 as usize >> k)..=(x1 as usize >> k) {
+                m = m.max(v[ty * lw + tx]);
+            }
+        }
+        (m, outside)
+    }
+}
+
+/// Spans of at most this many steps are marched sample by sample.
+const LEAF_STEPS: i32 = 8;
 
 /// What blocks a line of sight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +191,8 @@ pub struct Calculator<'a> {
     /// Per leaf block (`by * nb + bx`): its cells' sample points as `ci * nn + si` (`ci` =
     /// `cj * 4 + ci_x` within the block), highest first.
     block_order: Vec<Vec<u16>>,
+    /// The occluder layer baked with its max pyramid.
+    field: Field,
 }
 
 impl<'a> Calculator<'a> {
@@ -139,7 +246,8 @@ impl<'a> Calculator<'a> {
                 block_order.push(v.into_iter().map(|(_, k)| k).collect());
             }
         }
-        Some(Calculator { map, origin, stride, layout, model, n, nn, samples, block_order })
+        let field = Field::build(map, model.occluder);
+        Some(Calculator { map, origin, stride, layout, model, n, nn, samples, block_order, field })
     }
 
     pub fn layout(&self) -> Layout {
@@ -224,9 +332,64 @@ impl<'a> Calculator<'a> {
         worst
     }
 
+    /// Whether the landscape blocks the line from `e` to `t`: exactly
+    /// `obstruction(e, t, clearance, true) > clearance`, computed hierarchically. A span of
+    /// steps is skipped when the highest sample of the rectangle its samples lie in cannot rise
+    /// above the line's lowest point by more than the clearance (and, where the span leaves the
+    /// map, the outside height is not above that point); otherwise it is split, and spans of
+    /// `LEAF_STEPS` or fewer are marched with the reference arithmetic. Every float expression
+    /// is the one `obstruction` uses, and both the line and the rounded sample positions are
+    /// monotone in the step, so the bound is sound and the answer identical.
+    fn blocked(&self, e: &Sample, t: &Sample) -> bool {
+        let (dx, dy) = (t.x - e.x, t.y - e.y);
+        let steps = dx.abs().max(dy.abs());
+        if steps <= 1 {
+            return false;
+        }
+        let inv = 1.0 / steps as f32;
+        let (fx, fy) = (dx as f32 * inv, dy as f32 * inv);
+        let dh = (t.h - e.h) * inv;
+        let (ex, ey, eh) = (e.x as f32, e.y as f32, e.h);
+        let limit = self.model.clearance;
+        let field = &self.field;
+        let pos = |s: i32| {
+            let sf = s as f32;
+            (round_i32(ex + fx * sf), round_i32(ey + fy * sf))
+        };
+        let line = |s: i32| eh + dh * s as f32;
+        let mut stack = [(0i32, 0i32); 64];
+        let mut n = 1;
+        stack[0] = (1, steps - 1);
+        while n > 0 {
+            n -= 1;
+            let (s0, s1) = stack[n];
+            if s1 - s0 < LEAF_STEPS {
+                for s in s0..=s1 {
+                    let (px, py) = pos(s);
+                    let rise = field.at(px, py) - line(s);
+                    if rise > limit || (rise > 0.0 && !field.contains(px, py)) {
+                        return true;
+                    }
+                }
+                continue;
+            }
+            let ((ax, ay), (bx, by)) = (pos(s0), pos(s1));
+            let (m, outside) = field.max_rect(ax.min(bx), ay.min(by), ax.max(bx), ay.max(by));
+            let lo = line(s0).min(line(s1));
+            if m - lo <= limit && !(outside && field.outside > lo) {
+                continue;
+            }
+            let mid = s0 + (s1 - s0) / 2;
+            stack[n] = (mid + 1, s1);
+            stack[n + 1] = (s0, mid);
+            n += 2;
+        }
+        false
+    }
+
     #[inline]
     fn sees(&self, e: &Sample, t: &Sample) -> bool {
-        self.obstruction(e, t, self.model.clearance, true) <= self.model.clearance
+        !self.blocked(e, t)
     }
 
     /// The TVDT of a cell inside the grid.
@@ -411,6 +574,61 @@ mod tests {
         let see = |eye_add: f32| Calculator::new(&map, (0, 0), 16, plain(Model::new(2, 100, eye_add))).unwrap().compute(0, 0).unwrap().leaf(3, 0);
         assert!(!see(0.0));
         assert!(see(1000.0));
+    }
+
+    #[test]
+    fn round_i32_is_f32_round() {
+        let mut x = -5000.0f32;
+        while x < 5000.0 {
+            assert_eq!(round_i32(x), x.round() as i32, "{x}");
+            x += 0.123456;
+        }
+        for v in [0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999997, -0.49999997, 0.50000006, 1023.5, -1023.5, 3199.5, 0.0, -0.0] {
+            assert_eq!(round_i32(v), v.round() as i32, "{v}");
+        }
+    }
+
+    /// The hierarchical `blocked` answers exactly as the reference march on rough terrain,
+    /// including lines that leave the map and the clearance edge cases.
+    #[test]
+    fn blocked_matches_the_reference_march() {
+        let mut seed = 0x9E37_79B9u32;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let mut map = HeightMap::new(0, 0, 12, 10, -14000.0);
+        for y in 0..10 {
+            for x in 0..12 {
+                if (x + y) % 7 == 3 {
+                    continue; // a cell without data: the default height
+                }
+                let mut hs = vec![0.0; POINTS * POINTS];
+                let base = (rnd() % 6000) as f32 - 2000.0;
+                for (i, h) in hs.iter_mut().enumerate() {
+                    let spike = if rnd() % 97 == 0 { (rnd() % 9000) as f32 } else { 0.0 };
+                    *h = base + ((i % POINTS) as f32 * 37.0 + (i / POINTS) as f32 * 11.0) % 900.0 + spike;
+                }
+                let water = if rnd() % 3 == 0 { base + 300.0 } else { f32::NEG_INFINITY };
+                map.set_land(x, y, &hs, water);
+            }
+        }
+        for clearance in [0.0, 1250.0] {
+            let m = Model { clearance, ..Model::new(2, 100, 0.0) };
+            let calc = Calculator::new(&map, (-4, -4), 32, m).unwrap();
+            let (mut blocked, mut clear) = (0, 0);
+            for _ in 0..40_000 {
+                // Samples anywhere in the grid, map coordinates (-128..896), heights around the land.
+                let mut pt = || Sample { x: (rnd() % 1024) as i32 - 128, y: (rnd() % 1024) as i32 - 128, h: (rnd() % 12000) as f32 - 3000.0 };
+                let (e, t) = (pt(), pt());
+                let reference = calc.obstruction(&e, &t, clearance, true) > clearance;
+                assert_eq!(calc.blocked(&e, &t), reference, "{e:?} -> {t:?}");
+                if reference { blocked += 1 } else { clear += 1 }
+            }
+            assert!(blocked > 1000 && clear > 1000, "both outcomes exercised: {blocked} / {clear}");
+        }
     }
 
     /// Beyond the map the height is 0 and no clearance applies: an observer below 0 never sees

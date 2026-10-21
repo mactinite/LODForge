@@ -1728,3 +1728,37 @@ Process record (provenance):
   consulted, so no GPL attribution applies); no web search for TexGen's shaders.
 - Every fitted constant above was chosen only by the comparison tool's numbers on the golden
   output images (PSNR, alpha agreement, the `_n` least-squares fit and mean colours).
+
+## Occlusion: hierarchical line of sight (2026-10-21, main working tree)
+
+`crates/dyndolod/src/occlusion/visibility.rs`: the occluder layer (`ground_at` / `top_at`
+semantics) is baked once per `Calculator` with a max pyramid (`Field`); `Calculator::blocked`
+splits each line of sight into spans, skips a span when the highest sample of the rectangle its
+samples lie in cannot rise more than the clearance above the line's lowest point (and, where the
+span leaves the map, the outside height is not above that point), and marches spans of at most
+8 steps with the reference arithmetic. `f32::round` is replaced by an exact integer-returning
+equivalent (`round_i32`, tested against `f32::round`). Diagnostics (`needed_clearance`,
+`best_line`) keep the plain march. Results are identical: `blocked_matches_the_reference_march`
+compares 80,000 random lines per clearance (0 and 1,250) against `obstruction`, and the
+`Occlusion.esp` written for the same 300 Tamriel cells is byte-identical.
+
+Command (skyrim-cs-base `Default`, golden height map and plugins of
+`dyndolod-20261017-medium-tamriel`, quality 2, radius 100, `-Flat +Border`, no child worlds,
+16 threads, i7-12700K):
+
+```
+lodforge occlusion --instance D:\Modlists\skyrim-cs-base --profile Default --world Tamriel --no-child-worlds
+  --heightmap <golden>\meshes\Terrain\Tamriel\Objects\Tamriel.objects.heightmap.dat
+  --extra-plugin <golden>\DynDOLOD.esm --extra-plugin <golden>\DynDOLOD.esp [--limit 300] --out ...
+```
+
+| Cells | Before (plain march) | After | Plugin |
+|---|---|---|---|
+| 1 (setup only) | — | 1.2 s | |
+| 300 (`--limit 300`) | 27.9 s | 6.4 s (6.1–6.5 over leaf sizes 4/8/16; 32 steps: 8.5 s) | byte-identical |
+| 5,697 (all of Tamriel) | 494 s | 91 s (107 s at leaf 16) | byte-identical (3,425,934 B) |
+
+Setup (land cells, 1,666 terrain LOD meshes, pyramid) is 1.2 s; the compute part went from
+~87 ms to ~16 ms per cell. What is left is the hidden blocks, which still try every one of
+their 256 eye/target rays; a lower-bound (min pyramid) test per eye and block, or a per-eye
+horizon sweep, would be the next step.
