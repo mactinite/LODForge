@@ -4,6 +4,8 @@
 //! LODForge guided UI. The frontend (dist/) walks through instance -> worldspaces -> options ->
 //! output -> build; the backend runs the `lodforge` CLI (`info --json`, `build --json`) and
 //! forwards its JSON progress lines to the window as `build-line` events.
+//!
+//! `lodforge-ui.exe --instance <folder> [--profile <name>]` prefills step 0 and scans at start.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -12,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State, Window};
 
 #[cfg(windows)]
@@ -21,6 +23,109 @@ use std::os::windows::process::CommandExt;
 /// Running build, so it can be cancelled.
 #[derive(Default)]
 struct Running(Mutex<Option<Child>>);
+
+/// `--instance` / `--profile` from the command line (or from the usvfs relaunch handoff).
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+struct LaunchArgs {
+    instance: Option<String>,
+    profile: Option<String>,
+}
+
+impl LaunchArgs {
+    /// Accepts `--flag value` and `--flag=value`; anything else is logged and ignored.
+    fn parse(args: impl IntoIterator<Item = String>) -> Self {
+        let mut out = Self::default();
+        let mut it = args.into_iter();
+        while let Some(a) = it.next() {
+            let (flag, inline) = match a.split_once('=') {
+                Some((f, v)) if f.starts_with("--") => (f.to_string(), Some(v.to_string())),
+                _ => (a.clone(), None),
+            };
+            let slot = match flag.as_str() {
+                "--instance" => &mut out.instance,
+                "--profile" => &mut out.profile,
+                _ => {
+                    log(&format!("ignoring argument {a:?}"));
+                    continue;
+                }
+            };
+            *slot = inline.or_else(|| it.next()).filter(|v| !v.trim().is_empty());
+        }
+        out
+    }
+
+    fn is_empty(&self) -> bool {
+        self.instance.is_none() && self.profile.is_none()
+    }
+}
+
+/// `LODFORGE_UI_LOG=<file>` appends one line per step; the UI has no console.
+fn log(msg: &str) {
+    if let Ok(p) = std::env::var("LODFORGE_UI_LOG") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
+/// Carries the arguments across the explorer.exe relaunch, which cannot pass any:
+/// `%LOCALAPPDATA%\LODForge\launch-args.json`, taken once and only while fresh.
+fn handoff_file() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("LODForge").join("launch-args.json"))
+}
+
+const HANDOFF_MAX_AGE_SECS: u64 = 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[derive(Serialize, Deserialize)]
+struct Handoff {
+    /// Unix seconds when written.
+    at: u64,
+    args: LaunchArgs,
+}
+
+fn write_handoff(args: &LaunchArgs) {
+    let Some(p) = handoff_file() else {
+        return log("LOCALAPPDATA is not set; the launch arguments are lost");
+    };
+    let body = serde_json::to_string(&Handoff { at: now_secs(), args: args.clone() }).unwrap_or_default();
+    let res = p.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::write(&p, body));
+    match res {
+        Ok(()) => log(&format!("wrote launch arguments {args:?} to {}", p.display())),
+        Err(e) => log(&format!("writing {} failed ({e}); the launch arguments are lost", p.display())),
+    }
+}
+
+/// Reads and deletes the handoff file; a stale or unreadable one is deleted and ignored.
+fn take_handoff() -> LaunchArgs {
+    let Some(p) = handoff_file() else { return LaunchArgs::default() };
+    let Ok(text) = std::fs::read_to_string(&p) else { return LaunchArgs::default() };
+    let _ = std::fs::remove_file(&p);
+    match serde_json::from_str::<Handoff>(&text) {
+        Ok(h) if now_secs().saturating_sub(h.at) <= HANDOFF_MAX_AGE_SECS => {
+            log(&format!("took launch arguments {:?} from {}", h.args, p.display()));
+            h.args
+        }
+        Ok(h) => {
+            log(&format!("ignored stale {} ({} s old)", p.display(), now_secs().saturating_sub(h.at)));
+            LaunchArgs::default()
+        }
+        Err(e) => {
+            log(&format!("ignored unreadable {} ({e})", p.display()));
+            LaunchArgs::default()
+        }
+    }
+}
+
+/// Called by the frontend at start to prefill the instance and profile.
+#[tauri::command]
+fn launch_args(args: State<'_, LaunchArgs>) -> LaunchArgs {
+    args.inner().clone()
+}
 
 /// The CLI next to this executable (same cargo target folder), or `LODFORGE_CLI`.
 fn cli() -> PathBuf {
@@ -86,19 +191,22 @@ struct BuildRequest {
     /// Render tree billboards first (`build --texgen`) instead of relying on installed ones.
     #[serde(default)]
     texgen: bool,
-    /// `xlodgen` (default) or `dyndolod` (`build --mode`).
+    /// The UI only builds DynDOLOD style (`build --mode dyndolod`); anything but `dyndolod` is refused.
     #[serde(default)]
     mode: Option<String>,
     /// DynDOLOD rule preset (Low, Medium, High).
     #[serde(default)]
     preset: Option<String>,
-    /// DynDOLOD mode: DynDOLOD.esm/.esp and the DLL NG data files.
+    /// DynDOLOD.esm/.esp and the DLL NG data files (`--no-plugins` when false).
     #[serde(default = "yes")]
     plugins: bool,
-    /// DynDOLOD mode: Occlusion.esp.
+    /// Occlusion.esp (`--no-occlusion` when false).
     #[serde(default = "yes")]
     occlusion: bool,
-    /// Grass LOD: `off`, `bto` (DynDOLOD mode) or `go` (Grass Optimizations meshes).
+    /// `pbr` (Community Shaders with PBR) or `complex` (ENB or no shader mod): `build --materials`.
+    #[serde(default)]
+    materials: Option<String>,
+    /// Grass LOD: `off`, `bto` (grass in object LOD) or `go` (Grass Optimizations meshes).
     #[serde(default)]
     grass: Option<String>,
     /// `auto` or `cache` (with `bto`; both read the NGIO cache).
@@ -121,6 +229,9 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
     if guard.is_some() {
         return Err("a build is already running".into());
     }
+    if let Some(m) = req.mode.as_deref().filter(|m| *m != "dyndolod") {
+        return Err(format!("unsupported LOD style {m:?}; the UI builds DynDOLOD style only"));
+    }
     let mut c = command();
     c.args(["build", "--json", "--instance", &req.instance, "--profile", &req.profile]);
     if !req.worlds.is_empty() {
@@ -137,17 +248,18 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
     if req.texgen {
         c.arg("--texgen");
     }
-    if req.mode.as_deref() == Some("dyndolod") {
-        c.args(["--mode", "dyndolod"]);
-        if let Some(preset) = &req.preset {
-            c.args(["--preset", preset]);
-        }
-        if !req.plugins {
-            c.arg("--no-plugins");
-        }
-        if !req.occlusion {
-            c.arg("--no-occlusion");
-        }
+    c.args(["--mode", "dyndolod"]);
+    if let Some(preset) = &req.preset {
+        c.args(["--preset", preset]);
+    }
+    if !req.plugins {
+        c.arg("--no-plugins");
+    }
+    if !req.occlusion {
+        c.arg("--no-occlusion");
+    }
+    if let Some(m) = &req.materials {
+        c.args(["--materials", m]);
     }
     if let Some(g) = req.grass.as_deref().filter(|g| *g != "off") {
         c.args(["--grass", g]);
@@ -230,24 +342,17 @@ fn cancel_build(running: State<'_, Running>) {
 /// injected children. Adding `msedgewebview2.exe` to MO2's executables blacklist setting works
 /// too, but has to be carried by every instance.
 ///
+/// Explorer passes no arguments, so `args` cross the relaunch in the handoff file
+/// ([`write_handoff`] here, [`take_handoff`] in the restarted UI).
 /// The UI has no console; `LODFORGE_UI_LOG=<file>` appends one line per step for diagnosis.
 #[cfg(windows)]
-fn escape_usvfs() {
+fn escape_usvfs(args: &LaunchArgs) {
     use std::ffi::c_void;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
     }
-
-    let log = |msg: &str| {
-        if let Ok(p) = std::env::var("LODFORGE_UI_LOG") {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-                let _ = writeln!(f, "{msg}");
-            }
-        }
-    };
 
     let dll: Vec<u16> = "usvfs_x64.dll".encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: a NUL-terminated UTF-16 module name; a null result means the DLL is not loaded.
@@ -261,10 +366,19 @@ fn escape_usvfs() {
     }
     match std::env::current_exe() {
         Ok(exe) => {
+            if !args.is_empty() {
+                write_handoff(args);
+            }
             log("starting again outside the virtual file system through explorer.exe");
             match Command::new("explorer.exe").arg(&exe).spawn() {
                 Ok(_) => std::process::exit(0),
-                Err(e) => log(&format!("explorer.exe relaunch failed ({e}); continuing hooked")),
+                Err(e) => {
+                    log(&format!("explorer.exe relaunch failed ({e}); continuing hooked"));
+                    // This process keeps its own arguments; drop the file so a later start ignores it.
+                    if !args.is_empty() {
+                        let _ = take_handoff();
+                    }
+                }
             }
         }
         Err(e) => log(&format!("current_exe failed ({e}); continuing hooked")),
@@ -272,11 +386,37 @@ fn escape_usvfs() {
 }
 
 fn main() {
+    let mut args = LaunchArgs::parse(std::env::args().skip(1));
+    if !args.is_empty() {
+        log(&format!("launch arguments {args:?}"));
+    }
     #[cfg(windows)]
-    escape_usvfs();
+    escape_usvfs(&args);
+    if args.is_empty() {
+        args = take_handoff();
+    }
     tauri::Builder::default()
         .manage(Running::default())
-        .invoke_handler(tauri::generate_handler![list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build])
+        .manage(args)
+        .invoke_handler(tauri::generate_handler![launch_args, list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build])
         .run(tauri::generate_context!())
         .expect("error while running LODForge UI");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LaunchArgs;
+
+    fn parse(a: &[&str]) -> LaunchArgs {
+        LaunchArgs::parse(a.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parses_instance_and_profile() {
+        let a = parse(&["--instance", "D:/Modlists/skyrim-cs", "--profile=LODForge"]);
+        assert_eq!(a.instance.as_deref(), Some("D:/Modlists/skyrim-cs"));
+        assert_eq!(a.profile.as_deref(), Some("LODForge"));
+        assert!(parse(&[]).is_empty());
+        assert!(parse(&["--instance", "", "--stray"]).is_empty());
+    }
 }

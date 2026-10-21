@@ -39,12 +39,9 @@
 
   <section class="page hidden" data-page="2">
     <h1>What to generate</h1>
-    <h2>LOD style</h2>
-    <div class="grid two">
-      <label class="check card"><input type="radio" name="mode" value="xlodgen" checked><span><b>xLODGen style</b><br>Terrain, object and tree LOD like xLODGen. No plugins.</span></label>
-      <label class="check card"><input type="radio" name="mode" value="dyndolod"><span><b>DynDOLOD style</b><br>Object LOD with DynDOLOD's rules and LOD models, plus dynamic LOD plugins and occlusion. Reads DynDOLOD's configuration from tools\DynDOLOD.</span></label>
-    </div>
-    <div id="dynOptions" class="indent hidden">
+    <h2>DynDOLOD</h2>
+    <p class="hint">Object LOD with DynDOLOD's rules and LOD models, plus dynamic LOD plugins and occlusion. Reads DynDOLOD's configuration from tools\DynDOLOD.</p>
+    <div>
       <div class="row">
         <label>Preset <select id="preset"><option>Low</option><option selected>Medium</option><option>High</option></select></label>
       </div>
@@ -52,6 +49,12 @@
       <label class="check"><input type="checkbox" id="occlusion" checked> <span>Occlusion: Occlusion.esp from the new terrain and object LOD</span></label>
       <p class="hint">Earlier LOD output enabled in the profile (LODForge mods, DynDOLOD output) is not read.</p>
     </div>
+    <h2>Materials</h2>
+    <div class="grid two">
+      <label class="check card"><input type="radio" name="materials" value="pbr" checked><span><b>PBR</b> (Community Shaders with PBR)</span></label>
+      <label class="check card"><input type="radio" name="materials" value="complex"><span><b>Complex material</b> (ENB, or no shader mod)</span></label>
+    </div>
+    <p class="hint">PBR builds the pbr_lod texture twins and PBR texture sets for Community Shaders; complex material keeps plain textures for ENB or vanilla lists.</p>
     <h2>Stages</h2>
     <div class="grid two">
       <label class="check card"><input type="checkbox" id="terrain" checked><span><b>Terrain LOD</b><br>Meshes plus diffuse and normal textures for every LOD level.</span></label>
@@ -64,7 +67,7 @@
       <label>Grass <select id="grass">
         <option value="off" selected>No grass LOD</option>
         <option value="go">Grass Optimizations LOD meshes (Community Shaders)</option>
-        <option value="bto">Grass in object LOD (DynDOLOD style)</option>
+        <option value="bto">Grass in object LOD (DynDOLOD)</option>
       </select></label>
       <label id="grassSourceBox" class="hidden">Placements <select id="grassSource">
         <option value="auto" selected>Grass cache (NGIO precache)</option>
