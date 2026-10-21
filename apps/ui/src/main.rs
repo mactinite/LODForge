@@ -216,7 +216,64 @@ fn cancel_build(running: State<'_, Running>) {
     }
 }
 
+/// Mod Organizer 2 starts its tools inside the usvfs virtual file system and injects its hook DLL
+/// into every process they spawn. WebView2's helper processes (`msedgewebview2.exe`) do not
+/// survive that injection, and the UI dies with them a few seconds after launch. LODForge reads
+/// the MO2 instance folders directly and needs nothing from the VFS, so when this process finds
+/// the hook DLL loaded it starts itself again through the desktop shell (`explorer.exe` hands the
+/// launch to the already-running, unhooked shell process) and exits. The restarted UI runs
+/// outside the VFS; the MO2 tool entry can point at `lodforge-ui.exe` as it would for any tool.
+///
+/// Verified on MO2 2.5.2 / usvfs 0.5.6.1 (2026-10-20). The alternative, calling usvfs's exported
+/// `usvfsBlacklistExecutable` for the WebView2 runtime from inside the hooked process, faults
+/// inside `usvfs_x64.dll`: that export is for the MO2 process that owns the parameters, not for
+/// injected children. Adding `msedgewebview2.exe` to MO2's executables blacklist setting works
+/// too, but has to be carried by every instance.
+///
+/// The UI has no console; `LODFORGE_UI_LOG=<file>` appends one line per step for diagnosis.
+#[cfg(windows)]
+fn escape_usvfs() {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
+    }
+
+    let log = |msg: &str| {
+        if let Ok(p) = std::env::var("LODFORGE_UI_LOG") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                let _ = writeln!(f, "{msg}");
+            }
+        }
+    };
+
+    let dll: Vec<u16> = "usvfs_x64.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: a NUL-terminated UTF-16 module name; a null result means the DLL is not loaded.
+    if unsafe { GetModuleHandleW(dll.as_ptr()) }.is_null() {
+        return;
+    }
+    log("usvfs_x64.dll is loaded: running inside MO2's virtual file system");
+    if std::env::var_os("LODFORGE_UI_STAY_HOOKED").is_some() {
+        log("LODFORGE_UI_STAY_HOOKED set; continuing inside the VFS");
+        return;
+    }
+    match std::env::current_exe() {
+        Ok(exe) => {
+            log("starting again outside the virtual file system through explorer.exe");
+            match Command::new("explorer.exe").arg(&exe).spawn() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => log(&format!("explorer.exe relaunch failed ({e}); continuing hooked")),
+            }
+        }
+        Err(e) => log(&format!("current_exe failed ({e}); continuing hooked")),
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    escape_usvfs();
     tauri::Builder::default()
         .manage(Running::default())
         .invoke_handler(tauri::generate_handler![list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build])
