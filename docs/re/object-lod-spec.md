@@ -1228,6 +1228,70 @@ object stage calls the same `run_with`, its DynDOLOD-mode object stage stops at 
 - **B2.6** height map and glow atlas (`glow_atlas.rs` stubs).
 - DynDOLOD golden run (AltTextures rule, passthru shaders, HD masks), `e2e-compare`, in-game.
 
+### 11.9 `grass_lod1_nif`: the Grass Optimizations far-LOD mesh (2026-10-20, branch `grass-lod1-20261020`)
+
+The last `todo!()` of 11.1 that `lodforge build --grass go` reached. Rewritten in a fresh
+session from the stub's own doc comment (ours), not from any earlier version of the function.
+
+**Inputs read.** `docs/licensing.md`; `docs/reimplementation-plan.md` "Stage B2"; this spec
+sections 3.3, 3.4, 6.1, 6.2, 11.1-11.3, 12.4 (the paragraph on the grass stubs);
+`docs/re/dyndolod-spec.md` 3.5 (and the `CSGrassOptimizations` key rows); `docs/re/cacheless-grass.md`
+(nothing on `_lod1`). Our code at HEAD: the stub's signature and doc comment, `BillboardDims`,
+`write_grass_lod1`, the `build.rs` grass-go call site, `crates/nif/src/lib.rs` (data model) and
+`writer.rs` (`encode`: the header's type table is used only when it covers every block),
+`crates/lodmodel/src/lib.rs` `generate_nif` and `crates/btr/src/underside.rs` (how a BSFadeNode
+root is named), `crates/nif/tests/build.rs` (alpha round trip), `crates/texgen/src/lib.rs`
+(sidecar writer: `ShiftX/Y` are always 0, `Scale` is the override scale). Community Shaders
+(`github.com/community-shaders/skyrim-community-shaders`, MIT, default branch on 2026-10-20):
+`src/Features/GrassOptimizations/GrassMeshLibrary.{h,cpp}`, `src/Features/GrassOptimizations.cpp`
+(settings text and `DrawBucket`), `package/Shaders/RunGrass.hlsl` (`VS_INPUT`, colour use).
+Observed output: the 58 `meshes\lod\grass\*_lod1.nif` in each of the skyrim-cs mods `LODForge
+E2E - LODForge Output` and `LODForge MVP Output` (written 2026-10-18 by the earlier,
+LODGen-derived LODForge, so not authored files; no other `_lod1.nif` exists in the load order,
+loose or in a BSA name table), one parsed with `peek_bto`: BSFadeNode → one BSTriShape (8 / 4),
+lighting shader + texture set + NiAlphaProperty `0x12EC` / 128. Used only as a sanity check of
+the alpha values the spec already gives (3.4: threshold 128); layout, names and shader values
+below were chosen from the CS requirements and sections 3.4 / 6.1.
+
+**What Grass Optimizations requires** `[cs-src]`: `LoadLODMesh` demands
+`meshes\LOD\Grass\<source model stem>_LOD1.nif` (far band; `_LOD0.nif` = middle band, which the
+far band falls back to), walks the tree and rejects the file unless it holds exactly one
+BSTriShape and every object on the way has the identity transform ("requires one TriShape with
+baked node and geometry transforms"); it takes the shape's vertex / index buffers, vertex desc
+(OR'd with the instancing bits), triangle count and bound, and draws them with the **source
+grass shape's material**: the LOD file's own shader and textures are not used by the feature.
+The grass vertex shader reads `POSITION`, `TEXCOORD0`, `NORMAL` and `COLOR`; colour alpha both
+multiplies the texture alpha and weights the wind (`0.5 * a²`).
+
+**Written** (`apps/cli/src/dyndolod_build.rs`): `BSFadeNode "<texture stem>"` → `BSTriShape
+"GrassLOD1"` (identity transforms, flags 14) with `BSLightingShaderProperty` (type 0, flags1
+`0x80000000` ZBuffer_Test, flags2 `0x31` ZBuffer_Write | Double_Sided | Vertex_Colors,
+glossiness 80, specular (0, 0, 0) × 1, emissive × 0, lighting effects 0 / 0, clamp 0: the
+billboard values of 6.1) → `BSShaderTextureSet` (slot 0 the billboard, slot 1 its `_n` when
+TexGen wrote one, 7 empty), and `NiAlphaProperty` `0x12EC` (test enabled, GREATER, no blend) /
+128. Vertex desc position + UV + normal + colour (`0x0002b00006050407`, from
+`VertexDesc::with_attributes`), colours opaque white, normals (0, 0, 1). Two quads: quad 0 in
+XZ at y = ShiftY over x ∈ ±Width/2 (u = 0 at +X), quad 1 = quad 0 turned -90° about Z at
+x = ShiftX over y ∈ ±Depth/2 (u = 0 at -Y), z from ShiftZ to ShiftZ + Height, v = 0 at the
+top; every size and shift × `Scale`. Bound = centre of the box, radius to the farthest vertex.
+
+**Checked.** Unit test `dyndolod_build::tests::grass_lod1_mesh` (parse back: BSFadeNode root,
+one BSTriShape, identity transforms, 8 / 4, both texture slots, up normals, UVs in 0..1 with u = 0
+at +X / -Y and v = 0 on top, bottom at ShiftZ × Scale); `cargo test -p lodforge` 23 passed.
+Real run, release build: `build --instance D:\Modlists\skyrim-cs --profile LODForge-E2E --mode
+dyndolod --worlds MarkarthWorld --no-terrain --no-objects --no-trees --grass go --no-plugins
+--no-occlusion --exclude-mod "LODForge E2E - LODForge Output,LODForge E2E - DynDOLOD Output"`:
+78 / 111 grass billboards, **58 `_lod1.nif` written**, 0 already present, 3.5 s; all 58 parse,
+each references a billboard that exists in the output (no `_n` billboards in this load order, so
+slot 1 is empty in all of them), bound radii 19.5-73.9. Centre and radius of `fern_ash_lod1.nif`
+equal those of the earlier output for the same billboard.
+
+**Open** (not settled here): because CS draws the LOD mesh with the source grass texture, UVs
+spanning the whole billboard (0..1) sample the whole grass diffuse, not the billboard; a mesh
+that should look like the billboard needs UVs into the source texture (or a CS change). The
+in-game look was not checked. `lodmodel::generate_nif` sets a one-entry type table, which the
+writer ignores, so its roots are written as `NiNode`, not `BSFadeNode` (noticed, not changed).
+
 ## 12. Process record of stages B2.3 to B2.6 (2026-10-20, continued)
 
 Same session, branch and provenance rules as section 11 (the deleted modules, the decompiles
