@@ -10,6 +10,25 @@ full Tamriel/default/BTO grass at 100%, 148.921 s; 84 recovered dynamic original
 four restored object placements, geometry/material checks and live parent/world
 transitions. The [pinned f1a31e6 run](validation-20261019.md) remains the control.
 
+## Materials mode (2026-10-20, branch `materials-flag-20261020`)
+
+`build --materials pbr|complex` (default `pbr`). `pbr` is the earlier automatic behaviour:
+wherever a `textures\pbr\` source exists TexGen makes `pbr_lod` twins (stitched and rendered), the
+AltTextures and DynDOLOD.esm base copies name PBR texture sets and `...linear.dds` copies, and the
+`pbr-linear` step writes them. `complex` (ENB complex material or vanilla shading) consults no
+`textures\pbr\` source: no twins, no PBR copy aliases or re-uv/atlas-map rows, PBR texture sets and
+full-model textures under `textures\pbr\` are ignored by the side files, no `linear.dds`. The
+DynDOLOD docs show no object-LOD behaviour specific to ENB complex material (complex *grass* is
+detected per shader, `ForceComplexGrass`, docs/re/dyndolod-spec.md §3.5, and is unchanged), so
+`complex` means "not PBR".
+
+Smoke, MarkarthWorld, LODForge-E2E, `--mode dyndolod --texgen --no-plugins --no-occlusion`, RTX 4080:
+- `pbr` with the new binary vs c0c65dc: all 3,862 output files byte-identical, work-folder files
+  identical apart from the output paths in the export header (66 PBR twins, 5 linear textures).
+- `complex`: 0 PBR twins, 58 rendered (70 with PBR), no file under `textures\pbr\`, no `*pbr_lod*`
+  or `*linear.dds`; AltTextures, re-uv and atlas map name no `pbr`/`linear.dds` path; with plugins,
+  DynDOLOD.esm has no `_DynDOLOD_TXST`.
+
 ## Terrain LOD mips and grass billboards on the alpha atlas (2026-10-19, branch `terrain-mips-grass-atlas`)
 
 Two output-side candidates for the distant terrain shimmer the user sees with both LODForge and
@@ -849,8 +868,10 @@ lodforge build --instance <MO2> --profile <profile> --out <Data> | --mo2-mod <na
     [--worlds ...] [--seasons SPR,SUM,AUT,WIN] [--texgen]
     --mode dyndolod [--preset Low|Medium|High] [--no-plugins] [--no-occlusion] [--static-lod]
     [--grass off|go|bto [--grass-source auto|cache] [--grass-density N]]
-    [--work-dir <dir>] [--keep-lod-mods]
+    [--work-dir <dir>] [--keep-lod-mods] [--materials pbr|complex]
 ```
+
+(`--materials` was added on 2026-10-20, see "Materials mode" above.)
 
 Stages and JSON events: once `texgen`, `dyndolod-config`; per worldspace `terrain-meshes`,
 `terrain-textures` (per season), `dyndolod-export`, `objects-atlas`, `grass` (bto), `objects`,

@@ -69,12 +69,35 @@ pub struct Args {
     /// diffuse only) or `none`.
     #[arg(long, value_enum, default_value = "full")]
     pub terrain_mips: crate::terrain_textures::TerrainMips,
+    /// Material setup of the list. PBR (Community Shaders with PBR): pbr_lod texture twins, PBR
+    /// texture sets and linear copies from the textures\pbr\ sources. Complex material: plain
+    /// (ENB complex material or vanilla) textures only; textures\pbr\ sources are ignored.
+    /// `complex` means "not PBR": DynDOLOD documents no extra object-LOD handling for ENB
+    /// complex material (complex grass is detected per shader either way).
+    #[arg(long, value_enum, default_value = "pbr")]
+    pub materials: Materials,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum Mode {
     Xlodgen,
     Dyndolod,
+}
+
+/// `--materials`: which texture variants the DynDOLOD path makes and names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum Materials {
+    /// Community Shaders with PBR (`textures\pbr\` sources, `pbr_lod` twins, `linear.dds` copies).
+    #[default]
+    Pbr,
+    /// ENB complex material or vanilla shading: plain textures only.
+    Complex,
+}
+
+impl Materials {
+    pub fn pbr(self) -> bool {
+        self == Materials::Pbr
+    }
 }
 
 fn event(json: bool, world: &str, stage: &str, season: Option<&str>, ms: u128) {
@@ -165,6 +188,9 @@ pub fn run(a: &Args) -> Result<()> {
     let worlds = if a.worlds.is_empty() { lod_worlds(&p)? } else { a.worlds.clone() };
     if !a.json {
         println!("LODForge build: {} worldspace(s) {:?}, seasons {:?}, output {}", worlds.len(), worlds, a.seasons, out.display());
+        if a.materials == Materials::Complex {
+            println!(r"materials: complex (plain textures; textures\pbr\ sources ignored)");
+        }
     }
     let seasons: Vec<Option<String>> = std::iter::once(None).chain(a.seasons.iter().map(|s| Some(s.to_uppercase()))).collect();
     let mut failed = Vec::new();
@@ -185,7 +211,7 @@ pub fn run(a: &Args) -> Result<()> {
             let t = Instant::now();
             let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
             let reuv = work.join("DynDOLOD_SSE_re-uv-miniatlas.txt");
-            match lodforge_gpu::Gpu::new().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, &gpu, &dyndolod, &out, Some(&reuv))) {
+            match lodforge_gpu::Gpu::new().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, &gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr())) {
                 Ok(m) => {
                     if !a.json {
                         println!("texgen-stitched: {} atlases, {} PBR twins, {} full textures, {} temporaries, {} rendered; {} skipped", m.atlases, m.pbr, m.full, m.temps, m.rendered, m.skipped.len());
@@ -223,6 +249,7 @@ pub fn run(a: &Args) -> Result<()> {
         match crate::dyndolod_build::Config::load(&p, &dir, &a.dyn_opts.preset, a.dyn_opts.static_lod) {
             Ok(mut c) => {
                 c.windows = a.dyn_opts.windows;
+                c.pbr = a.materials.pbr();
                 if !a.json {
                     println!("DynDOLOD configuration: {} rules, {} LOD models, preset {}", c.rules.len(), c.index.len(), a.dyn_opts.preset);
                 }
@@ -250,7 +277,7 @@ pub fn run(a: &Args) -> Result<()> {
                 let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
                 // (LODFORGE_NO_MINIATLAS=1: left out, for A/B comparisons.)
                 if std::env::var_os("LODFORGE_NO_MINIATLAS").is_none() {
-                    mini_rows = crate::texgen_stitched::miniatlas_rows(&p, &dyndolod);
+                    mini_rows = crate::texgen_stitched::miniatlas_rows(&p, &dyndolod, a.materials.pbr());
                 }
                 if !a.json {
                     println!("  {} TexGen mini-atlas rows for the atlas maps", mini_rows.len());
@@ -347,7 +374,7 @@ pub fn run(a: &Args) -> Result<()> {
                     }
                     if !all.is_empty() {
                         let gpu = lodforge_gpu::Gpu::new()?;
-                        let (written, skipped) = crate::texgen_stitched::stitch_atlases(&p, &gpu, &all, &out)?;
+                        let (written, skipped) = crate::texgen_stitched::stitch_atlases(&p, &gpu, &all, &out, a.materials.pbr())?;
                         let made: Vec<lodforge_texgen::stitch::Rule> = all.iter().filter(|x| written.contains(&x.dest)).flat_map(|x| x.rules.iter().cloned()).collect();
                         world_mini.extend(lodforge_texgen::stitch::atlas_map_rows(&made, lodforge_texgen::stitch::StitchParams::default().base, |_| false, |_| None));
                         if !a.json {
@@ -405,7 +432,7 @@ pub fn run(a: &Args) -> Result<()> {
             // The `...linear.dds` copies of the PBR diffuses the AltTextures name (shared by every
             // worldspace; each is written once).
             linear.retain(|n| !linear_done.contains(n));
-            if !linear.is_empty() {
+            if a.materials.pbr() && !linear.is_empty() {
                 step("pbr-linear", None, &mut || {
                     let gpu = lodforge_gpu::Gpu::new()?;
                     let n = crate::pbr_linear::write(&p.vfs, &gpu, &linear, &out)?;
