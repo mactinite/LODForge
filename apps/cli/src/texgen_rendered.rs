@@ -183,8 +183,9 @@ pub const LIGHT: lodforge_texgen::Light = lodforge_texgen::Light { direct: 0.0, 
 
 /// Renders every render NIF whose pieces' textures are all in the load order (TexGen leaves out
 /// the Enderal, SMIM and HPP ones here), plus a PBR twin when some piece has a `textures\pbr\`
-/// diffuse. `yaw` is the view (180: camera on -Y, image right = +X).
-pub fn render_all(p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Renderer, dyndolod: &Path, filter: Option<&str>, yaw: f32) -> anyhow::Result<(Vec<Rendered>, Vec<String>)> {
+/// diffuse and `materials_pbr` is on (`--materials pbr`; off, no `textures\pbr\` path is looked
+/// up and no twin is rendered). `yaw` is the view (180: camera on -Y, image right = +X).
+pub fn render_all(p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Renderer, dyndolod: &Path, filter: Option<&str>, yaw: f32, materials_pbr: bool) -> anyhow::Result<(Vec<Rendered>, Vec<String>)> {
     use lodforge_texgen::stitch::{pbr_dest, pbr_path};
     let mut out = Vec::new();
     let mut skipped = Vec::new();
@@ -217,7 +218,7 @@ pub fn render_all(p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, renderer
         let view = lodforge_texgen::View { yaw_deg: yaw, x0: 0.0, x1: 0.0, z0: o.plane[2], z1: o.plane[3], width: w, height: h };
         let (a, b) = (lodforge_texgen::render::view_x([o.plane[0], 0.0, 0.0], yaw), lodforge_texgen::render::view_x([o.plane[1], 0.0, 0.0], yaw));
         let view = lodforge_texgen::View { x0: a.min(b), x1: a.max(b), ..view };
-        let has_pbr = pbr_name_ok(&path) && scene.meshes.iter().any(|m| !m.diffuse.is_empty() && p.vfs.exists(&pbr_path(&m.diffuse)));
+        let has_pbr = materials_pbr && pbr_name_ok(&path) && scene.meshes.iter().any(|m| !m.diffuse.is_empty() && p.vfs.exists(&pbr_path(&m.diffuse)));
         for pbr in [false, true] {
             if pbr && !has_pbr {
                 continue;

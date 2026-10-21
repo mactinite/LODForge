@@ -605,6 +605,24 @@ mod tests {
     }
 
     #[test]
+    fn no_pbr_rows_without_a_twin() {
+        // `--materials complex`: the twin closure is always None, so neither map names a
+        // `textures\pbr\` source or a `pbr_lod` destination; with a twin both do.
+        let mk = |x: f32| Rule::Tile { brightness: 0, rgb: [1.0; 3], src: "textures\\landscape\\dirt02.dds".into(), tile: [0.5, 0.5], pos: [x, 0.0], dest: "textures\\lod\\dirt02lod.dds".into(), atlas: [1.0, 1.0], alpha: false };
+        let rules = vec![mk(0.0), mk(0.5)];
+        let twin = |r: &Rule| Some((pbr_path(r.src()), pbr_dest(r.dest())));
+        let none = |_: &Rule| None;
+        let has_pbr = |s: &str| s.contains("\\pbr\\") || s.contains("pbr_lod");
+        let reuv = super::reuv_rows(&rules, 256, |_| false, none);
+        let map: Vec<String> = super::atlas_map_rows(&rules, 256, |_| false, none).iter().map(|r| r.line()).collect();
+        assert!(!reuv.is_empty() && !map.is_empty());
+        assert!(reuv.iter().chain(&map).all(|l| !has_pbr(l)), "{reuv:?} {map:?}");
+        let reuv = super::reuv_rows(&rules, 256, |_| false, twin);
+        let map: Vec<String> = super::atlas_map_rows(&rules, 256, |_| false, twin).iter().map(|r| r.line()).collect();
+        assert!(reuv.iter().any(|l| has_pbr(l)) && map.iter().any(|l| has_pbr(l)), "{reuv:?} {map:?}");
+    }
+
+    #[test]
     fn tone_and_unmultiply() {
         let t = Tone::new(-4, [0.95, 0.93, 1.0]);
         assert!((t.apply(0.5, 2) - 0.46).abs() < 1e-6);

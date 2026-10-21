@@ -122,22 +122,26 @@ pub fn load_rules(p: &Profile, dyndolod: &Path) -> RuleSet {
 /// intermediates made earlier in the run, then the VFS.
 struct Sources<'a> {
     p: &'a Profile,
+    /// `--materials pbr`: `textures\pbr\` versions are looked up (CheckPBR, PBR twins, the PBR
+    /// copy aliases). Off (`--materials complex`), no `textures\pbr\` source is consulted.
+    pbr: bool,
     alias: HashMap<String, String>,
     temps: Mutex<HashMap<String, Level>>,
     cache: Mutex<HashMap<(String, u32), std::sync::Arc<MipChain>>>,
 }
 
 impl<'a> Sources<'a> {
-    fn new(p: &'a Profile, copies: &[(String, String)]) -> Sources<'a> {
+    fn new(p: &'a Profile, copies: &[(String, String)], pbr: bool) -> Sources<'a> {
         let mut alias = HashMap::new();
         for (src, dst) in copies {
-            for (s, d) in [(src.clone(), dst.clone()), (stitch::pbr_path(src), stitch::pbr_path(dst))] {
+            let pairs = [(src.clone(), dst.clone()), (stitch::pbr_path(src), stitch::pbr_path(dst))];
+            for (s, d) in pairs.into_iter().take(if pbr { 2 } else { 1 }) {
                 if !p.vfs.exists(&d) && p.vfs.exists(&s) {
                     alias.entry(d).or_insert(s);
                 }
             }
         }
-        Sources { p, alias, temps: Mutex::new(HashMap::new()), cache: Mutex::new(HashMap::new()) }
+        Sources { p, pbr, alias, temps: Mutex::new(HashMap::new()), cache: Mutex::new(HashMap::new()) }
     }
     fn resolve(&self, path: &str) -> String {
         let n = stitch::norm(path);
@@ -151,9 +155,10 @@ impl<'a> Sources<'a> {
         self.p.vfs.exists(&n)
     }
     /// TexGen's CheckPBR: some source (by its own name, before copy aliases) has a
-    /// `textures\pbr\` version in the load order or among the PBR temporaries.
+    /// `textures\pbr\` version in the load order or among the PBR temporaries. Never with
+    /// `--materials complex`.
     fn has_pbr(&self, a: &Atlas) -> bool {
-        a.rules.iter().any(|r| {
+        self.pbr && a.rules.iter().any(|r| {
             let raw = stitch::norm(r.src());
             let p = stitch::pbr_path(&raw);
             p != raw && if p.starts_with("dyndolod-temp\\") { self.temps.lock().unwrap().contains_key(&p) } else { self.p.vfs.exists(&p) }
@@ -257,7 +262,7 @@ fn pbr_twin<'a>(src: &'a Sources<'_>, rs: &'a RuleSet) -> impl Fn(&Rule) -> Opti
     let pbr_set = |rules: &[Rule]| -> HashSet<String> { stitch::group(rules).iter().filter(|a| src.has_pbr(a)).map(|a| a.dest.clone()).collect() };
     let (pbr_new, pbr_old) = (pbr_set(&rs.rules), pbr_set(&rs.shadowed));
     move |r: &Rule| {
-        if !(if rs.shadowed.contains(r) { &pbr_old } else { &pbr_new }).contains(r.dest()) {
+        if !src.pbr || !(if rs.shadowed.contains(r) { &pbr_old } else { &pbr_new }).contains(r.dest()) {
             return None;
         }
         let p = stitch::pbr_path(r.src());
@@ -268,9 +273,9 @@ fn pbr_twin<'a>(src: &'a Sources<'_>, rs: &'a RuleSet) -> impl Fn(&Rule) -> Opti
 /// DynDOLOD's mini-atlas rows of the object atlas map for the TexGen rules of the load order,
 /// limited to mini atlases that exist (in the load order or in a build output added to the VFS).
 /// No stitching: the PBR temporaries are only marked.
-pub fn miniatlas_rows(p: &Profile, dyndolod: &Path) -> Vec<stitch::MiniAtlasRow> {
+pub fn miniatlas_rows(p: &Profile, dyndolod: &Path, pbr: bool) -> Vec<stitch::MiniAtlasRow> {
     let rs = load_rules(p, dyndolod);
-    let src = Sources::new(p, &rs.copies);
+    let src = Sources::new(p, &rs.copies, pbr);
     for a in stitch::group(&rs.rules).iter().filter(|a| a.dest.starts_with("dyndolod-temp\\")) {
         if src.has_pbr(a) {
             src.temps.lock().unwrap().insert(stitch::pbr_path(&a.dest), Level { w: 0, h: 0, px: Vec::new() });
@@ -383,8 +388,8 @@ pub fn mini_atlas_export_text(atlases: &[Atlas], out: &Path) -> String {
 /// Stitches `atlases` (diffuse and `_n`, TexGen's stitching, PBR sources at full brightness: the
 /// E2E golden `frozenmarshice02pbr_lod` has the mean colour of its source) into `out`; returns the textures
 /// written and the atlases left out (missing source).
-pub fn stitch_atlases(p: &Profile, gpu: &lodforge_gpu::Gpu, atlases: &[Atlas], out: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let src = Sources::new(p, &[]);
+pub fn stitch_atlases(p: &Profile, gpu: &lodforge_gpu::Gpu, atlases: &[Atlas], out: &Path, pbr: bool) -> Result<(Vec<String>, Vec<String>)> {
+    let src = Sources::new(p, &[], pbr);
     let prm = StitchParams { pbr_scale: 1.0, ..StitchParams::default() };
     let results: Vec<std::result::Result<Vec<Out>, String>> = atlases
         .par_iter()
@@ -636,10 +641,11 @@ fn golden_files(golden: &Path) -> Vec<String> {
     out
 }
 
-/// Stitches everything into `out` (the build stage). Returns what was made.
-pub fn stitch_into(p: &Profile, gpu: &lodforge_gpu::Gpu, dyndolod: &Path, out: &Path, reuv_out: Option<&Path>) -> Result<Made> {
+/// Stitches everything into `out` (the build stage). Returns what was made. `pbr` off
+/// (`--materials complex`): plain textures only, no `textures\pbr\` source is read.
+pub fn stitch_into(p: &Profile, gpu: &lodforge_gpu::Gpu, dyndolod: &Path, out: &Path, reuv_out: Option<&Path>, pbr: bool) -> Result<Made> {
     let rules = load_rules(p, dyndolod);
-    let src = Sources::new(p, &rules.copies);
+    let src = Sources::new(p, &rules.copies, pbr);
     let prm = StitchParams::default();
     let write = |o: Out| -> Result<()> {
         let path = out.join(&o.path);
@@ -650,7 +656,7 @@ pub fn stitch_into(p: &Profile, gpu: &lodforge_gpu::Gpu, dyndolod: &Path, out: &
     let mut made = make_all(&src, &rules, &prm, None, write)?;
     // Rendered object-LOD textures (§3.3), after the stitched ones (TexGen's order).
     let renderer = lodforge_texgen::Renderer::new(gpu);
-    let (rs, skipped) = crate::texgen_rendered::render_all(p, gpu, &renderer, dyndolod, None, RENDER_YAW)?;
+    let (rs, skipped) = crate::texgen_rendered::render_all(p, gpu, &renderer, dyndolod, None, RENDER_YAW, pbr)?;
     made.rendered = rs.len();
     made.rendered_skipped = skipped;
     for r in rs {
@@ -706,7 +712,7 @@ pub fn run(a: &Args) -> Result<()> {
     let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
     let rules = load_rules(&p, &dyndolod);
     println!("rules: {} ({} destinations, {} shadowed), copy rules {}", rules.rules.len(), stitch::group(&rules.rules).len(), rules.shadowed.len(), rules.copies.len());
-    let src = Sources::new(&p, &rules.copies);
+    let src = Sources::new(&p, &rules.copies, true);
     println!("copy aliases active: {}", src.alias.len());
     let prm = StitchParams { bias: a.bias, ..StitchParams::default() };
     let gpu = if a.out.is_some() || a.rendered { Some(lodforge_gpu::Gpu::new()?) } else { None };
@@ -728,7 +734,7 @@ pub fn run(a: &Args) -> Result<()> {
     if let (true, Some(gpu)) = (a.rendered, &gpu) {
         let t = Instant::now();
         let renderer = lodforge_texgen::Renderer::new(gpu);
-        let (rs, skipped) = crate::texgen_rendered::render_all(&p, gpu, &renderer, &dyndolod, a.filter.as_deref(), a.yaw)?;
+        let (rs, skipped) = crate::texgen_rendered::render_all(&p, gpu, &renderer, &dyndolod, a.filter.as_deref(), a.yaw, true)?;
         made.rendered = rs.len();
         made.rendered_skipped = skipped;
         for r in rs {
