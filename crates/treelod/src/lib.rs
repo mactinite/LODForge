@@ -427,6 +427,11 @@ fn pack(blocks: &[(u32, u32, u32)], width: u32, height: u32, pad: u32) -> Option
         let (bw, bh) = (i64::from(bw), i64::from(bh));
         let i = find(&nodes, 0, bw, bh)?;
         let n = nodes[i];
+        // A right node is `bh + pad` tall, so it can reach below the page when its parent sat at
+        // the bottom; a billboard placed there would overflow the atlas. Grow the page instead.
+        if n.x + bw > i64::from(width) || n.y + bh > i64::from(height) {
+            return None;
+        }
         let down = N { x: n.x, y: n.y + bh + pad, w: n.w, h: n.h - bh - pad, used: false, right: NONE, down: NONE };
         // xLODGen 4.1.5o: the right node keeps the padding row (h + pad; public source: h).
         let right = N { x: n.x + bw + pad, y: n.y, w: n.w - bw - pad, h: bh + pad, used: false, right: NONE, down: NONE };
@@ -503,6 +508,21 @@ mod tests {
         assert!(p.is_none());
         let p = pack(&[(1, 256, 512), (2, 128, 128)], 512, 512, 2).unwrap();
         assert_eq!((p[1].x, p[1].y), (258, 0));
+    }
+
+    #[test]
+    fn slots_never_leave_the_page() {
+        // A full-height block's right node is `h + pad` tall, so a block taller than the page's
+        // remaining height used to be placed there and overflow (SkuldafnWorld, 2026-10-21).
+        assert!(pack(&[(1, 100, 512), (2, 100, 520)], 512, 512, 16).is_none());
+        let p = pack(&[(1, 100, 512), (2, 100, 520)], 512, 1024, 16).unwrap();
+        assert!(p.iter().all(|s| s.x + s.w <= 512 && s.y + s.h <= 1024), "{p:?}");
+        let blocks: Vec<(u32, u32, u32)> = (0..40u32).map(|i| (i, 64 + (i * 37) % 300, 64 + (i * 53) % 500)).collect();
+        for (w, h) in [(512, 512), (1024, 512), (1024, 1024), (2048, 1024)] {
+            if let Some(p) = pack(&blocks, w, h, 16) {
+                assert!(p.iter().all(|s| s.x + s.w <= w && s.y + s.h <= h), "{w}x{h}: {p:?}");
+            }
+        }
     }
 }
 
