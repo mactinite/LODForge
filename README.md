@@ -95,6 +95,12 @@ The UI launches the neighboring CLI executable, or the path in `LODFORGE_CLI`.
 The frontend is checked-in HTML/CSS/JavaScript; no npm build is required.
 The CLI exposes more options than the UI.
 
+`lodforge-ui.exe --instance <MO2 folder> [--profile <name>]` prefills the first step and
+scans the load order at start. For an MO2 tool entry, set the arguments to
+`--instance "D:/Modlists/skyrim-cs"` (your instance folder); the UI restarts itself outside
+MO2's virtual file system and carries the arguments over through
+`%LOCALAPPDATA%\LODForge\launch-args.json`.
+
 ## Release preparation
 
 Windows x64 CI builds and checks the CLI/UI; the release workflow prepares a

@@ -7,6 +7,8 @@ if (!window.__TAURI__) {
   window.__TAURI__ = {
     core: {
       invoke: async (cmd) => {
+        // Preview: ?instance=...&profile=... stands in for the command-line arguments.
+        if (cmd === "launch_args") { const q = new URLSearchParams(location.search); return { instance: q.get("instance"), profile: q.get("profile") }; }
         if (cmd === "list_profiles") return ["Default", "Testing"];
         if (cmd === "profile_info") return { plugins: 74, worlds: ["Tamriel", "MarkarthWorld", "Blackreach", "DLC2SolstheimWorld"], seasons: ["SPR", "SUM", "AUT", "WIN"], missing_archives: 0, ms: 212 };
         if (cmd === "mo2_running") return false;
@@ -49,17 +51,19 @@ function show(step) {
   if (step === 3) review();
 }
 
-async function loadProfiles() {
+async function loadProfiles(preferred) {
   const instance = $("instance").value.trim();
   $("profile").innerHTML = "";
   if (!instance) return;
   try {
     const profiles = await invoke("list_profiles", { instance });
     for (const p of profiles) $("profile").add(new Option(p, p));
-    const last = load("profile", "Default");
+    const last = typeof preferred === "string" && profiles.includes(preferred) ? preferred : load("profile", "Default");
     if (profiles.includes(last)) $("profile").value = last;
+    if (typeof preferred === "string" && last !== preferred) { status(`Profile "${preferred}" not found in this instance`, true); return false; }
     status(`${profiles.length} profile(s) found`);
-  } catch (e) { status(String(e), true); }
+    return profiles.length > 0;
+  } catch (e) { status(String(e), true); return false; }
 }
 
 async function scan() {
@@ -212,5 +216,16 @@ document.querySelectorAll("input[name=mode], #grass").forEach((el) => el.addEven
   $("grass").value = load("grass", "off");
   syncOptions();
 }
-loadProfiles();
-show(0);
+// `lodforge-ui --instance <folder> [--profile <name>]` (e.g. from the MO2 tool entry) wins over
+// the remembered instance and scans straight away.
+(async () => {
+  show(0);
+  let args = {};
+  try { args = (await invoke("launch_args")) || {}; } catch (_) {}
+  if (args.instance || args.profile) {
+    if (args.instance) $("instance").value = args.instance;
+    if (await loadProfiles(args.profile || undefined)) await scan();
+  } else {
+    loadProfiles();
+  }
+})();
