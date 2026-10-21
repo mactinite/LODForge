@@ -203,6 +203,9 @@ struct BuildRequest {
     /// Occlusion.esp (`--no-occlusion` when false).
     #[serde(default = "yes")]
     occlusion: bool,
+    /// `pbr` (Community Shaders with PBR) or `complex` (ENB or no shader mod): `build --materials`.
+    #[serde(default)]
+    materials: Option<String>,
     /// Grass LOD: `off`, `bto` (grass in object LOD) or `go` (Grass Optimizations meshes).
     #[serde(default)]
     grass: Option<String>,
@@ -254,6 +257,9 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
     }
     if !req.occlusion {
         c.arg("--no-occlusion");
+    }
+    if let Some(m) = &req.materials {
+        c.args(["--materials", m]);
     }
     if let Some(g) = req.grass.as_deref().filter(|g| *g != "off") {
         c.args(["--grass", g]);

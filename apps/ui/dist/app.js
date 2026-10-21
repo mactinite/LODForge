@@ -110,6 +110,7 @@ function selection() {
     instance: $("instance").value.trim(), profile: $("profile").value, worlds, seasons,
     terrain: $("terrain").checked, objects: $("objects").checked, trees: $("trees").checked, texgen: $("texgen").checked,
     mode: "dyndolod",
+    materials: document.querySelector("input[name=materials]:checked").value,
     preset: $("preset").value, plugins: $("plugins").checked, occlusion: $("occlusion").checked,
     grass: $("grass").value, grass_source: $("grassSource").value, grass_density: Number($("grassDensity").value) || null,
     mo2_mod: dest === "mo2" ? $("modName").value.trim() : null,
@@ -121,9 +122,10 @@ function selection() {
 function review() {
   const s = selection();
   const grass = { go: "Grass Optimizations meshes", bto: "grass in object LOD" }[s.grass];
+  const materials = s.materials === "pbr" ? "PBR (Community Shaders)" : "complex material";
   const stages = [s.texgen && "billboards", s.terrain && "terrain", s.objects && `objects (DynDOLOD ${s.preset})`, s.trees && "trees",
     grass, s.objects && s.plugins && "dynamic LOD plugins", s.objects && s.occlusion && "occlusion"].filter(Boolean);
-  $("review").innerHTML = `<b>Review</b><br>${s.worlds.length} worldspace(s): ${s.worlds.join(", ") || "none"}<br>Stages: ${stages.join(", ") || "none"}<br>Seasons: default${s.seasons.length ? " + " + s.seasons.join(", ") : ""}<br>Output: ${s.mo2_mod ? `MO2 mod "${s.mo2_mod}"${s.enable ? " (enabled)" : ""}` : s.out || "(choose a folder)"}`;
+  $("review").innerHTML = `<b>Review</b><br>${s.worlds.length} worldspace(s): ${s.worlds.join(", ") || "none"}<br>Stages: ${stages.join(", ") || "none"}<br>Materials: ${materials}<br>Seasons: default${s.seasons.length ? " + " + s.seasons.join(", ") : ""}<br>Output: ${s.mo2_mod ? `MO2 mod "${s.mo2_mod}"${s.enable ? " (enabled)" : ""}` : s.out || "(choose a folder)"}`;
 }
 
 async function startBuild() {
@@ -204,6 +206,11 @@ $("grass").value = load("grass", "off");
 if (!$("grass").value) $("grass").value = "off";
 syncGrass();
 try { localStorage.removeItem("lodforge.mode"); } catch (_) {}
+{
+  const r = document.querySelector(`input[name=materials][value="${load("materials", "pbr")}"]`);
+  if (r) r.checked = true;
+  document.querySelectorAll("input[name=materials]").forEach((el) => el.addEventListener("change", () => store("materials", el.value)));
+}
 // `lodforge-ui --instance <folder> [--profile <name>]` (e.g. from the MO2 tool entry) wins over
 // the remembered instance and scans straight away.
 (async () => {
