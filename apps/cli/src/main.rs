@@ -31,6 +31,7 @@ mod profile;
 mod scan;
 mod season_delta;
 mod terrain_bake;
+mod terrain_lane;
 mod terrain_meshes;
 mod terrain_textures;
 mod terrain_underside;

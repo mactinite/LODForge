@@ -106,13 +106,13 @@ impl Materials {
 }
 
 /// `--json`: one line when a stage starts, so a front end can show what is running.
-fn begin(json: bool, world: &str, stage: &str, season: Option<&str>) {
+pub(crate) fn begin(json: bool, world: &str, stage: &str, season: Option<&str>) {
     if json {
         println!("{{\"event\":\"begin\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()));
     }
 }
 
-fn event(json: bool, world: &str, stage: &str, season: Option<&str>, ms: u128) {
+pub(crate) fn event(json: bool, world: &str, stage: &str, season: Option<&str>, ms: u128) {
     if json {
         println!("{{\"event\":\"stage\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{},\"ms\":{ms}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()));
     } else {
@@ -213,10 +213,12 @@ pub fn run(a: &Args) -> Result<()> {
             println!(r"materials: standard (non-PBR; plain textures, textures\pbr\ sources ignored)");
         }
     }
-    let seasons: Vec<Option<String>> = std::iter::once(None).chain(a.seasons.iter().map(|s| Some(s.to_uppercase()))).collect();
     let mut failed = Vec::new();
     // Next to the output (same volume, so grass cache files can be hard-linked).
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
+    // Terrain meshes and textures of every worldspace and season run on their own thread from
+    // here on; the object stages below wait per worldspace for its meshes.
+    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, json: a.json }));
     if a.texgen {
         let t = Instant::now();
         begin(a.json, "all", "texgen", None);
@@ -341,26 +343,6 @@ pub fn run(a: &Args) -> Result<()> {
                 }
             }
         };
-        if !a.no_terrain {
-            let args = crate::terrain_meshes::Args { profile: a.profile.clone(), world: world.clone(), out: out.clone(), seasons: a.seasons.clone(), settings: None, golden: None };
-            step("terrain-meshes", None, &mut || crate::terrain_meshes::run_with(&p, &args));
-            for season in &seasons {
-                let args = crate::terrain_textures::Args {
-                    profile: a.profile.clone(),
-                    world: world.clone(),
-                    levels: vec![4, 8, 16, 32],
-                    kinds: vec!["diffuse".into(), "normal".into()],
-                    out: out.clone(),
-                    season: season.clone(),
-                    delta_from: season.as_ref().map(|_| out.clone()),
-                    golden: None,
-                    top: None,
-                    batch: 96,
-                    mips: a.terrain_mips,
-                };
-                step("terrain-textures", season.as_deref(), &mut || crate::terrain_textures::run_with(&p, &args));
-            }
-        }
         if !a.no_objects && dyn_mode {
             let Some(c) = &dyn_cfg else { continue };
             let Some(ws) = dyn_worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(world)) else { continue };
@@ -502,6 +484,10 @@ pub fn run(a: &Args) -> Result<()> {
                 args.grass_flat = Some(g.flat);
                 args.grass_density = a.dyn_opts.grass_density;
             }
+            // Clipped against this worldspace's fresh terrain meshes.
+            if let Some(l) = &lane {
+                l.wait_meshes(world);
+            }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
         } else if !a.no_objects {
             let args = crate::object_lod::Args {
@@ -534,6 +520,9 @@ pub fn run(a: &Args) -> Result<()> {
                 grass_flat: None,
                 grass_density: None,
             };
+            if let Some(l) = &lane {
+                l.wait_meshes(world);
+            }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
         }
         if !a.no_trees {
@@ -550,6 +539,9 @@ pub fn run(a: &Args) -> Result<()> {
         {
             let args = crate::terrain_underside::Args { profile: a.profile.clone(), world: world.clone(), out: out.clone(), quality: 10.0, from_export: None, golden: None, dyndolod: Some(c.dir.clone()) };
             let mut built = false;
+            if let Some(l) = &lane {
+                l.wait_meshes(world);
+            }
             step("underside", None, &mut || {
                 crate::terrain_underside::run_with(&p, &args)?;
                 built = true;
@@ -582,6 +574,10 @@ pub fn run(a: &Args) -> Result<()> {
                 failed.push(format!("grass-lod1: {e}"));
             }
         }
+    }
+    // Everything after this reads the terrain LOD through the VFS: the lane must be done.
+    if let Some(l) = lane {
+        l.finish(&mut failed);
     }
     if dyn_mode && let Some(c) = &dyn_cfg {
         // The DynDOLOD stages read the build's own terrain LOD and plugins.

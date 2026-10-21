@@ -1762,3 +1762,39 @@ Setup (land cells, 1,666 terrain LOD meshes, pyramid) is 1.2 s; the compute part
 ~87 ms to ~16 ms per cell. What is left is the hidden blocks, which still try every one of
 their 256 eye/target rays; a lower-bound (min pyramid) test per eye and block, or a per-eye
 horizon sweep, would be the next step.
+
+## Terrain lane and terrain-texture setup caching (2026-10-21, main working tree)
+
+`lodforge build` now runs terrain meshes and textures of every worldspace and season on a
+thread of their own (`apps/cli/src/terrain_lane.rs`) beside the object, tree and DynDOLOD
+stages; the object and underside stages wait per worldspace for its meshes, and the plugin and
+occlusion stages wait for the whole lane. All meshes are built first (seconds), then the
+textures. The lane opens its own view of the profile and shares one
+`terrain_textures::TerrainContext` across its runs: one GPU device, the worldspace scan, land
+textures and season swaps read once, each worldspace's LAND decoded once (a season is applied
+as a remapped land-texture table, which resolves to the same texture paths as rewriting the ids
+in every cell), and the shrunk landscape textures cached by (path, size, kind). A run builds its
+texture set from the textures its worldspace's cells reference instead of every LTEX in the
+load order, and a season that changes no tile of a kind sets nothing up and only links.
+
+Full build, skyrim-cs-base `Default`, `--mode dyndolod --texgen --seasons SPR,SUM,AUT,WIN`,
+15 worldspaces, i7-12700K / RTX 4080:
+
+| | Serial equivalent (sum of the same run's stage times) | Lane build, wall |
+|---|---|---|
+| Total | 516 s | **347.5 s** (0 failed stages) |
+| terrain-textures (sum) | 201 s | on the lane, overlapped |
+| occlusion | 135 s | 135 s (serial tail after the lane joins) |
+| dyndolod-export / objects-atlas / objects / trees | 44 / 38 / 19 / 17 s | on the main thread, overlapped |
+
+The 2026-10-19 reference build (417 s) had the old 16 s occlusion module; with today's clean-room
+occlusion (135 s for all worldspaces) the serial build would be ~540 s. The terrain-texture sum
+fell from 316 s to 201 s with the setup caching, while sharing the CPU with the object stages.
+
+Output check: the same build with the previous binary (serial, before this change) into another
+folder; every terrain mesh (27,194 files) and terrain texture (88,400 files) is byte-identical,
+as is Occlusion.esp and every other asset (28,212 files); only DynDOLOD.esm/.esp and the 15
+`DynDOLOD_NG_*.txt` differ, by the 32-character run token that every run draws afresh.
+
+Not done here: overlapping the CPU and GPU inside the terrain-texture bake, worlds in parallel
+inside the object lane, and the remaining fixed per-run cost (default tiles, GPU upload).

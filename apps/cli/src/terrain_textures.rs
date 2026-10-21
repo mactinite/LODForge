@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -173,17 +174,87 @@ fn parse_kind(s: &str) -> Result<Kind> {
     }
 }
 
+/// What every terrain-texture run of one build shares: the GPU device, the load order's
+/// worldspaces, land textures and season swaps, the decoded LAND records of each worldspace
+/// (unswapped; a season is applied as a remapped land-texture table, which resolves to the same
+/// texture paths as swapping the ids in every cell), each worldspace's per-cell texture sets for
+/// delta planning, and the shrunk landscape textures by (path, size, kind). Before this context
+/// every world x season x kind call decoded every LTEX texture of the load order at full size.
+pub struct TerrainContext<'a> {
+    pub p: &'a Profile,
+    pub gpu: Gpu,
+    worlds: Vec<lodforge_esp::Worldspace>,
+    ltex: HashMap<u32, lodforge_esp::LandTexture>,
+    swaps: OnceLock<lodforge_seasons::SeasonSwaps>,
+    cache: TextureCache<'a>,
+    lands: Mutex<HashMap<u32, Arc<HashMap<(i32, i32), lodforge_esp::Land>>>>,
+    cell_textures: Mutex<HashMap<u32, Arc<HashMap<(i32, i32), HashSet<u32>>>>>,
+    shrunk: Mutex<HashMap<(String, u32, Kind), Option<Arc<Vec<u8>>>>>,
+}
+
+impl<'a> TerrainContext<'a> {
+    pub fn new(p: &'a Profile) -> Result<TerrainContext<'a>> {
+        let gpu = Gpu::new()?;
+        let worlds = scan_worldspaces(&p.load_order)?;
+        let ltex = land_textures(&p.load_order)?;
+        Ok(TerrainContext { p, gpu, worlds, ltex, swaps: OnceLock::new(), cache: TextureCache::new(&p.vfs), lands: Mutex::new(HashMap::new()), cell_textures: Mutex::new(HashMap::new()), shrunk: Mutex::new(HashMap::new()) })
+    }
+
+    fn swaps(&self) -> Result<&lodforge_seasons::SeasonSwaps> {
+        if let Some(s) = self.swaps.get() {
+            return Ok(s);
+        }
+        let edids: HashMap<String, u32> = self.ltex.iter().map(|(id, t)| (t.editor_id.to_ascii_lowercase(), *id)).collect();
+        let s = load_swaps(&self.p.vfs, &self.p.load_order, &edids)?;
+        Ok(self.swaps.get_or_init(|| s))
+    }
+
+    /// The decoded LAND records of a worldspace (decoded once).
+    fn lands(&self, world: &lodforge_esp::Worldspace) -> Result<Arc<HashMap<(i32, i32), lodforge_esp::Land>>> {
+        if let Some(l) = self.lands.lock().unwrap().get(&world.form_id) {
+            return Ok(l.clone());
+        }
+        let cells: Vec<(i32, i32)> = world.lands.values().map(|l| l.cell).collect();
+        let lands = Arc::new(decode_lands(&self.p.load_order, world, cells.into_iter())?);
+        self.lands.lock().unwrap().insert(world.form_id, lands.clone());
+        Ok(lands)
+    }
+
+    fn cell_textures(&self, world: &lodforge_esp::Worldspace) -> Result<Arc<HashMap<(i32, i32), HashSet<u32>>>> {
+        if let Some(c) = self.cell_textures.lock().unwrap().get(&world.form_id) {
+            return Ok(c.clone());
+        }
+        let cells = Arc::new(lodforge_seasons::cell_textures(&self.p.load_order, world)?);
+        self.cell_textures.lock().unwrap().insert(world.form_id, cells.clone());
+        Ok(cells)
+    }
+
+    /// A landscape texture shrunk for the GPU bake, from the cache or the VFS.
+    fn shrunk(&self, path: &str, tex_px: u32, kind: Kind) -> Option<Vec<u8>> {
+        let key = (path.to_string(), tex_px, kind);
+        if let Some(v) = self.shrunk.lock().unwrap().get(&key) {
+            return v.as_ref().map(|v| v.as_ref().clone());
+        }
+        let v = lodforge_terrain::gpu_spec::shrink_texture(&self.p.vfs, path, tex_px, kind).map(Arc::new);
+        self.shrunk.lock().unwrap().insert(key, v.clone());
+        v.map(|v| v.as_ref().clone())
+    }
+}
+
 pub fn run(a: &Args) -> Result<()> {
     let p = a.profile.open()?;
     run_with(&p, a)
 }
 
 pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
+    let ctx = TerrainContext::new(p)?;
+    run_in(&ctx, a)
+}
+
+/// One worldspace and season with a shared [TerrainContext].
+pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
     let total = Instant::now();
-    let lo = &p.load_order;
-    let worlds = scan_worldspaces(lo)?;
-    let Some(world) = worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(&a.world)) else { bail!("worldspace {} not found", a.world) };
-    let ltex = land_textures(lo)?;
+    let Some(world) = ctx.worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(&a.world)) else { bail!("worldspace {} not found", a.world) };
     for &l in &a.levels {
         if ![4, 8, 16, 32].contains(&l) {
             bail!("unsupported LOD level {l}");
@@ -192,8 +263,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     let kinds: Vec<Kind> = a.kinds.iter().map(|k| parse_kind(k)).collect::<Result<_>>()?;
 
     let t = Instant::now();
-    let all_cells: Vec<(i32, i32)> = world.lands.values().map(|l| l.cell).collect();
-    let mut lands = decode_lands(lo, world, all_cells.iter().copied())?;
+    let lands = ctx.lands(world)?;
     let decode_ms = t.elapsed().as_millis();
 
     let season = match &a.season {
@@ -202,13 +272,15 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     };
     let season_code = season.map(|s| s.code());
     let mut spec_params = SpecParams::default();
+    // The land textures as this season sees them: a swapped LTEX id resolves to the texture of
+    // the LTEX it is swapped for (an id swapped for an unknown LTEX resolves to nothing, i.e.
+    // the default texture), the same paths as rewriting the ids in every cell.
+    let mut ltex = ctx.ltex.clone();
     // Per kind: tiles to bake when building a delta; None = everything.
     let mut only: HashMap<Kind, Option<HashSet<(i32, i32, i32)>>> = kinds.iter().map(|k| (*k, None)).collect();
     if let Some(season) = season {
-        let edids: HashMap<String, u32> = ltex.iter().map(|(id, t)| (t.editor_id.to_ascii_lowercase(), *id)).collect();
-        let swaps = load_swaps(&p.vfs, lo, &edids)?;
-        let swapped = swaps.land_textures(season).cloned().unwrap_or_default();
-        if let Some(d) = swapped.get(&DEFAULT_LTEX).and_then(|id| ltex.get(id)) {
+        let swapped = ctx.swaps()?.land_textures(season).cloned().unwrap_or_default();
+        if let Some(d) = swapped.get(&DEFAULT_LTEX).and_then(|id| ctx.ltex.get(id)) {
             if !d.diffuse.is_empty() {
                 spec_params.default_diffuse = texture_path(&d.diffuse);
             }
@@ -216,22 +288,22 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
                 spec_params.default_normal = texture_path(&d.normal);
             }
         }
-        for land in lands.values_mut() {
-            for q in &mut land.quadrants {
-                if let Some(b) = q.base.as_mut() {
-                    *b = *swapped.get(b).unwrap_or(b);
+        for (id, to) in &swapped {
+            match ctx.ltex.get(to) {
+                Some(t) => {
+                    ltex.insert(*id, t.clone());
                 }
-                for l in &mut q.layers {
-                    l.ltex = *swapped.get(&l.ltex).unwrap_or(&l.ltex);
+                None => {
+                    ltex.remove(id);
                 }
             }
         }
         if a.delta_from.is_some() {
             // Plan on the unswapped textures: which cells use an LTEX whose texture of this kind changes.
-            let cells = lodforge_seasons::cell_textures(lo, world)?;
+            let cells = ctx.cell_textures(world)?;
             for &kind in &kinds {
                 let tk = if kind == Kind::Normal { TextureKind::Normal } else { TextureKind::Diffuse };
-                let eff = effective_swaps(&swapped, &ltex, tk);
+                let eff = effective_swaps(&swapped, &ctx.ltex, tk);
                 if eff.contains_key(&DEFAULT_LTEX) {
                     continue; // the default texture changes: everything is rebuilt
                 }
@@ -246,7 +318,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         }
     }
 
-    let gpu = Gpu::new()?;
+    let gpu = &ctx.gpu;
     let out_dir = a.out.join("textures").join("terrain").join(&world.editor_id);
     std::fs::create_dir_all(&out_dir)?;
     let mut tops: BTreeSet<(i32, i32)> = lands.keys().map(|&c| tile_of(c, TOP_LEVEL as i32)).collect();
@@ -255,29 +327,37 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     }
     println!("{}: {} cells decoded in {decode_ms} ms; GPU {}", world.editor_id, lands.len(), gpu.adapter_info.name);
 
-    let cache = TextureCache::new(&p.vfs);
+    let cache = &ctx.cache;
     let mut scores: Vec<(Kind, i32, (i32, i32), f32)> = Vec::new();
     for &kind in &kinds {
         let kt = Instant::now();
+        // A season that changes no tile of this kind: every tile is reused, nothing is set up.
+        let all_reused = only[&kind].as_ref().is_some_and(|s| s.is_empty());
         // Shrunk landscape textures (24 repeats per cell; texPx from the largest pixels-per-cell).
         let max_ppc = a.levels.iter().map(|&l| level_settings(l, kind, a.mips).size / l as u32).max().unwrap_or(64);
         let tex_px = SpecParams::tex_px_for(max_ppc);
         let params = SpecParams { tex_px, ..spec_params.clone() };
-        let set = SpecTextureSet::build(&p.vfs, &ltex, &params.default_path(kind), tex_px, kind);
-        let gtex = gpu.upload_spec_textures(tex_px, &set.images);
-        let shrunk = ShrunkTextures::new(&cache, tex_px, kind);
+        let shrunk = ShrunkTextures::new(cache, tex_px, kind);
         let baker = SpecBaker { textures: &shrunk, ltex: &ltex, params: params.clone() };
+        // Only the textures this worldspace's cells reference (a cell renders the same whichever
+        // other textures the set holds), shrunk once per build.
+        let set = (!all_reused).then(|| {
+            let ids: HashSet<u32> = lands.values().flat_map(|l| l.textures()).collect();
+            let paths = ids.iter().filter_map(|id| ltex.get(id)).map(|t| if kind == Kind::Normal { &t.normal } else { &t.diffuse }).filter(|p| !p.is_empty()).map(|p| texture_path(p));
+            SpecTextureSet::build_from(paths, &params.default_path(kind), tex_px, kind, |p| ctx.shrunk(p, tex_px, kind))
+        });
+        let gtex = set.as_ref().map(|set| gpu.upload_spec_textures(tex_px, &set.images));
 
         // Diffuse default tiles are all equivalent: bake one per level on the CPU. Normals have
         // no default size (golden), so their default tiles are rendered like any other.
         let mut default_dds: HashMap<i32, Vec<u8>> = HashMap::new();
-        if kind == Kind::Diffuse {
+        if kind == Kind::Diffuse && !all_reused {
             for &level in &a.levels {
                 let ls = level_settings(level, kind, a.mips);
                 let b = SpecBaker { textures: &shrunk, ltex: &ltex, params: SpecParams { gamma: ls.gamma, ..params.clone() } };
                 let (img, _) = b.bake_tile(&HashMap::new(), (0, 0), level, ls.size / level as u32);
                 let rgba = img.to_rgba8();
-                default_dds.insert(level, encode_dds(&gpu, &[(img.width, &rgba)], ls.mips)?.remove(0));
+                default_dds.insert(level, encode_dds(gpu, &[(img.width, &rgba)], ls.mips)?.remove(0));
             }
         }
         let levels: Vec<LevelSpec> = a
@@ -330,13 +410,14 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
                 continue;
             }
 
+            let (Some(set), Some(gtex)) = (&set, &gtex) else { bail!("tiles wanted with nothing set up") };
             let t0 = Instant::now();
-            let packed = top_tile(&baker, &set, &lands, top, a.batch, kind);
+            let packed = top_tile(&baker, set, &lands, top, a.batch, kind);
             st.pack += t0.elapsed().as_millis();
             let constant_default = |level: i32, t: (i32, i32)| kind == Kind::Diffuse && packed.tile_is_default(level, (t.0 - top.0) / level, (t.1 - top.1) / level);
             let needs_gpu = wanted.iter().any(|&(level, t)| !constant_default(level, t));
             let t0 = Instant::now();
-            let images = if needs_gpu { gpu.bake_top_tile(&gtex, gkind, 1.0, &levels, &packed.batches)? } else { Vec::new() };
+            let images = if needs_gpu { gpu.bake_top_tile(gtex, gkind, 1.0, &levels, &packed.batches)? } else { Vec::new() };
             st.gpu += t0.elapsed().as_millis();
 
             for &level in &a.levels {
@@ -348,7 +429,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
                 if !full.is_empty() {
                     let img = images.iter().find(|i| i.level == level as u32).context("level image missing")?;
                     let tiles: Vec<(u32, &[u8])> = full.iter().map(|t| (img.tile_size, img.tile(((t.0 - top.0) / level) as u32, ((t.1 - top.1) / level) as u32))).collect();
-                    for (t, dds) in full.iter().zip(encode_dds(&gpu, &tiles, ls.mips)?) {
+                    for (t, dds) in full.iter().zip(encode_dds(gpu, &tiles, ls.mips)?) {
                         files.push((**t, dds));
                     }
                 }
@@ -379,7 +460,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             }
         }
         let bake_ms = bake_t.elapsed().as_millis();
-        println!("{kind:?}: textures {} shrunk to {tex_px}px + setup in {prep_ms} ms", set.images.len());
+        println!("{kind:?}: textures {} shrunk to {tex_px}px + setup in {prep_ms} ms", set.as_ref().map_or(0, |s| s.images.len()));
         for &level in &a.levels {
             let (b, d, r) = counts.get(&level).copied().unwrap_or_default();
             println!("  LOD{level:<2}: {} tiles: {b} baked, {d} default, {r} reused", b + d + r);

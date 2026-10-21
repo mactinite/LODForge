@@ -22,33 +22,45 @@ pub struct SpecTextureSet {
     pub default_tex: u32,
 }
 
+/// One landscape texture shrunk for the `kind` pipeline: the top mip Lanczos-resized to
+/// `tex_px`, quantised (rounding for diffuse, truncating for normal maps), alpha 1. `None` when
+/// the file is missing or unreadable.
+pub fn shrink_texture(vfs: &Vfs, path: &str, tex_px: u32, kind: Kind) -> Option<Vec<u8>> {
+    let bytes = vfs.read(path).ok()??;
+    let info = lodforge_dds::parse(&bytes).ok()?;
+    let top = lodforge_dds::decode(&bytes, &info, 0).ok()?;
+    let mut img = Image::from_rgba8(top.width, top.height, &top.rgba).lanczos(tex_px, tex_px);
+    img.quantize8_with(kind == Kind::Diffuse);
+    img.px.iter_mut().for_each(|px| px[3] = 1.0);
+    Some(img.to_rgba8())
+}
+
 impl SpecTextureSet {
+    /// The set of every LTEX texture of `kind` in the load order (plus the default), shrunk from
+    /// the VFS.
     pub fn build(vfs: &Vfs, ltex: &HashMap<u32, LandTexture>, default_path: &str, tex_px: u32, kind: Kind) -> SpecTextureSet {
-        let mut paths: Vec<String> = ltex
+        let paths = ltex
             .values()
             .map(|t| match kind {
                 Kind::Diffuse => &t.diffuse,
                 Kind::Normal => &t.normal,
             })
             .filter(|p| !p.is_empty())
-            .map(|p| texture_path(p))
-            .collect();
+            .map(|p| texture_path(p));
+        Self::build_from(paths, default_path, tex_px, kind, |p| shrink_texture(vfs, p, tex_px, kind))
+    }
+
+    /// The set of the given texture paths (TXST or Data-relative; plus the default), each loaded
+    /// by `load` (a shrunk `tex_px` x `tex_px` RGBA image, or `None` to leave it out so cells
+    /// referencing it fall back to the default). Slot numbers follow the sorted paths; a cell
+    /// renders the same whichever other textures the set holds.
+    pub fn build_from(paths: impl IntoIterator<Item = String>, default_path: &str, tex_px: u32, kind: Kind, load: impl Fn(&str) -> Option<Vec<u8>> + Sync) -> SpecTextureSet {
+        let mut paths: Vec<String> = paths.into_iter().map(|p| texture_path(&p)).collect();
         let default = texture_path(default_path);
         paths.push(default.clone());
         paths.sort();
         paths.dedup();
-        let loaded: Vec<(String, Vec<u8>)> = paths
-            .par_iter()
-            .filter_map(|p| {
-                let bytes = vfs.read(p).ok()??;
-                let info = lodforge_dds::parse(&bytes).ok()?;
-                let top = lodforge_dds::decode(&bytes, &info, 0).ok()?;
-                let mut img = Image::from_rgba8(top.width, top.height, &top.rgba).lanczos(tex_px, tex_px);
-                img.quantize8_with(kind == Kind::Diffuse);
-                img.px.iter_mut().for_each(|px| px[3] = 1.0);
-                Some((p.clone(), img.to_rgba8()))
-            })
-            .collect();
+        let loaded: Vec<(String, Vec<u8>)> = paths.par_iter().filter_map(|p| load(p).map(|img| (p.clone(), img))).collect();
         let mut set = SpecTextureSet { tex_px, index: HashMap::new(), images: Vec::new(), default_tex: 0 };
         for (p, img) in loaded {
             set.index.insert(p, set.images.len() as u32);
