@@ -191,19 +191,19 @@ struct BuildRequest {
     /// Render tree billboards first (`build --texgen`) instead of relying on installed ones.
     #[serde(default)]
     texgen: bool,
-    /// `xlodgen` (default) or `dyndolod` (`build --mode`).
+    /// The UI only builds DynDOLOD style (`build --mode dyndolod`); anything but `dyndolod` is refused.
     #[serde(default)]
     mode: Option<String>,
     /// DynDOLOD rule preset (Low, Medium, High).
     #[serde(default)]
     preset: Option<String>,
-    /// DynDOLOD mode: DynDOLOD.esm/.esp and the DLL NG data files.
+    /// DynDOLOD.esm/.esp and the DLL NG data files (`--no-plugins` when false).
     #[serde(default = "yes")]
     plugins: bool,
-    /// DynDOLOD mode: Occlusion.esp.
+    /// Occlusion.esp (`--no-occlusion` when false).
     #[serde(default = "yes")]
     occlusion: bool,
-    /// Grass LOD: `off`, `bto` (DynDOLOD mode) or `go` (Grass Optimizations meshes).
+    /// Grass LOD: `off`, `bto` (grass in object LOD) or `go` (Grass Optimizations meshes).
     #[serde(default)]
     grass: Option<String>,
     /// `auto` or `cache` (with `bto`; both read the NGIO cache).
@@ -226,6 +226,9 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
     if guard.is_some() {
         return Err("a build is already running".into());
     }
+    if let Some(m) = req.mode.as_deref().filter(|m| *m != "dyndolod") {
+        return Err(format!("unsupported LOD style {m:?}; the UI builds DynDOLOD style only"));
+    }
     let mut c = command();
     c.args(["build", "--json", "--instance", &req.instance, "--profile", &req.profile]);
     if !req.worlds.is_empty() {
@@ -242,17 +245,15 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
     if req.texgen {
         c.arg("--texgen");
     }
-    if req.mode.as_deref() == Some("dyndolod") {
-        c.args(["--mode", "dyndolod"]);
-        if let Some(preset) = &req.preset {
-            c.args(["--preset", preset]);
-        }
-        if !req.plugins {
-            c.arg("--no-plugins");
-        }
-        if !req.occlusion {
-            c.arg("--no-occlusion");
-        }
+    c.args(["--mode", "dyndolod"]);
+    if let Some(preset) = &req.preset {
+        c.args(["--preset", preset]);
+    }
+    if !req.plugins {
+        c.arg("--no-plugins");
+    }
+    if !req.occlusion {
+        c.arg("--no-occlusion");
     }
     if let Some(g) = req.grass.as_deref().filter(|g| *g != "off") {
         c.args(["--grass", g]);

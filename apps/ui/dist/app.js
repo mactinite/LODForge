@@ -109,7 +109,7 @@ function selection() {
   return {
     instance: $("instance").value.trim(), profile: $("profile").value, worlds, seasons,
     terrain: $("terrain").checked, objects: $("objects").checked, trees: $("trees").checked, texgen: $("texgen").checked,
-    mode: document.querySelector("input[name=mode]:checked").value,
+    mode: "dyndolod",
     preset: $("preset").value, plugins: $("plugins").checked, occlusion: $("occlusion").checked,
     grass: $("grass").value, grass_source: $("grassSource").value, grass_density: Number($("grassDensity").value) || null,
     mo2_mod: dest === "mo2" ? $("modName").value.trim() : null,
@@ -120,10 +120,9 @@ function selection() {
 
 function review() {
   const s = selection();
-  const dyn = s.mode === "dyndolod";
   const grass = { go: "Grass Optimizations meshes", bto: "grass in object LOD" }[s.grass];
-  const stages = [s.texgen && "billboards", s.terrain && "terrain", s.objects && (dyn ? `objects (DynDOLOD ${s.preset})` : "objects"), s.trees && "trees",
-    grass, dyn && s.objects && s.plugins && "dynamic LOD plugins", dyn && s.objects && s.occlusion && "occlusion"].filter(Boolean);
+  const stages = [s.texgen && "billboards", s.terrain && "terrain", s.objects && `objects (DynDOLOD ${s.preset})`, s.trees && "trees",
+    grass, s.objects && s.plugins && "dynamic LOD plugins", s.objects && s.occlusion && "occlusion"].filter(Boolean);
   $("review").innerHTML = `<b>Review</b><br>${s.worlds.length} worldspace(s): ${s.worlds.join(", ") || "none"}<br>Stages: ${stages.join(", ") || "none"}<br>Seasons: default${s.seasons.length ? " + " + s.seasons.join(", ") : ""}<br>Output: ${s.mo2_mod ? `MO2 mod "${s.mo2_mod}"${s.enable ? " (enabled)" : ""}` : s.out || "(choose a folder)"}`;
 }
 
@@ -131,15 +130,13 @@ async function startBuild() {
   const req = selection();
   if (!req.worlds.length) return status("Select at least one worldspace", true);
   if (!req.terrain && !req.objects && !req.trees && req.grass !== "go") return status("Select at least one stage", true);
-  if (req.grass === "bto" && req.mode !== "dyndolod") return status("Grass in object LOD needs the DynDOLOD style", true);
   if (!req.mo2_mod && !req.out) return status("Choose where the output goes", true);
   if (req.enable && await invoke("mo2_running")) return status("Close Mod Organizer before enabling the mod, or untick “Enable”", true);
-  const dyn = req.mode === "dyndolod";
   // DynDOLOD object LOD per worldspace: export, atlas, (grass,) objects.
-  const objects = !req.objects ? 0 : dyn ? 3 + (req.grass === "bto" ? 1 : 0) : 1;
+  const objects = req.objects ? 3 + (req.grass === "bto" ? 1 : 0) : 0;
   const perWorld = (req.terrain ? 1 + 1 + req.seasons.length : 0) + objects + (req.trees ? 1 : 0);
   // Once per build: TexGen, DynDOLOD configuration, plugins, occlusion, Grass Optimizations meshes.
-  const once = (req.texgen ? 1 : 0) + (dyn && req.objects ? 1 + (req.plugins ? 1 : 0) + (req.occlusion ? 1 : 0) : 0) + (req.grass === "go" ? 1 : 0);
+  const once = (req.texgen ? 1 : 0) + (req.objects ? 1 + (req.plugins ? 1 : 0) + (req.occlusion ? 1 : 0) : 0) + (req.grass === "go" ? 1 : 0);
   state.expected = perWorld * req.worlds.length + once; state.done = 0;
   $("stages").tBodies[0].innerHTML = ""; $("log").textContent = ""; $("bar").style.width = "0";
   $("buildTitle").textContent = "Building…"; $("buildSummary").textContent = "";
@@ -193,29 +190,20 @@ $("back").addEventListener("click", () => show(Math.max(0, state.step - 1)));
 $("next").addEventListener("click", () => (state.step === 3 ? startBuild() : show(state.step + 1)));
 $("cancel").addEventListener("click", async () => { await invoke("cancel_build"); status("Cancelled", true); });
 document.querySelectorAll("input[name=dest], #modName, #outFolder, #enable").forEach((el) => el.addEventListener("input", review));
-function syncOptions() {
-  const dyn = document.querySelector("input[name=mode]:checked").value === "dyndolod";
-  $("dynOptions").classList.toggle("hidden", !dyn);
-  const bto = $("grass").querySelector("option[value=bto]");
-  bto.disabled = !dyn;
-  if (!dyn && $("grass").value === "bto") $("grass").value = "off";
+function syncGrass() {
   const g = $("grass").value;
   $("grassSourceBox").classList.toggle("hidden", g !== "bto");
   $("grassDensityBox").classList.toggle("hidden", g !== "bto");
   $("grassHint").textContent = g === "bto"
     ? "Grass billboards in the nearest object LOD, like DynDOLOD's grass LOD. Needs an NGIO grass cache (precache in game); cells without a cache file get no grass."
     : "Grass Optimizations (Community Shaders) shows grass far out with NGIO's extended grass distance and swaps in these crossed-plane meshes; no grass cache is needed.";
-  store("mode", dyn ? "dyndolod" : "xlodgen"); store("grass", g);
+  store("grass", g);
 }
-document.querySelectorAll("input[name=mode], #grass").forEach((el) => el.addEventListener("change", syncOptions));
-{
-  const m = load("mode", "xlodgen");
-  const r = document.querySelector(`input[name=mode][value=${m}]`);
-  if (r) r.checked = true;
-  syncOptions();
-  $("grass").value = load("grass", "off");
-  syncOptions();
-}
+$("grass").addEventListener("change", syncGrass);
+$("grass").value = load("grass", "off");
+if (!$("grass").value) $("grass").value = "off";
+syncGrass();
+try { localStorage.removeItem("lodforge.mode"); } catch (_) {}
 // `lodforge-ui --instance <folder> [--profile <name>]` (e.g. from the MO2 tool entry) wins over
 // the remembered instance and scans straight away.
 (async () => {

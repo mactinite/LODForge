@@ -39,12 +39,9 @@
 
   <section class="page hidden" data-page="2">
     <h1>What to generate</h1>
-    <h2>LOD style</h2>
-    <div class="grid two">
-      <label class="check card"><input type="radio" name="mode" value="xlodgen" checked><span><b>xLODGen style</b><br>Terrain, object and tree LOD like xLODGen. No plugins.</span></label>
-      <label class="check card"><input type="radio" name="mode" value="dyndolod"><span><b>DynDOLOD style</b><br>Object LOD with DynDOLOD's rules and LOD models, plus dynamic LOD plugins and occlusion. Reads DynDOLOD's configuration from tools\DynDOLOD.</span></label>
-    </div>
-    <div id="dynOptions" class="indent hidden">
+    <h2>DynDOLOD</h2>
+    <p class="hint">Object LOD with DynDOLOD's rules and LOD models, plus dynamic LOD plugins and occlusion. Reads DynDOLOD's configuration from tools\DynDOLOD.</p>
+    <div>
       <div class="row">
         <label>Preset <select id="preset"><option>Low</option><option selected>Medium</option><option>High</option></select></label>
       </div>
@@ -64,7 +61,7 @@
       <label>Grass <select id="grass">
         <option value="off" selected>No grass LOD</option>
         <option value="go">Grass Optimizations LOD meshes (Community Shaders)</option>
-        <option value="bto">Grass in object LOD (DynDOLOD style)</option>
+        <option value="bto">Grass in object LOD (DynDOLOD)</option>
       </select></label>
       <label id="grassSourceBox" class="hidden">Placements <select id="grassSource">
         <option value="auto" selected>Grass cache (NGIO precache)</option>
