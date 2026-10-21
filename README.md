@@ -42,6 +42,36 @@ DynDOLOD BTO grass are different output modes, not interchangeable parity tests.
   runtime features separately when the chosen workflow needs them.
 - The UI additionally needs WebView2.
 
+## Required and recommended mods
+
+LODForge reads these from your MO2 profile's virtual file system (or the game's
+Data folder) and never bundles them. Install them in the profile you build against.
+
+**Needed for DynDOLOD mode (`build --mode dyndolod`)**
+
+| Mod | Why |
+|---|---|
+| DynDOLOD (the tool install, `Edit Scripts\DynDOLOD`) | Its INI, rules, configs and billboard templates are read as configuration. |
+| DynDOLOD Resources SE | Supplies the LOD models for most references (about 93% of LOD4 refs on a large list), billboards and `_dyndolod_lod` models. Optional if you pass `--lod-models`: LODForge then generates missing models itself, with lower geometry parity. |
+| DynDOLOD DLL NG (plus its Papyrus scripts/data) | Runtime for the generated `DynDOLOD.esm/.esp` and `SKSE\Plugins\DynDOLOD_Data`. Its copies of scripts win over Resources' older ones. |
+| TexGen output (stitched `textures\lod\*`) | Still taken from the profile; LODForge's own TexGen currently produces billboards only. |
+| SKSE64, Address Library for SKSE Plugins | Prerequisites of DLL NG. |
+| Cleaned masters (Skyrim, DLC, CC; xEdit-cleaned plugins) | Needed for results close to DynDOLOD. |
+
+**Needed only for the matching workflow**
+
+| Mod | When |
+|---|---|
+| Community Shaders (with PBR / Grass Optimizations) | CS-targeted output, PBR LOD, or `meshes\lod\grass` Grass Optimizations meshes. |
+| Seasons of Skyrim (and its swap data) | `--seasons` builds and `Seasons\...` runtime swaps. |
+| NGIO (Grass Cache), Grass Optimizations | Only if you choose runtime grass instead of BTO grass LOD. |
+| Any PBR texture mods you use | DynDOLOD-style PBR handling needs the source RMAOS files present. |
+
+Remove other LOD generators' outputs (xLODGen, an earlier DynDOLOD run) from the
+profile, or exclude them with `--exclude-mod`, before building; the generated
+mod's `DynDOLOD.esm`, `DynDOLOD.esp` and `Occlusion.esp` are dropped from the
+input set automatically.
+
 ## Build and run
 
 From the repository root in PowerShell:
