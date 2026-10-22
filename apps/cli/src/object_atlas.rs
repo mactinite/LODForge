@@ -418,6 +418,31 @@ pub fn write(out: &Path, pages: &[Page]) -> Result<()> {
     Ok(())
 }
 
+/// Removes `<world>` object LOD files (`meshes\terrain\<world>\Objects\*.<SEASON>.bto`) of the
+/// seasons this run does not build. The atlas pages are shared by every season, so a run that
+/// rewrites them (a new layout) leaves an earlier run's season BTOs pointing at tiles that now
+/// hold other textures (seen in game as teal billboard texels on Whiterun's roofs). Without the
+/// season file the game uses the default season's, which this run wrote. Returns the count.
+pub fn remove_stale_season_btos(out: &Path, world: &str, built: &[String]) -> Result<usize> {
+    const SEASONS: [&str; 4] = ["SPR", "SUM", "AUT", "WIN"];
+    let Some(dir) = find_ci(out, &format!("meshes\\terrain\\{world}\\Objects")) else { return Ok(0) };
+    let mut removed = 0;
+    for e in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+        let name = e.file_name().to_string_lossy().to_string();
+        let mut parts = name.rsplitn(3, '.');
+        let (Some(ext), Some(season)) = (parts.next(), parts.next()) else { continue };
+        if !ext.eq_ignore_ascii_case("bto") {
+            continue;
+        }
+        let stale = SEASONS.iter().any(|s| s.eq_ignore_ascii_case(season)) && !built.iter().any(|b| b.eq_ignore_ascii_case(season));
+        if stale {
+            std::fs::remove_file(e.path()).with_context(|| format!("removing {}", e.path().display()))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Top-mip PSNR of our pages against xLODGen's (`golden` = its output Data folder).
 pub fn compare_golden(golden: &Path, pages: &[Page]) {
     for p in pages {
@@ -452,6 +477,23 @@ fn find_ci(root: &Path, rel: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_season_btos_go() {
+        let root = std::env::temp_dir().join(format!("lodforge-stale-{}", std::process::id()));
+        let dir = root.join("meshes").join("terrain").join("Tamriel").join("Objects");
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["Tamriel.4.4.0.bto", "Tamriel.4.4.0.SUM.bto", "Tamriel.4.4.0.WIN.bto", "Tamriel.4.-4.0.spr.bto", "Tamriel.4.4.0.SUM.txt"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let n = remove_stale_season_btos(&root, "tamriel", &["WIN".to_string()]).unwrap();
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        left.sort();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(left, ["Tamriel.4.4.0.SUM.txt", "Tamriel.4.4.0.WIN.bto", "Tamriel.4.4.0.bto"]);
+        assert_eq!(remove_stale_season_btos(Path::new("Z:\\nowhere"), "Tamriel", &[]).unwrap(), 0);
+    }
 
     #[test]
     fn alpha_page_names() {

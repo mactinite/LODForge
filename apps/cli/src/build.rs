@@ -539,7 +539,14 @@ pub fn run(a: &Args) -> Result<()> {
                 step("objects-atlas", None, &mut || {
                     let gpu = lodforge_gpu::Gpu::new()?;
                     let pages = crate::object_atlas::render(&p.vfs, atlas, &gpu, &crate::dyndolod_build::AtlasSettings::from_config(c).formats())?;
-                    crate::object_atlas::write(&out, &pages)
+                    crate::object_atlas::write(&out, &pages)?;
+                    // The new pages invalidate season BTOs an earlier run left for seasons this
+                    // run does not build.
+                    let stale = crate::object_atlas::remove_stale_season_btos(&out, world, &a.seasons)?;
+                    if stale > 0 {
+                        println!("  removed {stale} season object LOD files of an earlier build (seasons not built now; they used the previous atlas layout)");
+                    }
+                    Ok(())
                 });
             }
             let mut args = object_lod_args(a, world, &out, paths, crate::object_lod::FlavorArg::Dyndolod);
