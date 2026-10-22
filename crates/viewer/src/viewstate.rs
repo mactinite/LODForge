@@ -111,6 +111,9 @@ pub struct ViewSettings {
     /// Snow / ash LOD materials projected as in game.
     pub snow: bool,
     pub snow_materials: crate::snow::SnowMaterials,
+    /// Sky, distance fog, sun / ambient light and water colours of a weather (free camera).
+    pub atmosphere: bool,
+    pub atmosphere_data: crate::atmosphere::Atmosphere,
 }
 
 impl Default for ViewSettings {
@@ -130,6 +133,8 @@ impl Default for ViewSettings {
             sky: [0.55, 0.68, 0.85],
             snow: true,
             snow_materials: crate::snow::SnowMaterials::default(),
+            atmosphere: true,
+            atmosphere_data: crate::atmosphere::Atmosphere::default(),
         }
     }
 }
@@ -204,6 +209,7 @@ pub fn build_frame<'a>(
             f64::from(s.sky[2]),
             1.0,
         ],
+        sky: s.atmosphere && !view.ortho,
         ..Default::default()
     };
     let mut stats = FrameStats::default();
@@ -317,6 +323,9 @@ pub fn build_frame<'a>(
         level_colors: LEVEL_COLORS,
         kind_colors: KIND_COLORS,
         snow: s.snow_materials.gpu(),
+        inv_view_proj: view.view_proj().inverse().to_cols_array_2d(),
+        atmo: s.atmosphere_data.gpu(),
+        atmo_on: [if s.atmosphere && !view.ortho { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
     };
     (frame, globals, stats)
 }

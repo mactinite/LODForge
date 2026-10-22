@@ -630,6 +630,8 @@ impl App {
                     }
                 });
                 ui.checkbox(&mut self.settings.normal_maps, "normal maps");
+                ui.checkbox(&mut self.settings.atmosphere, "weather sky / fog / water")
+                    .on_hover_text(format!("{} with {} (free camera)", self.settings.atmosphere_data.weather, self.settings.atmosphere_data.water));
                 ui.checkbox(&mut self.settings.snow, "LOD snow / ash")
                     .on_hover_text("The directional snow / ash material the game projects onto objSnow / objAsh shapes");
                 let mut alpha_on = self.settings.alpha_override.is_some();

@@ -189,6 +189,11 @@ pub struct GlobalsGpu {
     pub kind_colors: [[f32; 4]; 6],
     /// Snow / ash LOD materials, see `snow::SnowMaterials::gpu`.
     pub snow: [[f32; 4]; 12],
+    /// Inverse of `view_proj` (sky directions).
+    pub inv_view_proj: [[f32; 4]; 4],
+    /// Weather and water, see `atmosphere::Atmosphere::gpu`; `atmo_on.x` = 1 when used.
+    pub atmo: [[f32; 4]; 11],
+    pub atmo_on: [f32; 4],
 }
 
 /// Shading modes (`params.x`).
@@ -555,6 +560,8 @@ pub struct Frame<'a> {
     /// Shapes drawn again as a wireframe (selection); needs the line polygon mode.
     pub wire: Vec<DrawShape<'a>>,
     pub clear: [f64; 4],
+    /// Draw the weather's sky gradient behind everything (instead of the clear colour alone).
+    pub sky: bool,
 }
 
 struct Targets {
@@ -573,6 +580,7 @@ pub struct Renderer {
     mesh_nocull: wgpu::RenderPipeline,
     mesh_blend: wgpu::RenderPipeline,
     tree: wgpu::RenderPipeline,
+    sky: wgpu::RenderPipeline,
     line_depth: wgpu::RenderPipeline,
     line_overlay: wgpu::RenderPipeline,
     wire: Option<wgpu::RenderPipeline>,
@@ -751,6 +759,27 @@ impl Renderer {
                 cache: None,
             })
         };
+        let sky = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky"),
+            layout: Some(&line_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_sky"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: depth(false, wgpu::CompareFunction::Always),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_sky"),
+                targets: &[target(None)],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
         let line_depth = line("line depth", wgpu::CompareFunction::GreaterEqual);
         let line_overlay = line("line overlay", wgpu::CompareFunction::Always);
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -774,6 +803,7 @@ impl Renderer {
             mesh_nocull,
             mesh_blend,
             tree,
+            sky,
             line_depth,
             line_overlay,
             wire,
@@ -900,6 +930,10 @@ impl Renderer {
             occlusion_query_set: None,
         });
         pass.set_bind_group(0, &self.globals_bg, &[]);
+        if frame.sky {
+            pass.set_pipeline(&self.sky);
+            pass.draw(0..3, 0..1);
+        }
         // Opaque: single-sided, then double-sided; blended last.
         for (pipeline, pick) in [
             (&self.mesh_cull, 0u8),

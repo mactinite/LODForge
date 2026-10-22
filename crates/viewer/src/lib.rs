@@ -9,6 +9,7 @@
 //! Entry points: [`app::run`] (window), [`screenshot`] (headless PNG), [`check`] (report).
 
 pub mod app;
+pub mod atmosphere;
 pub mod camera;
 pub mod checks;
 pub mod files;

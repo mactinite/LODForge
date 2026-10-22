@@ -87,6 +87,13 @@ pub struct Args {
     /// Leave out the snow / ash material the game projects onto objSnow / objAsh shapes.
     #[arg(long)]
     pub no_snow: bool,
+    /// Weather whose sky, fog and light the view uses (EditorID or form id, read from the load
+    /// order with --instance).
+    #[arg(long, default_value = "SkyrimClear_A")]
+    pub weather: String,
+    /// Plain viewer lighting: no weather sky, fog or water colours.
+    #[arg(long)]
+    pub no_atmosphere: bool,
     /// Load only these levels (comma list), e.g. `4` to save time and memory.
     #[arg(long, value_delimiter = ',')]
     pub load_levels: Vec<i32>,
@@ -165,6 +172,50 @@ fn snow_materials(lo: &lodforge_esp::LoadOrder) -> lodforge_viewer::snow::SnowMa
     out
 }
 
+/// The weather (by EditorID or form id) and the worldspace's LOD water type from the load order;
+/// the defaults (SkyrimClear_A, DefaultWater) for what is not found.
+fn atmosphere(lo: &lodforge_esp::LoadOrder, world: &str, weather: &str) -> lodforge_viewer::atmosphere::Atmosphere {
+    use lodforge_esp::{fields, winning_records, Sig};
+    let mut out = lodforge_viewer::atmosphere::Atmosphere::default();
+    let field = |r: &lodforge_esp::Record<'_>, sig: &[u8; 4]| -> Option<Vec<u8>> {
+        let data = r.data().ok()?;
+        fields(&data).find(|f| &f.sig.0 == sig).map(|f| f.data.to_vec())
+    };
+    let edid = |r: &lodforge_esp::Record<'_>| field(r, b"EDID").map(|d| String::from_utf8_lossy(&d).trim_end_matches('\0').to_string());
+    let wanted_id = u32::from_str_radix(weather.trim_start_matches("0x"), 16).ok();
+    match winning_records(lo, Sig(*b"WTHR")) {
+        Ok(all) => {
+            let hit = all.iter().find(|(id, (_, r))| Some(**id) == wanted_id || edid(r).is_some_and(|e| e.eq_ignore_ascii_case(weather)));
+            match hit {
+                Some((id, (_, r))) => {
+                    let name = edid(r).unwrap_or_else(|| format!("{id:08X}"));
+                    out.apply_weather(&name, field(r, b"NAM0").as_deref(), field(r, b"FNAM").as_deref());
+                    eprintln!("weather {name} ({id:08X}): fog {:.0}..{:.0}", out.fog_near, out.fog_far);
+                }
+                None => eprintln!("weather {weather} not found in the load order; using SkyrimClear_A's values"),
+            }
+        }
+        Err(e) => eprintln!("weather records: {e}"),
+    }
+    // The worldspace's LOD water (NAM3), else its water (NAM2).
+    let water = winning_records(lo, Sig(*b"WRLD")).ok().and_then(|all| {
+        let (pi, r) = all.values().find(|(_, r)| edid(r).is_some_and(|e| e.eq_ignore_ascii_case(world)))?;
+        let pick = field(r, b"NAM3").or_else(|| field(r, b"NAM2"))?;
+        let local = u32::from_le_bytes(pick.get(..4)?.try_into().ok()?);
+        lo.plugins[*pi as usize].global_form_id(local)
+    });
+    if let Some(wid) = water {
+        if let Some((_, r)) = winning_records(lo, Sig(*b"WATR")).ok().and_then(|all| all.get(&wid).map(|(p, r)| (*p, r.clone()))) {
+            if let Some(d) = field(&r, b"DNAM") {
+                let name = edid(&r).unwrap_or_else(|| format!("{wid:08X}"));
+                out.apply_water(&name, &d);
+                eprintln!("water {name} ({wid:08X})");
+            }
+        }
+    }
+    out
+}
+
 /// The worldspace to start on: Tamriel when present, else the first listed.
 fn default_world(worlds: &[String]) -> Option<String> {
     worlds.iter().find(|w| w.eq_ignore_ascii_case("Tamriel")).or_else(|| worlds.first()).cloned()
@@ -206,6 +257,7 @@ pub fn run(a: &Args) -> Result<()> {
     let out: Arc<dyn Files> = Arc::new(out);
     let mut layered = Layered::new().with(out.clone());
     let mut snow = lodforge_viewer::snow::SnowMaterials::default();
+    let mut load_order = None;
     if let Some(inst) = &a.instance {
         let game = a.game.clone().unwrap_or_else(|| inst.join("Stock Game"));
         let t = std::time::Instant::now();
@@ -213,6 +265,7 @@ pub fn run(a: &Args) -> Result<()> {
         eprintln!("profile {}: {} loose files, {} archives in {} ms", a.profile, p.vfs.loose_count(), p.vfs.archives().len(), t.elapsed().as_millis());
         snow = snow_materials(&p.load_order);
         layered.push(Arc::new(VfsFiles(p.vfs)));
+        load_order = Some(p.load_order);
     }
     let files: Arc<dyn Files> = Arc::new(layered);
     let lister: Arc<dyn Files> = if a.merge_load_order && a.instance.is_some() { files.clone() } else { out.clone() };
@@ -228,6 +281,10 @@ pub fn run(a: &Args) -> Result<()> {
     let mut settings = settings(a)?;
     settings.snow_materials = snow;
     settings.snow = !a.no_snow;
+    settings.atmosphere = !a.no_atmosphere;
+    if let Some(lo) = &load_order {
+        settings.atmosphere_data = atmosphere(lo, &world_name, &a.weather);
+    }
     let camera = a.camera.as_deref().map(|c| FreeCam::parse(c).ok_or_else(|| anyhow!("--camera {c}: expected x,y,z[,yaw,pitch]"))).transpose()?.map(|c| FreeCam { fov: a.fov, ..c });
 
     let lod_center = a

@@ -70,7 +70,17 @@ classic tree LOD and a "large references only" filter.
 **Shading.** Textured (sun and ambient, normal maps), unlit (the textures as stored), normals
 (world-space, as lit), flat (geometry only), by level (LOD4 green, LOD8 yellow, LOD16 orange,
 LOD32 purple), by kind (terrain, water, object, tree billboard, grass) and normal map (the
-normal texture as stored; terrain LOD normal maps keep the up axis in green). "LOD snow / ash" (on by default, `--no-snow` headless) projects the directional material the game puts on
+normal texture as stored; terrain LOD normal maps keep the up axis in green). "Weather sky / fog / water" (on by default, `--no-atmosphere` headless; free camera only) takes
+the day values of a weather record (`--weather`, default `SkyrimClear_A`, read from the load
+order's winning WTHR with `--instance`): the sky gradient (far fog colour at the horizon, then
+horizon, sky lower and sky upper colours), the distance fog (`FNAM` near / far / power / max; the
+amount is `((d - near) / (far - near)) ^ (1 / power)`, capped at max, colour from the near to the
+far fog colour) and sunlight + ambient instead of the plain grey light, all in gamma space as the
+game computes them without linear lighting. Distant water uses the worldspace's LOD water type
+(`WRLD NAM3`, `WATR DNAM`): its deep colour, giving way to the reflected sky (the far fog colour)
+by a fresnel term. Clouds, the sun disc, specular and the game's image-space exposure are not
+reproduced, so the game reads brighter under a cloudy sky; the fog exponent was checked against
+in-game captures. "LOD snow / ash" (on by default, `--no-snow` headless) projects the directional material the game puts on
 `objSnow…` / `objSnowHD…` / `objAsh…` / `objAshHD…` shapes: the game picks SnowLODMaterial,
 SnowLODMaterialHD (Skyrim.esm) or the Dragonborn ash LOD materials by the shape's name and blends
 `textures\effects\projecteddiffuse.dds` onto faces along the material's projection vector, weighted

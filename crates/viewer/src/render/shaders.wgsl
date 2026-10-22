@@ -15,7 +15,65 @@ struct Globals {
     // Per snow class 1..4, three vec4: (falloff scale, falloff bias, 1 / noise UV scale, HD),
     // (colour, -), (projection vector, -).
     snow: array<vec4<f32>, 12>,
+    inv_view_proj: mat4x4<f32>,
+    // Weather and water (sRGB colours, as the records store them): 0 fog (near, far, power,
+    // max), 1 fog near colour, 2 fog far colour, 3 sky upper, 4 sky lower, 5 horizon,
+    // 6 sunlight, 7 ambient, 8 water deep, 9 water reflected sky, 10 water (fresnel,
+    // reflectivity, -, -).
+    atmo: array<vec4<f32>, 11>,
+    // x = weather looks on.
+    atmo_on: vec4<f32>,
 };
+
+// With weather looks on, lighting, fog and the sky are computed the way the game does without
+// linear lighting: in gamma (sRGB) space, then converted back to the linear colour this shader
+// writes.
+fn to_gamma(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+}
+
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+fn atmo_on() -> bool {
+    return g.atmo_on.x > 0.5;
+}
+
+// The weather's light on a surface (gamma space): ambient plus sunlight by N.L.
+fn weather_light(n: vec3<f32>) -> vec3<f32> {
+    let d = max(dot(n, normalize(g.sun_dir.xyz)), 0.0);
+    return g.atmo[7].rgb + g.atmo[6].rgb * d;
+}
+
+// A linear albedo lit by the weather; returns linear colour.
+fn weather_shade(base: vec3<f32>, light: vec3<f32>) -> vec3<f32> {
+    return to_linear(to_gamma(base) * light);
+}
+
+// The game's distance fog: amount = min(max, ((d - near) / (far - near)) ^ k), colour from
+// the near to the far fog colour by the same factor, blended in gamma space. k = 1 / the
+// weather's fog power: with the power itself (0.4 for SkyrimClear_A) Whiterun at 25000 units
+// would be 63% fogged, where in-game captures show it lightly hazed and the hills past 50000
+// heavily, which 1 / power reproduces.
+fn apply_fog(c: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let f = g.atmo[0];
+    let d = distance(g.cam_pos.xyz, world);
+    let t = pow(clamp((d - f.x) / max(f.y - f.x, 1.0), 0.0, 1.0), 1.0 / max(f.z, 0.05));
+    let amount = min(t, f.w);
+    let fog = mix(g.atmo[1].rgb, g.atmo[2].rgb, t);
+    return to_linear(mix(to_gamma(c), fog, amount));
+}
+
+// Sky colour for a view direction (linear), blended in gamma space: the far fog colour at the
+// horizon (the game fogs the sky dome there), then horizon, sky lower and sky upper toward the
+// zenith. Clouds are not drawn.
+fn sky_color(dir: vec3<f32>) -> vec3<f32> {
+    let e = dir.z;
+    let base = mix(g.atmo[2].rgb, g.atmo[5].rgb, smoothstep(0.0, 0.08, e));
+    let low = mix(base, g.atmo[4].rgb, smoothstep(0.08, 0.25, e));
+    return to_linear(mix(low, g.atmo[3].rgb, smoothstep(0.25, 0.8, e)));
+}
 
 struct Material {
     flags: u32,
@@ -115,6 +173,8 @@ fn shade(base: vec3<f32>, n: vec3<f32>, m: Material, emissive: vec3<f32>, raw_no
     } else {
         if ((m.flags & F_UNLIT) != 0u) {
             c = base;
+        } else if (atmo_on()) {
+            c = weather_shade(base, weather_light(n)) + emissive;
         } else {
             c = base * lit(n) + emissive;
         }
@@ -209,9 +269,23 @@ fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     }
     var rgb = shade(base.rgb, n, m, emissive, t * 0.5 + 0.5);
     var a = 1.0;
+    let textured = i32(g.params.x) == 0;
     if ((m.flags & F_WATER) != 0u) {
-        rgb = mix(rgb, vec3<f32>(0.1, 0.3, 0.5), 0.6);
-        a = 0.6;
+        if (atmo_on() && textured) {
+            // Distant water: the deep colour, giving way to the reflected sky (sky lower times
+            // the weather's water multiplier) by a Schlick fresnel term toward grazing angles.
+            let cos_v = clamp(dot(to_cam, vec3<f32>(0.0, 0.0, 1.0)), 0.0, 1.0);
+            let f0 = g.atmo[10].x;
+            let fres = (f0 + (1.0 - f0) * pow(1.0 - cos_v, 5.0)) * g.atmo[10].y;
+            let deep = g.atmo[8].rgb * weather_light(vec3<f32>(0.0, 0.0, 1.0));
+            rgb = to_linear(mix(deep, g.atmo[9].rgb, clamp(fres, 0.0, 1.0)));
+        } else {
+            rgb = mix(rgb, vec3<f32>(0.1, 0.3, 0.5), 0.6);
+            a = 0.6;
+        }
+    }
+    if (atmo_on() && textured) {
+        rgb = apply_fog(rgb, in.world);
     }
     return vec4<f32>(rgb, a);
 }
@@ -288,7 +362,10 @@ fn fs_tree(in: TreeOut) -> @location(0) vec4<f32> {
     }
     let mode = i32(g.params.x);
     var c = base.rgb;
-    if (mode == 0 || mode == 3) {
+    if (mode == 0 && atmo_on()) {
+        // No normal: half the sunlight, as a vertical surface turned partly toward the sun.
+        c = apply_fog(weather_shade(c, g.atmo[7].rgb + g.atmo[6].rgb * 0.5), in.world);
+    } else if (mode == 0 || mode == 3) {
         // No normal: a billboard faces the viewer, light it as a vertical surface toward the sun.
         let ambient = g.sun_dir.w;
         c = c * (ambient + (1.0 - ambient) * 0.6);
@@ -303,6 +380,28 @@ fn fs_tree(in: TreeOut) -> @location(0) vec4<f32> {
         c = mix(c, vec3<f32>(1.0, 0.6, 0.1), 0.6);
     }
     return vec4<f32>(c, 1.0);
+}
+
+// Sky gradient: one full-screen triangle behind the scene.
+struct SkyOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn vs_sky(@builtin(vertex_index) vi: u32) -> SkyOut {
+    var out: SkyOut;
+    let p = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+    out.clip = vec4<f32>(p, 0.0, 1.0);
+    out.ndc = p;
+    return out;
+}
+
+@fragment
+fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
+    let h = g.inv_view_proj * vec4<f32>(in.ndc, 0.5, 1.0);
+    let dir = normalize(h.xyz / h.w - g.cam_pos.xyz);
+    return vec4<f32>(sky_color(dir), 1.0);
 }
 
 // Overlay lines (grid, bounds, selection) in world space.
