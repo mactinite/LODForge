@@ -68,6 +68,8 @@ pub struct LandRef {
     pub plugin: u16,
     /// Absolute offset of the LAND record header in that plugin.
     pub offset: usize,
+    /// Global form id of the CELL the record sits under (the children group's label).
+    pub parent: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,13 +132,21 @@ impl Worldspace {
         Some(((c(lo[0]), c(lo[1])), (c(hi[0]), c(hi[1]))))
     }
 
-    /// The LAND used for each cell. A few cells carry more than one LAND record (vanilla
-    /// Dawnguard.esm adds second ones at Tamriel -44,37 and -43,36). xLODGen uses the one from the
-    /// earliest plugin (golden Tamriel.4.-44.36: 45 dB with Skyrim.esm's LAND, 35 dB with
-    /// Dawnguard's); ties go to the lower form id, so the choice never depends on hash-map order.
+    /// The LAND used for each cell: a LAND of the CELL that holds the grid position. Two different
+    /// CELL records at the same coordinates are resolved as the game does, the later-loaded one
+    /// replacing the earlier (`cells`), and the LANDs under the replaced cell are not used; so a
+    /// mod's own cell at the edge of Tamriel wins over an earlier plugin's restored one there. A
+    /// few cells carry more than one LAND record under the same CELL (vanilla Dawnguard.esm adds
+    /// second ones at Tamriel -44,37 and -43,36); xLODGen uses the one from the earliest plugin
+    /// (golden Tamriel.4.-44.36: 45 dB with Skyrim.esm's LAND, 35 dB with Dawnguard's), ties go to
+    /// the lower form id, so the choice never depends on hash-map order. A LAND whose grid has no
+    /// CELL record on file is kept.
     pub fn land_by_cell(&self) -> HashMap<(i32, i32), LandRef> {
         let mut by_cell: HashMap<(i32, i32), (u16, u32, LandRef)> = HashMap::new();
         for (&id, l) in &self.lands {
+            if self.cells.get(&l.cell).is_some_and(|&winner| winner != l.parent) {
+                continue;
+            }
             let key = (l.plugin, id);
             match by_cell.get(&l.cell) {
                 Some((p, i, _)) if (*p, *i) <= key => {}
@@ -178,7 +188,7 @@ struct WorldHeader {
 enum Item {
     Cell { form_id: u32, grid: (i32, i32), water: Option<f32>, flags: u16, hide: u32, offset: usize },
     PersistentCell { form_id: u32, offset: usize },
-    Land { form_id: u32, cell: (i32, i32), offset: usize },
+    Land { form_id: u32, cell: (i32, i32), parent: u32, offset: usize },
     Navmesh { cell: (i32, i32) },
     Ref { form_id: u32, deleted: bool, placement: Placement },
 }
@@ -235,8 +245,8 @@ pub fn scan_worldspaces(lo: &LoadOrder) -> Result<Vec<Worldspace>> {
                     Item::Navmesh { cell } => {
                         w.navmesh_cells.insert(cell);
                     }
-                    Item::Land { form_id, cell, offset } => {
-                        w.lands.insert(form_id, LandRef { cell, plugin: pi as u16, offset });
+                    Item::Land { form_id, cell, parent, offset } => {
+                        w.lands.insert(form_id, LandRef { cell, plugin: pi as u16, offset, parent });
                     }
                     Item::Ref { form_id, deleted, placement } => {
                         if deleted {
@@ -332,8 +342,9 @@ fn scan_world_children(lp: &LoadedPlugin, plugin_index: u16, children: Group<'_>
                 }
             }
             Entry::Group(g) if g.group_type == group_type::CELL_CHILDREN => {
-                // Children of the persistent cell (no grid).
-                scan_cell_children(lp, plugin_index, g, None, &mut items)?;
+                // Children of the persistent cell (no grid, so no LAND is recorded from it).
+                let parent = lp.global_form_id(u32::from_le_bytes(g.label));
+                scan_cell_children(lp, plugin_index, g, None, parent, &mut items)?;
             }
             Entry::Group(g) if g.group_type == group_type::EXTERIOR_BLOCK => {
                 for sb in g.entries() {
@@ -355,17 +366,21 @@ fn scan_world_children(lp: &LoadedPlugin, plugin_index: u16, children: Group<'_>
 fn scan_sub_block(lp: &LoadedPlugin, plugin_index: u16, sb: Group<'_>) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     let mut grid: Option<(i32, i32)> = None;
+    let mut cell_id: Option<u32> = None;
     for e in sb.entries() {
         match e? {
             Entry::Record(r) if r.sig == Sig(*b"CELL") => {
                 let (g, water, flags, hide) = cell_info(&r)?;
                 grid = g;
-                if let (Some(g), Some(id)) = (grid, lp.global_form_id(r.form_id)) {
+                cell_id = lp.global_form_id(r.form_id);
+                if let (Some(g), Some(id)) = (grid, cell_id) {
                     items.push(Item::Cell { form_id: id, grid: g, water, flags, hide, offset: r.offset });
                 }
             }
             Entry::Group(g) if g.group_type == group_type::CELL_CHILDREN => {
-                scan_cell_children(lp, plugin_index, g, grid, &mut items)?;
+                // The children group is labelled with its CELL's (local) form id.
+                let parent = lp.global_form_id(u32::from_le_bytes(g.label)).or(cell_id);
+                scan_cell_children(lp, plugin_index, g, grid, parent, &mut items)?;
             }
             _ => {}
         }
@@ -395,7 +410,7 @@ fn cell_info(r: &Record<'_>) -> Result<(Option<(i32, i32)>, Option<f32>, u16, u3
     Ok((grid, water, flags, hide))
 }
 
-fn scan_cell_children(lp: &LoadedPlugin, plugin_index: u16, g: Group<'_>, cell: Option<(i32, i32)>, items: &mut Vec<Item>) -> Result<()> {
+fn scan_cell_children(lp: &LoadedPlugin, plugin_index: u16, g: Group<'_>, cell: Option<(i32, i32)>, parent: Option<u32>, items: &mut Vec<Item>) -> Result<()> {
     for e in g.entries() {
         let Entry::Group(sub) = e? else { continue };
         if sub.group_type != group_type::CELL_PERSISTENT && sub.group_type != group_type::CELL_TEMPORARY {
@@ -411,8 +426,8 @@ fn scan_cell_children(lp: &LoadedPlugin, plugin_index: u16, g: Group<'_>, cell: 
                     }
                 }
                 b"LAND" => {
-                    if let Some(c) = cell {
-                        items.push(Item::Land { form_id: id, cell: c, offset: r.offset });
+                    if let (Some(c), Some(parent)) = (cell, parent) {
+                        items.push(Item::Land { form_id: id, cell: c, parent, offset: r.offset });
                     }
                 }
                 b"REFR" => {
@@ -466,4 +481,55 @@ fn placement(lp: &LoadedPlugin, plugin_index: u16, r: &Record<'_>, cell: Option<
         }
     }
     Ok(has_base.then_some(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: u32 = 0x0000_A000; // Skyrim.esm's cell
+    const B: u32 = 0x0100_0800; // a later plugin's own cell at the same grid
+
+    fn land(cell: (i32, i32), plugin: u16, parent: u32) -> LandRef {
+        LandRef { cell, plugin, offset: usize::from(plugin) * 100, parent }
+    }
+
+    fn world(cells: &[((i32, i32), u32)], lands: &[(u32, LandRef)]) -> Worldspace {
+        Worldspace {
+            cells: cells.iter().copied().collect(),
+            lands: lands.iter().copied().collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_cell_holding_the_grid_decides_which_land_is_used() {
+        // B, from the later plugin, took the grid from A: A's LAND is not used even though A's
+        // plugin loads first.
+        let w = world(&[((5, 5), B)], &[(0x28DF, land((5, 5), 0, A)), (0x0100_0801, land((5, 5), 1, B))]);
+        assert_eq!(w.land_by_cell()[&(5, 5)], land((5, 5), 1, B));
+        // The other way round: A wins the grid (its override loads last), B's LAND is ignored.
+        let w = world(&[((5, 5), A)], &[(0x28DF, land((5, 5), 0, A)), (0x0100_0801, land((5, 5), 1, B))]);
+        assert_eq!(w.land_by_cell()[&(5, 5)], land((5, 5), 0, A));
+    }
+
+    #[test]
+    fn duplicate_lands_under_the_winning_cell_take_the_earliest_plugin() {
+        // Dawnguard.esm's second LAND for a Skyrim.esm cell: the same CELL, so xLODGen's rule applies.
+        let w = world(&[((-44, 37), A)], &[(0x0122_2222, land((-44, 37), 1, A)), (0x28DF, land((-44, 37), 0, A))]);
+        assert_eq!(w.land_by_cell()[&(-44, 37)], land((-44, 37), 0, A));
+        // Same plugin: the lower form id.
+        let w = world(&[((1, 1), A)], &[(0x2000, land((1, 1), 0, A)), (0x1000, land((1, 1), 0, A))]);
+        assert_eq!(w.land_by_cell()[&(1, 1)].offset, 0);
+        let by = w.land_by_cell();
+        assert_eq!(by.len(), 1);
+    }
+
+    #[test]
+    fn a_land_under_a_replaced_cell_is_dropped_and_a_land_without_a_cell_is_kept() {
+        let w = world(&[((5, 5), B)], &[(0x28DF, land((5, 5), 0, A)), (0x3000, land((6, 6), 0, A))]);
+        let by = w.land_by_cell();
+        assert!(!by.contains_key(&(5, 5)), "the replaced cell's LAND is not the terrain any more");
+        assert_eq!(by[&(6, 6)], land((6, 6), 0, A), "no CELL on file for the grid: the LAND stays");
+    }
 }

@@ -212,9 +212,14 @@ UVs round-trip with error 0 through the dumper's half decoder, so round-to-neare
 | Lattice | `lodsettings\<World>.lod`, 16 bytes `[golden: extracted from Skyrim - Meshes0.bsa]`: i16 SW cell x, i16 SW cell y, i32 stride (256 Tamriel, 32 Markarth), i32 min level (4), i32 max level (32; JaphetsFollyWorld 16) `[doc: LODSettings-File-Readme.txt]`. | `CellSW`, `MaxLevel` |
 | Hide flags | CELL `XCLC` quadrant hide flags (`HideQuads` / `IgnoreHide`, section 4) `[cfg]` `[doc: Terrain-LOD-Readme.txt]`. | underside only |
 
-Winning records are the load order's last override, except duplicate LAND records of one cell in
-several plugins where the earliest plugin's LAND is the real one (Dawnguard ships overrides;
-`crates/esp` already handles this) `[ours]`.
+Winning records are the load order's last override. A cell's LAND is a LAND under the CELL that
+holds the grid position: two different CELL records at the same coordinates are resolved as the
+game does, the later-loaded one replacing the earlier, and the replaced cell's LANDs are not used
+(so a mod's own cells at Tamriel's edge win over the restored cells of an earlier-loaded resource
+plugin, as its author asks). Duplicate LAND records under one CELL in several plugins take the
+earliest plugin's (Dawnguard.esm adds second ones at Tamriel -44,37 and -43,36; golden
+`Tamriel.4.-44.36` is 45 dB with Skyrim.esm's LAND, 35 dB with Dawnguard's), ties the lower form
+id (`Worldspace::land_by_cell`) `[golden]` `[ours]`.
 
 ### 2.2 In-memory structure (ours)
 
