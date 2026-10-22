@@ -61,6 +61,10 @@ pub struct Args {
     /// edges and 8-bit gamma-space box mips, as the golden xLODGen run; for comparisons).
     #[arg(long, value_enum, default_value = "hq")]
     pub filter: TerrainFilter,
+    /// LOD32 (map) texture settings: `step` (2048 px, gamma 1.25; the default) or `golden` (the
+    /// golden xLODGen run: 512 px, gamma 1.0).
+    #[arg(long, value_enum, default_value = "step")]
+    pub lod32: Lod32,
 }
 
 /// How terrain LOD textures are resampled (see [Args::filter]).
@@ -116,11 +120,52 @@ struct LevelSettings {
     mips: bool,
 }
 
-fn level_settings(level: i32, kind: Kind, mips: TerrainMips) -> LevelSettings {
-    let size = if level == 4 { 1024 } else { 512 };
+/// LOD32 settings: the map level, which the golden xLODGen run built at 512 px with gamma 1.0
+/// and mesh quality 10, while STEP's guide builds it at 2048 px, gamma 1.25 and mesh quality 0
+/// (it is the world map; it need not be the lowest level of detail).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum Lod32 {
+    /// STEP: 2048 px diffuse and normal, gamma 1.25, mesh quality 0 (32,767 vertices).
+    #[default]
+    Step,
+    /// The golden xLODGen run: 512 px, gamma 1.0, mesh quality 10.
+    Golden,
+}
+
+impl Lod32 {
+    /// Texture size per kind.
+    pub fn size(self) -> u32 {
+        match self {
+            Lod32::Step => 2048,
+            Lod32::Golden => 512,
+        }
+    }
+
+    pub fn gamma(self) -> f32 {
+        match self {
+            Lod32::Step => 1.25,
+            Lod32::Golden => 1.0,
+        }
+    }
+
+    /// Terrain mesh error threshold (`Quality`) for LOD32; `None` keeps xLODGen's default.
+    pub fn mesh_quality(self) -> Option<f32> {
+        match self {
+            Lod32::Step => Some(0.0),
+            Lod32::Golden => None,
+        }
+    }
+}
+
+fn level_settings(level: i32, kind: Kind, mips: TerrainMips, lod32: Lod32) -> LevelSettings {
+    let size = match level {
+        4 => 1024,
+        32 => lod32.size(),
+        _ => 512,
+    };
     let mips = mips.enabled(level, kind);
     match kind {
-        Kind::Diffuse => LevelSettings { size, gamma: if level == 32 { 1.0 } else { 1.25 }, mips },
+        Kind::Diffuse => LevelSettings { size, gamma: if level == 32 { lod32.gamma() } else { 1.25 }, mips },
         Kind::Normal => LevelSettings { size, gamma: 1.0, mips },
     }
 }
@@ -402,7 +447,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
         // A season that changes no tile of this kind: every tile is reused, nothing is set up.
         let all_reused = only[&kind].as_ref().is_some_and(|s| s.is_empty());
         // Shrunk landscape textures (24 repeats per cell; texPx from the largest pixels-per-cell).
-        let max_ppc = a.levels.iter().map(|&l| level_settings(l, kind, a.mips).size / l as u32).max().unwrap_or(64);
+        let max_ppc = a.levels.iter().map(|&l| level_settings(l, kind, a.mips, a.lod32).size / l as u32).max().unwrap_or(64);
         let tex_px = SpecParams::tex_px_for(max_ppc);
         let params = SpecParams { tex_px, ..spec_params.clone() };
         let shrunk = ShrunkTextures::new(cache, tex_px, kind);
@@ -421,7 +466,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
         let mut default_dds: HashMap<i32, Vec<u8>> = HashMap::new();
         if kind == Kind::Diffuse && !all_reused {
             for &level in &a.levels {
-                let ls = level_settings(level, kind, a.mips);
+                let ls = level_settings(level, kind, a.mips, a.lod32);
                 let b = SpecBaker { textures: &shrunk, ltex: &ltex, params: SpecParams { gamma: ls.gamma, ..params.clone() } };
                 let (size, rgba) = match a.filter {
                     TerrainFilter::Xlodgen => {
@@ -437,7 +482,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
             .levels
             .iter()
             .map(|&l| {
-                let ls = level_settings(l, kind, a.mips);
+                let ls = level_settings(l, kind, a.mips, a.lod32);
                 LevelSpec { level: l as u32, ppc: ls.size / l as u32, gamma: ls.gamma, brightness: 0.0, contrast: 0.0 }
             })
             .collect();
@@ -494,7 +539,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
             st.gpu += t0.elapsed().as_millis();
 
             for &level in &a.levels {
-                let ls = level_settings(level, kind, a.mips);
+                let ls = level_settings(level, kind, a.mips, a.lod32);
                 let mine: Vec<(i32, i32)> = wanted.iter().filter(|(l, _)| *l == level).map(|(_, t)| *t).collect();
                 let (defaults, full): (Vec<_>, Vec<_>) = mine.iter().partition(|t| constant_default(level, **t));
                 let t0 = Instant::now();
@@ -582,17 +627,17 @@ mod tests {
     fn mip_settings_per_mode() {
         for level in [4, 8, 16, 32] {
             for kind in [Kind::Diffuse, Kind::Normal] {
-                assert!(level_settings(level, kind, TerrainMips::Full).mips, "full {level} {kind:?}");
-                assert!(!level_settings(level, kind, TerrainMips::None).mips, "none {level} {kind:?}");
+                assert!(level_settings(level, kind, TerrainMips::Full, Lod32::Golden).mips, "full {level} {kind:?}");
+                assert!(!level_settings(level, kind, TerrainMips::None, Lod32::Golden).mips, "none {level} {kind:?}");
                 // The golden xLODGen run: TerrainDiffuseMipMapLOD4=1, everything else 0.
-                assert_eq!(level_settings(level, kind, TerrainMips::Golden).mips, kind == Kind::Diffuse && level == 4, "golden {level} {kind:?}");
+                assert_eq!(level_settings(level, kind, TerrainMips::Golden, Lod32::Golden).mips, kind == Kind::Diffuse && level == 4, "golden {level} {kind:?}");
             }
         }
         // Sizes and gamma do not depend on the mip mode.
-        assert_eq!(level_settings(4, Kind::Diffuse, TerrainMips::Full).size, 1024);
-        assert_eq!(level_settings(8, Kind::Normal, TerrainMips::Golden).size, 512);
-        assert_eq!(level_settings(32, Kind::Diffuse, TerrainMips::None).gamma, 1.0);
-        assert_eq!(level_settings(16, Kind::Diffuse, TerrainMips::Full).gamma, 1.25);
+        assert_eq!(level_settings(4, Kind::Diffuse, TerrainMips::Full, Lod32::Golden).size, 1024);
+        assert_eq!(level_settings(8, Kind::Normal, TerrainMips::Golden, Lod32::Golden).size, 512);
+        assert_eq!(level_settings(32, Kind::Diffuse, TerrainMips::None, Lod32::Golden).gamma, 1.0);
+        assert_eq!(level_settings(16, Kind::Diffuse, TerrainMips::Full, Lod32::Golden).gamma, 1.25);
     }
 
     #[test]

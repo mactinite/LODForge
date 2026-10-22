@@ -25,6 +25,7 @@ pub struct LaneArgs {
     pub seasons: Vec<String>,
     pub mips: TerrainMips,
     pub filter: crate::terrain_textures::TerrainFilter,
+    pub lod32: crate::terrain_textures::Lod32,
     pub json: bool,
     /// Fill cells without LAND from the shipped terrain LOD meshes (`--no-lod-fill` clears it).
     pub lod_fill: bool,
@@ -115,7 +116,7 @@ fn run(a: &LaneArgs, shared: &Shared) {
         Ok(ctx) => {
             // Every worldspace's meshes first (seconds in all): the object stages wait on them.
             for world in &a.worlds {
-                let args = crate::terrain_meshes::Args { profile: a.profile.clone(), world: world.clone(), out: a.out.clone(), seasons: a.seasons.clone(), settings: None, golden: None, no_lod_fill: !a.lod_fill };
+                let args = crate::terrain_meshes::Args { profile: a.profile.clone(), world: world.clone(), out: a.out.clone(), seasons: a.seasons.clone(), settings: None, golden: None, no_lod_fill: !a.lod_fill, lod32_quality: a.lod32.mesh_quality() };
                 step(world, "terrain-meshes", None, &mut || crate::terrain_meshes::run_with(ctx.p, &args));
                 meshes_done(world);
             }
@@ -134,6 +135,7 @@ fn run(a: &LaneArgs, shared: &Shared) {
                         batch: 96,
                         mips: a.mips,
                         filter: a.filter,
+                        lod32: a.lod32,
                     };
                     step(world, "terrain-textures", season.as_deref(), &mut || crate::terrain_textures::run_in(&ctx, &args));
                 }

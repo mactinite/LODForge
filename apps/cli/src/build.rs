@@ -80,6 +80,16 @@ pub struct Args {
     /// renormalised normals) or `xlodgen` (as the golden xLODGen run).
     #[arg(long, value_enum, default_value = "hq")]
     pub terrain_filter: crate::terrain_textures::TerrainFilter,
+    /// LOD32 (world map) terrain settings: `step` (2048 px textures, gamma 1.25, mesh quality 0;
+    /// the default) or `golden` (the golden xLODGen run: 512 px, gamma 1.0, quality 10).
+    #[arg(long, value_enum, default_value = "step")]
+    pub lod32: crate::terrain_textures::Lod32,
+    /// Tone of the stitched object LOD textures (the LOD8/16 mini atlases): `flat` (the default;
+    /// every texture keeps its source's brightness, so distant rocks and buildings match the
+    /// full textures LOD4 shows) or `dyndolod` (TexGen's rule brightness and gamma columns,
+    /// which darken e.g. mountain textures by 14% below LOD4).
+    #[arg(long, value_enum, default_value = "flat")]
+    pub lod_texture_tone: LodTextureTone,
     /// Material setup of the list. `pbr` (Community Shaders with PBR): pbr_lod texture twins,
     /// PBR texture sets and linear copies from the textures\pbr\ sources. `standard` (non-PBR:
     /// ENB complex material, parallax or vanilla): plain textures only, textures\pbr\ sources
@@ -93,6 +103,14 @@ pub struct Args {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum Mode {
     Xlodgen,
+    Dyndolod,
+}
+
+/// `--lod-texture-tone`: whether the stitched LOD textures take TexGen's per-rule tone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum LodTextureTone {
+    #[default]
+    Flat,
     Dyndolod,
 }
 
@@ -226,7 +244,7 @@ pub fn run(a: &Args) -> Result<()> {
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
     // Terrain meshes and textures of every worldspace and season run on their own thread from
     // here on; the object stages below wait per worldspace for its meshes.
-    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, filter: a.terrain_filter, json: a.json, lod_fill: !a.no_lod_fill }));
+    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, filter: a.terrain_filter, lod32: a.lod32, json: a.json, lod_fill: !a.no_lod_fill }));
     if a.texgen {
         let t = Instant::now();
         begin(a.json, "all", "texgen", None);
@@ -244,7 +262,7 @@ pub fn run(a: &Args) -> Result<()> {
             begin(a.json, "all", "texgen-stitched", None);
             let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
             let reuv = work.join("DynDOLOD_SSE_re-uv-miniatlas.txt");
-            match lodforge_gpu::Gpu::new().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, &gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr())) {
+            match lodforge_gpu::Gpu::new().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, &gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr(), a.lod_texture_tone == LodTextureTone::Dyndolod)) {
                 Ok(m) => {
                     if !a.json {
                         println!("texgen-stitched: {} atlases, {} PBR twins, {} full textures, {} temporaries, {} rendered; {} skipped", m.atlases, m.pbr, m.full, m.temps, m.rendered, m.skipped.len());

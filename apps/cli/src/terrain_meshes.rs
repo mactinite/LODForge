@@ -38,6 +38,10 @@ pub struct Args {
     /// terrain LOD meshes the game ships (docs/re/terrain-lod-spec.md 2.3).
     #[arg(long)]
     pub no_lod_fill: bool,
+    /// LOD32 mesh error threshold (`Quality`; 0 = every vertex the budget allows, STEP's map
+    /// setting). Default: the control file's or xLODGen's 10.
+    #[arg(long)]
+    pub lod32_quality: Option<f32>,
 }
 
 /// Fills the cells without LAND of `input` from the shipped terrain LOD meshes (`lodforge_btr::fill`),
@@ -94,6 +98,10 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         }
         None => (Settings::default(), None),
     };
+    let mut settings = settings;
+    if let Some(q) = a.lod32_quality {
+        settings.level_mut(32).quality = q;
+    }
 
     let t = Instant::now();
     let mut input = export::terrain_input(lo, world, None, south_west, max_level)?;

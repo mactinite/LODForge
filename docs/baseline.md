@@ -1829,3 +1829,31 @@ order differs from the golden instance, not the fill. The LOD32 worst files are 
 where the Extend plugin's synthetic northern seabed (y > 50) differs from the vanilla meshes'
 under the water. Not checked in game. The three interior files are the only LOD4 files above
 rms 50 in either run.
+
+## LOD8/16 texture tone and LOD32 map settings (2026-10-21, main working tree)
+
+**Distant rocks darker than LOD4.** Per-shape texel sampling (`apps/cli/examples/shape_colors.rs`:
+mean colour of the texture region each `.bto` shape's UVs cover) on the 0.4.0 output, tundra east
+block (`Tamriel.4.0.-8` / `8.0.-8` / `16.0.-16`): LOD4 HD cliff shapes sample
+`textures\pbr\landscape\mountains\mountainslab01linear.dds` at mean luminance 74.6 (= 0.65 x the
+114.8 source: the PBR scale only); LOD8/16 shapes sample `textures\lod\mountainslab01pbr_lod.dds` at
+64.1 (0.558 x source). The difference is TexGen's rule tone: `DynDOLOD_SSE_TexGen_noalpha_skyrimesm.txt`
+gives mountainslab01 brightness -4 and gamma 0.95/0.93/1 (266 of its 1,152 rule lines carry a
+tone), which the stitcher applied on top of `StitchPBRScale` while the LOD4 copy and the vanilla
+full textures get none. DynDOLOD does the same, so it was parity, not a regression (the 45c06f7
+linear-light mips hold mip 3 within 0.5 of mip 0; the pre-visuals build had the same 64 on the
+non-PBR twin). New `build --lod-texture-tone flat|dyndolod` (default `flat`; UI "Distant object
+texture tone"): `flat` skips the rule brightness/gamma, PBR scale kept. Measured: the PBR twin
+74.5 (LOD4 copy 74.6), the non-PBR `mountainslab01lod` 80.3 (its source has no PBR scale, as the
+vanilla LOD4 full texture). Viewer luminance in that view, mountain crop, before the fix: LOD4 60
+-> LOD8 50 (0.4.0), DynDOLOD golden 54 -> 47; vertex colours pull the other way (LOD4 HD shapes
+mean VC 171-182, LOD8 225). In-game check by the user pending.
+
+**LOD32 as its own quality setting.** `build --lod32 step|golden` (default `step`; UI "World map
+terrain (LOD32)"; `terrain-textures --lod32`, `terrain-meshes --lod32-quality`): `step` = STEP's
+xLODGen map settings, 2048 px diffuse and normal, gamma 1.25 like the other levels, mesh quality
+0 with the 32,767-vertex budget (Optimize Unseen 550 unchanged); `golden` = the golden xLODGen
+run (512 px, gamma 1.0, quality 10). Tamriel `step`: 32 LOD32 textures at 2048^2 with 12 mips,
+meshes 9,901-36,823 land vertices per quad (13 of 16 hit the budget, worst error 8.55), terrain
+texture stage 41 s instead of 14 s for the default season (16 tiles of 4x the pixels through the
+hq resize and BC7), textures folder 2.5 GB.

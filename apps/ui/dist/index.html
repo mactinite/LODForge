@@ -73,6 +73,16 @@
         <p class="explain" id="terrainFilterExplain"></p>
       </div>
       <div class="setting">
+        <label for="lod32">World map terrain (LOD32)</label>
+        <select id="lod32"><option value="step" selected>High detail (STEP)</option><option value="golden">xLODGen default</option></select>
+        <p class="explain" id="lod32Explain"></p>
+      </div>
+      <div class="setting">
+        <label for="lodTone">Distant object texture tone</label>
+        <select id="lodTone"><option value="flat" selected>Match LOD4 (recommended)</option><option value="dyndolod">DynDOLOD rules</option></select>
+        <p class="explain" id="lodToneExplain"></p>
+      </div>
+      <div class="setting">
         <label for="atlasTile">Object texture detail <output id="atlasTileOut"></output></label>
         <input type="range" id="atlasTile" min="0" max="3" step="1" value="2" list="atlasTicks">
         <datalist id="atlasTicks"><option value="0"></option><option value="1"></option><option value="2"></option><option value="3"></option></datalist>

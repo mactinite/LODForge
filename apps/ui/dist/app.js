@@ -119,9 +119,9 @@ function renderSeasons() {
 // Quality: a level sets every setting; changing a setting by hand shows "Custom".
 const ATLAS_TILES = [256, 512, 1024, 2048];
 const LEVELS = {
-  performance: { preset: "Low", bc7: "fast", terrainFilter: "hq", atlasTile: 1, billboardScale: 75 },
-  balanced: { preset: "Medium", bc7: "high", terrainFilter: "hq", atlasTile: 2, billboardScale: 100 },
-  quality: { preset: "High", bc7: "high", terrainFilter: "hq", atlasTile: 3, billboardScale: 150 },
+  performance: { preset: "Low", bc7: "fast", terrainFilter: "hq", lod32: "step", lodTone: "flat", atlasTile: 1, billboardScale: 75 },
+  balanced: { preset: "Medium", bc7: "high", terrainFilter: "hq", lod32: "step", lodTone: "flat", atlasTile: 2, billboardScale: 100 },
+  quality: { preset: "High", bc7: "high", terrainFilter: "hq", lod32: "step", lodTone: "flat", atlasTile: 3, billboardScale: 150 },
 };
 const LEVEL_NAMES = { performance: "Performance", balanced: "Balanced", quality: "Quality", custom: "Custom" };
 const QUALITY_KEYS = Object.keys(LEVELS.balanced);
@@ -140,14 +140,22 @@ const EXPLAIN = {
     hq: "Every LOD level is resized from the whole stitched tile, colour is averaged in linear light and normal maps are renormalised, so distant terrain keeps its brightness (it lost up to 12% before) and its relief.",
     xlodgen: "Reproduces xLODGen: each cell is resized on its own and mips are 8-bit box filters in gamma space. Only useful for comparing against xLODGen output.",
   },
+  lod32: {
+    step: "The world map's terrain as the STEP guide sets xLODGen: 2048 px textures with the same gamma as the other levels and meshes built to the full 32,767-vertex budget. About 130 MB more on Tamriel.",
+    golden: "The golden xLODGen run's map level: 512 px textures, gamma 1.0 and mesh quality 10, the lowest detail of all levels. Only useful for comparing against xLODGen output.",
+  },
+  lodTone: {
+    flat: "Distant (LOD8/16) rock, cliff and building textures keep their source's brightness, so they match the full textures and PBR copies LOD4 shows.",
+    dyndolod: "TexGen's per-texture brightness and gamma rules, as DynDOLOD applies them: mountain textures come out about 14% darker than the LOD4 copies of the same texture.",
+  },
 };
 
 function qualityValues() {
-  return { preset: $("preset").value, bc7: $("bc7").value, terrainFilter: $("terrainFilter").value, atlasTile: Number($("atlasTile").value), billboardScale: Number($("billboardScale").value) };
+  return { preset: $("preset").value, bc7: $("bc7").value, terrainFilter: $("terrainFilter").value, lod32: $("lod32").value, lodTone: $("lodTone").value, atlasTile: Number($("atlasTile").value), billboardScale: Number($("billboardScale").value) };
 }
 
 function syncQualityText() {
-  for (const k of ["preset", "bc7", "terrainFilter"]) $(k + "Explain").textContent = EXPLAIN[k][$(k).value] || "";
+  for (const k of ["preset", "bc7", "terrainFilter", "lod32", "lodTone"]) $(k + "Explain").textContent = EXPLAIN[k][$(k).value] || "";
   const tile = ATLAS_TILES[Number($("atlasTile").value)];
   $("atlasTileOut").textContent = `${tile} px (full textures ${Math.max(64, tile / 4)} px)`;
   const k = Number($("billboardScale").value);
@@ -195,7 +203,7 @@ function selection() {
     mode: "dyndolod",
     materials: document.querySelector("input[name=materials]:checked").value,
     preset: $("preset").value, plugins: $("plugins").checked, occlusion: $("occlusion").checked,
-    bc7: $("bc7").value, terrain_filter: $("terrainFilter").value,
+    bc7: $("bc7").value, terrain_filter: $("terrainFilter").value, lod32: $("lod32").value, lod_texture_tone: $("lodTone").value,
     billboard_scale: Number($("billboardScale").value) / 100, atlas_max_tile: ATLAS_TILES[Number($("atlasTile").value)],
     grass: $("grass").value, grass_source: $("grassSource").value, grass_density: Number($("grassDensity").value) || null,
     mo2_mod: dest === "mo2" ? $("modName").value.trim() : null,

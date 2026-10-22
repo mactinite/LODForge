@@ -221,6 +221,12 @@ struct BuildRequest {
     /// Terrain texture resampling: `hq` or `xlodgen` (`--terrain-filter`).
     #[serde(default)]
     terrain_filter: Option<String>,
+    /// LOD32 map detail: `step` or `golden` (`--lod32`).
+    #[serde(default)]
+    lod32: Option<String>,
+    /// Stitched LOD texture tone: `flat` or `dyndolod` (`--lod-texture-tone`).
+    #[serde(default)]
+    lod_texture_tone: Option<String>,
     /// Billboard resolution multiplier (`--billboard-scale`).
     #[serde(default)]
     billboard_scale: Option<f32>,
@@ -280,6 +286,12 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
     }
     if let Some(f) = &req.terrain_filter {
         c.args(["--terrain-filter", f]);
+    }
+    if let Some(v) = &req.lod32 {
+        c.args(["--lod32", v]);
+    }
+    if let Some(v) = &req.lod_texture_tone {
+        c.args(["--lod-texture-tone", v]);
     }
     if let Some(k) = req.billboard_scale {
         c.args(["--billboard-scale", &k.to_string()]);

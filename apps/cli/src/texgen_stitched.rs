@@ -216,7 +216,7 @@ fn build_atlas(src: &Sources, a: &Atlas, prm: &StitchParams, pbr: bool) -> std::
         let (sw, sh) = src.size(&path).ok_or_else(|| format!("missing {path}"))?;
         let first = stitch::tile_lod(sw, sh, rect[2], rect[3], prm.bias).floor() as u32;
         let chain = src.chain(&path, first).ok_or_else(|| format!("unreadable {path}"))?;
-        let mut tone = stitch::Tone::new(*brightness, *rgb);
+        let mut tone = if prm.rule_tone { stitch::Tone::new(*brightness, *rgb) } else { stitch::Tone::IDENTITY };
         // StitchPBRScale scales the PBR sources only (golden castlekitpbr_lod mixes both).
         if path.contains(r"\pbr\") {
             tone.scale = prm.pbr_scale;
@@ -238,12 +238,12 @@ fn build_atlas(src: &Sources, a: &Atlas, prm: &StitchParams, pbr: bool) -> std::
 
 /// An `x` rule: the source at its own size (mode/level semantics are open; we copy mip `level`
 /// of the source, alpha stripped for `noalpha` destinations).
-fn build_full(src: &Sources, r: &Rule, pbr: bool) -> std::result::Result<Out, String> {
+fn build_full(src: &Sources, r: &Rule, pbr: bool, rule_tone: bool) -> std::result::Result<Out, String> {
     let Rule::Full { src: s, dest, brightness, rgb, alpha, .. } = r else { return Err("not a full rule".into()) };
     let path = if pbr { stitch::pbr_path(s) } else { s.clone() };
     let chain = src.chain(&path, 0).ok_or_else(|| format!("missing {path}"))?;
     let l = &chain.levels[0];
-    let t = stitch::Tone::new(*brightness, *rgb);
+    let t = if rule_tone { stitch::Tone::new(*brightness, *rgb) } else { stitch::Tone::IDENTITY };
     let px: Vec<[f32; 4]> = l.px.iter().map(|p| [t.apply(p[0], 0), t.apply(p[1], 1), t.apply(p[2], 2), if *alpha && !dest.contains("noalpha") { p[3] } else { 1.0 }]).collect();
     let lv = Level { w: l.w, h: l.h, px };
     Ok(Out { path: if pbr { stitch::pbr_path(dest) } else { dest.clone() }, w: lv.w, h: lv.h, rgba: lv.to_rgba8() })
@@ -467,7 +467,7 @@ fn make_all(src: &Sources, rs: &RuleSet, prm: &StitchParams, filter: Option<&str
                     continue;
                 }
                 if full {
-                    match build_full(src, &a.rules[0], pbr) {
+                    match build_full(src, &a.rules[0], pbr, prm.rule_tone) {
                         Ok(o) => {
                             outs.push(o);
                             counts[2] += 1;
@@ -643,10 +643,10 @@ fn golden_files(golden: &Path) -> Vec<String> {
 
 /// Stitches everything into `out` (the build stage). Returns what was made. `pbr` off
 /// (`--materials complex`): plain textures only, no `textures\pbr\` source is read.
-pub fn stitch_into(p: &Profile, gpu: &lodforge_gpu::Gpu, dyndolod: &Path, out: &Path, reuv_out: Option<&Path>, pbr: bool) -> Result<Made> {
+pub fn stitch_into(p: &Profile, gpu: &lodforge_gpu::Gpu, dyndolod: &Path, out: &Path, reuv_out: Option<&Path>, pbr: bool, rule_tone: bool) -> Result<Made> {
     let rules = load_rules(p, dyndolod);
     let src = Sources::new(p, &rules.copies, pbr);
-    let prm = StitchParams::default();
+    let prm = StitchParams { rule_tone, ..StitchParams::default() };
     let write = |o: Out| -> Result<()> {
         let path = out.join(&o.path);
         std::fs::create_dir_all(path.parent().unwrap())?;

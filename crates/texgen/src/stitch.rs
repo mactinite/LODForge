@@ -264,11 +264,16 @@ pub struct StitchParams {
     pub bias: f32,
     /// `StitchPBRScale`.
     pub pbr_scale: f32,
+    /// Apply each rule's brightness and gamma columns (TexGen's behaviour). Off, every tile keeps
+    /// its source's tone (the PBR scale still applies), so LOD8/16 textures match the full
+    /// textures and `linear` copies LOD4 shows: the rules darken e.g. mountainslab01 by
+    /// brightness -4 and gamma 0.95/0.93, 14% below the LOD4 copy.
+    pub rule_tone: bool,
 }
 
 impl Default for StitchParams {
     fn default() -> Self {
-        StitchParams { base: 256, bias: -1.25, pbr_scale: 0.65 }
+        StitchParams { base: 256, bias: -1.25, pbr_scale: 0.65, rule_tone: true }
     }
 }
 
