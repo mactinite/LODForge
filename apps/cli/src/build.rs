@@ -97,6 +97,12 @@ pub struct Args {
     /// LOD4 shapes also carry darkening vertex colours.
     #[arg(long, default_value_t = 0.5)]
     pub far_lod_match: f32,
+    /// Keep the shipped LOD8/16 models everywhere. By default a reference whose LOD8/16 model
+    /// shows a pre-baked LOD texture its LOD4 model does not use (mountain cliffs with a LOD
+    /// texture pack) gets LOD8/16 models simplified from its LOD4 model instead, so texture,
+    /// UVs and normal map stay the same across the LOD4 -> LOD8 switch.
+    #[arg(long)]
+    pub keep_far_lod_models: bool,
     /// Material setup of the list. `pbr` (Community Shaders with PBR): pbr_lod texture twins,
     /// PBR texture sets and linear copies from the textures\pbr\ sources. `standard` (non-PBR:
     /// ENB complex material, parallax or vanilla): plain textures only, textures\pbr\ sources
@@ -454,6 +460,27 @@ pub fn run(a: &Args) -> Result<()> {
             });
             if !mini_written.is_empty() {
                 p.vfs.add_loose_files(&out, mini_written.iter().map(String::as_str));
+            }
+            // LOD8/16 models rebuilt from the LOD4 model where the shipped far models switch to
+            // a pre-baked texture of their own (mountain cliffs).
+            if !a.keep_far_lod_models && pending.is_some() {
+                let mut far_written: Vec<String> = Vec::new();
+                step("far-lod-models", None, &mut || {
+                    let Some(we) = pending.as_mut() else { return Ok(()) };
+                    let cache = a.dyn_opts.lod_model_cache.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(".lodforge-cache"));
+                    let rep = crate::lod_models::far_from_lod0(&p, we, &out, Some(&cache));
+                    if !a.json {
+                        println!("  far LOD models from the LOD4 model: {} models, {} reference lines; {} failed", rep.written.len(), rep.lines, rep.failed.len());
+                        for (m, e) in rep.failed.iter().take(5) {
+                            println!("    {m}: {e}");
+                        }
+                    }
+                    far_written = rep.written;
+                    Ok(())
+                });
+                if !far_written.is_empty() {
+                    p.vfs.add_loose_files(&out, far_written.iter().map(String::as_str));
+                }
             }
             // Grass placements and billboards before the atlas: the billboard views go on the
             // `_Alpha` page like the tree billboards (DynDOLOD's map), so the atlas has to know

@@ -89,6 +89,8 @@ struct Mesh {
     colors: Vec<[u8; 4]>,
     triangles: Vec<[u32; 3]>,
     has: [bool; 5],
+    /// Name of the first source shape merged into this mesh.
+    source_name: Option<String>,
 }
 
 /// Affine transform as NIF stores it: v' = R v * s + t, R row-major.
@@ -197,7 +199,7 @@ fn add_shape(nif: &Nif, s: &TriShape, parent: &Xf, meshes: &mut Vec<Mesh>, keys:
     let has = [true, s.uvs.len() == n, s.normals.len() == n, s.tangents.len() == n, s.colors.len() == n];
     let key = format!("{shader:?}|{textures:?}|{alpha:?}|{has:?}");
     let mi = *keys.entry(key).or_insert_with(|| {
-        meshes.push(Mesh { shader: Some(shader), textures, alpha, has, ..Default::default() });
+        meshes.push(Mesh { shader: Some(shader), textures, alpha, has, source_name: s.av.net.name.clone(), ..Default::default() });
         meshes.len() - 1
     });
     let m = &mut meshes[mi];
@@ -370,6 +372,16 @@ fn bounds(points: &[[f32; 3]]) -> ([f32; 3], f32) {
 }
 
 /// Builds a LOD model from a full model's bytes.
+/// [generate], but every output shape keeps the name of the first source shape merged into it
+/// (so per-reference side files keyed by shape name, such as DynDOLOD's AltTextures, apply to
+/// the generated model as to its source).
+pub fn generate_keep_names(source: &[u8], p: &LevelParams, name: &str) -> Result<(Vec<u8>, Stats), Skip> {
+    let nif = lodforge_nif::parse(source).map_err(|e| Skip::Parse(e.to_string()))?;
+    let (nif, st) = generate_impl(&nif, p, name, true)?;
+    let bytes = nif.to_bytes().map_err(|e| Skip::Parse(e.to_string()))?;
+    Ok((bytes, st))
+}
+
 pub fn generate(full: &[u8], p: &LevelParams, name: &str) -> Result<(Vec<u8>, Stats), Skip> {
     let nif = lodforge_nif::parse(full).map_err(|e| Skip::Parse(e.to_string()))?;
     let (nif, st) = generate_nif(&nif, p, name)?;
@@ -378,6 +390,10 @@ pub fn generate(full: &[u8], p: &LevelParams, name: &str) -> Result<(Vec<u8>, St
 }
 
 pub fn generate_nif(nif: &Nif, p: &LevelParams, name: &str) -> Result<(Nif, Stats), Skip> {
+    generate_impl(nif, p, name, false)
+}
+
+fn generate_impl(nif: &Nif, p: &LevelParams, name: &str, keep_names: bool) -> Result<(Nif, Stats), Skip> {
     let mut st = Stats::default();
     let mut meshes = Vec::new();
     let mut keys = HashMap::new();
@@ -439,8 +455,9 @@ pub fn generate_nif(nif: &Nif, p: &LevelParams, name: &str) -> Result<(Nif, Stat
         sh.texture_set = Some(ts);
         let si = out.add_block(Block::LightingShader(sh));
         let ai = m.alpha.map(|(flags, threshold)| out.add_block(Block::Alpha { net: ObjectNet::default(), flags, threshold }));
+        let shape_name = if keep_names { m.source_name.clone().unwrap_or_else(|| name.to_string()) } else { name.to_string() };
         let shape = TriShape {
-            av: AvObject { net: ObjectNet::named(name), ..Default::default() },
+            av: AvObject { net: ObjectNet::named(&shape_name), ..Default::default() },
             bound_center: center,
             bound_radius: radius,
             shader_property: Some(si),

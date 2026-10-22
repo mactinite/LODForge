@@ -1888,3 +1888,33 @@ The LOD4 texture-times-vertex-colour mean (73 x 0.70 = 51) equals the bake's 48,
 vertex-colour-weighted target changes nothing, yet the regions differ by 18% on screen: the LOD4
 HD shapes and the bakes are lit differently (normal maps, shading), which the half strength
 stands in for. In-game check pending.
+
+### Far LOD models rebuilt from the LOD4 model (2026-10-22)
+
+The user still saw the LOD8/16 cliffs as a different texture and normal map after the far-LOD
+match: matching the mean colour cannot fix that the `_lod_1/_lod_2` models carry their own UV
+unwrap onto a pre-baked texture (`textures\lod\mtncliff04lod.dds`) and a different snow mask.
+New build step `far-lod-models` (default on; `--keep-far-lod-models` restores the shipped
+models): for every (LOD4 model, LOD8/16 model) pair of the export where the LOD4 model shows no
+`textures\lod\` texture and the far model shows only `textures\lod\` textures the LOD4 model does
+not use, the LOD4 model is simplified (`lodforge_lodmodel::generate_keep_names`, seam-preserving,
+`max_ratio` = shipped far model triangles / LOD4 model triangles, level 1/2 errors) to
+`meshes\lod\lodforge\far\<lod4 stem>_<crc>_far<k>.nif`, and the export's columns and text point at
+it. Shape names are kept so AltTextures (PBR swaps, keyed by shape name) apply as at LOD4, and the
+stem keeps `_lod_0` so the shapes stay HD (`IsHDMeshMask`): the HD snow shader reads the vertex
+alpha as an offset, the non-HD one as a factor, so the first try (stem renamed) lost the snow.
+Generated models are cached under `.lodforge-cache\v1\far`.
+
+Tamriel: 127 models, 4,902 reference lines (all seasons), 64 ms. Default-season object LOD
+triangles against a build with the same settings: LOD8 6,114,866 -> 6,190,244 (+1.2%), LOD16
+4,245,564 -> 4,456,946 (+5.0%). Viewer, the user's Throat of the World camera
+(`29532,-109046,48587,76.8,-32.6`), objects only, rock (non-snow) pixels over the whole view:
+
+| | LOD4 | LOD8 | LOD16 |
+|---|---|---|---|
+| shipped far models: rock px / lum | 238,732 / 58.0 | 430,989 / 60.1 | 400,826 / 61.1 |
+| rebuilt far models: rock px / lum | 244,163 / 58.0 | 235,127 / 57.7 | 210,470 / 56.5 |
+
+With the shipped far models LOD8/16 show almost twice the bare rock of LOD4 (the bakes' own snow
+mask and texture); rebuilt, LOD8/16 match LOD4 in rock area and colour. The far-LOD match still
+runs for bakes the step does not replace (1 left in Tamriel). In-game check pending.

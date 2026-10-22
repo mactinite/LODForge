@@ -392,3 +392,155 @@ pub fn run(a: &Args) -> Result<()> {
     }
     Ok(())
 }
+
+/// What [far_from_lod0] did.
+#[derive(Debug, Default)]
+pub struct FarReport {
+    /// Reference lines (all seasons) whose LOD8/16 model columns were replaced.
+    pub lines: usize,
+    /// Generated models (data-relative paths).
+    pub written: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// The diffuse textures (lower case, `textures\...`) of a model's visible lighting shapes.
+fn model_diffuses(p: &Profile, model: &str) -> Option<(Vec<String>, usize)> {
+    let bytes = p.vfs.read(&model.to_ascii_lowercase()).ok().flatten()?;
+    let nif = lodforge_nif::parse(&bytes).ok()?;
+    let mut out = Vec::new();
+    let mut tris = 0;
+    for b in &nif.blocks {
+        let lodforge_nif::Block::TriShape(s) = b else { continue };
+        if s.av.flags & 1 != 0 {
+            continue;
+        }
+        tris += s.triangles.len();
+        let Some(lodforge_nif::Block::LightingShader(l)) = s.shader_property.and_then(|r| nif.blocks.get(r as usize)) else { continue };
+        let Some(lodforge_nif::Block::TextureSet(t)) = l.texture_set.and_then(|r| nif.blocks.get(r as usize)) else { continue };
+        if let Some(d) = t.first().filter(|d| !d.is_empty()) {
+            out.push(lodforge_objlod::export::texture_key(d));
+        }
+    }
+    Some((out, tris))
+}
+
+/// Far LOD models rebuilt from the LOD4 model. A reference whose LOD8/16 model (`_lod_1`,
+/// `_lod_2`) shows a pre-baked LOD texture (`textures\lod\...`) none of its LOD4 model's shapes
+/// use switches texture, UV layout and normal map at the LOD4 -> LOD8 boundary: mountain cliffs
+/// show the current (e.g. PBR) mountain texture up close and a vanilla-look bake from a LOD
+/// texture pack beyond (`textures\lod\mtncliff04lod.dds`). For those, the LOD4 model is
+/// simplified to the triangle budget of the shipped far model, keeping its textures, UVs and
+/// shape names (so AltTextures apply as at LOD4), written to
+/// `meshes\lod\lodforge\far\<stem>_<crc>_far<level>.nif`, and the export's columns are pointed at
+/// it. Returns what was replaced; the caller adds `written` to the VFS.
+pub fn far_from_lod0(p: &Profile, exports: &mut crate::dyndolod_build::WorldExport, out: &Path, cache: Option<&Path>) -> FarReport {
+    let norm = |m: &str| m.trim().to_ascii_lowercase().replace('/', "\\");
+    // Candidate (LOD4 model, level, far model) pairs.
+    let mut pairs: HashSet<(String, usize, String)> = HashSet::new();
+    for s in &exports.seasons {
+        for l in &s.lines {
+            let c0 = norm(&l.columns[0]);
+            if !c0.ends_with(".nif") || c0.contains("passthru_lod") || c0.contains("glow_lod") {
+                continue;
+            }
+            for k in 1..=2 {
+                let ck = norm(&l.columns[k]);
+                if ck.ends_with(".nif") && ck != c0 {
+                    pairs.insert((c0.clone(), k, ck));
+                }
+            }
+        }
+    }
+    let models: HashSet<String> = pairs.iter().flat_map(|(a, _, b)| [a.clone(), b.clone()]).collect();
+    let info: HashMap<String, (Vec<String>, usize)> = models.into_par_iter().filter_map(|m| model_diffuses(p, &m).map(|d| (m, d))).collect();
+    let baked = |t: &str| t.starts_with("textures\\lod\\");
+    let wanted: Vec<(String, usize, String)> = pairs
+        .into_iter()
+        .filter(|(c0, _, ck)| {
+            let (Some((d0, _)), Some((dk, _))) = (info.get(c0), info.get(ck)) else { return false };
+            !d0.is_empty() && !dk.is_empty() && d0.iter().all(|t| !baked(t)) && dk.iter().all(|t| baked(t) && !d0.contains(t))
+        })
+        .collect();
+    let mut rep = FarReport::default();
+    // Generate per (LOD4 model, level, budget).
+    let made: Vec<((String, usize, String), Result<String, String>)> = wanted
+        .par_iter()
+        .map(|(c0, k, ck)| {
+            let r = (|| -> Result<String, String> {
+                let bytes = p.vfs.read(c0).ok().flatten().ok_or("LOD4 model missing")?;
+                let (_, t0) = info[c0];
+                let (_, tk) = info[ck];
+                let base = lodforge_lodmodel::LEVELS[*k];
+                let params = lodforge_lodmodel::LevelParams { max_ratio: (tk as f32 / t0.max(1) as f32).clamp(0.02, 1.0), min_triangles: 8, permissive: false, ..base };
+                let stem = c0.rsplit('\\').next().unwrap_or(c0).trim_end_matches(".nif").to_string();
+                // The stem keeps `_lod_0`: the model stays an HD LOD model (DynDOLOD's `IsHDMeshMask`),
+                // so its HD-style vertex alpha keeps meaning the snow mask of the HD snow shader.
+                let rel = format!("meshes\\lod\\lodforge\\far\\{stem}_{:08x}_far{k}.nif", crc32(format!("{c0}|{ck}").as_bytes()));
+                let key = cache.map(|c| c.join(format!("v{}", lodforge_lodmodel::GENERATOR_VERSION)).join("far").join(format!("{:08x}_{k}_{:08x}.nif", crc32(&bytes), crc32(format!("{params:?}").as_bytes()))));
+                let data = match key.as_ref().and_then(|k| std::fs::read(k).ok()) {
+                    Some(d) => d,
+                    None => {
+                        let (d, _) = lodforge_lodmodel::generate_keep_names(&bytes, &params, &stem).map_err(|e| format!("{e:?}"))?;
+                        if let Some(k) = &key {
+                            let _ = std::fs::create_dir_all(k.parent().unwrap()).and_then(|_| std::fs::write(k, &d));
+                        }
+                        d
+                    }
+                };
+                let dest = out.join(rel.replace('\\', "/"));
+                std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+                std::fs::write(&dest, &data).map_err(|e| e.to_string())?;
+                Ok(rel)
+            })();
+            ((c0.clone(), *k, ck.clone()), r)
+        })
+        .collect();
+    let mut replace: HashMap<(String, usize, String), String> = HashMap::new();
+    for (key, r) in made {
+        match r {
+            Ok(rel) => {
+                rep.written.push(rel.clone());
+                replace.insert(key, rel);
+            }
+            Err(e) => rep.failed.push((key.0, e)),
+        }
+    }
+    rep.written.sort();
+    // Columns and the export text (fields 13 + k of a reference line).
+    for s in &mut exports.seasons {
+        let mut by_ref: HashMap<String, [Option<String>; 3]> = HashMap::new();
+        for l in &mut s.lines {
+            let c0 = norm(&l.columns[0]);
+            let mut new: [Option<String>; 3] = Default::default();
+            for k in 1..=2 {
+                if let Some(rel) = replace.get(&(c0.clone(), k, norm(&l.columns[k]))) {
+                    l.columns[k] = rel.clone();
+                    new[k] = Some(rel.clone());
+                }
+            }
+            if new.iter().any(Option::is_some) {
+                rep.lines += 1;
+                by_ref.insert(format!("{:08X}", l.ref_id), new);
+            }
+        }
+        if by_ref.is_empty() {
+            continue;
+        }
+        let text: Vec<String> = s
+            .text
+            .split("\r\n")
+            .map(|line| {
+                let Some(new) = line.split('\t').next().and_then(|id| by_ref.get(id)) else { return line.to_string() };
+                let mut f: Vec<String> = line.split('\t').map(str::to_string).collect();
+                for (k, n) in new.iter().enumerate() {
+                    if let (Some(n), Some(field)) = (n, f.get_mut(13 + k)) {
+                        *field = n.clone();
+                    }
+                }
+                f.join("\t")
+            })
+            .collect();
+        s.text = text.join("\r\n");
+    }
+    rep
+}
