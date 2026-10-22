@@ -7,10 +7,14 @@ struct Globals {
     cam_pos: vec4<f32>,
     // xyz toward the sun; w = ambient share.
     sun_dir: vec4<f32>,
-    // x = shading mode, y = normal maps on, z = alpha test override (<0: as the material), w = unused.
+    // x = shading mode, y = normal maps on, z = alpha test override (<0: as the material),
+    // w = snow / ash LOD materials on.
     params: vec4<f32>,
     level_colors: array<vec4<f32>, 4>,
     kind_colors: array<vec4<f32>, 6>,
+    // Per snow class 1..4, three vec4: (falloff scale, falloff bias, 1 / noise UV scale, HD),
+    // (colour, -), (projection vector, -).
+    snow: array<vec4<f32>, 12>,
 };
 
 struct Material {
@@ -40,6 +44,9 @@ const F_HAS_TANGENTS: u32 = 2048u;
 const F_CLAMP: u32 = 4096u;
 
 @group(0) @binding(0) var<uniform> g: Globals;
+@group(0) @binding(1) var t_proj_diffuse: texture_2d<f32>;
+@group(0) @binding(2) var t_proj_noise: texture_2d<f32>;
+@group(0) @binding(3) var samp_proj: sampler;
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
 @group(2) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(2) @binding(1) var t_normal: texture_2d<f32>;
@@ -125,6 +132,22 @@ fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let t = select(textureSample(t_normal, samp, in.uv), textureSample(t_normal, samp_clamp, in.uv), clamp_uv).xyz * 2.0 - 1.0;
     let ddx = dpdx(in.world);
     let ddy = dpdy(in.world);
+    // Projected snow / ash inputs (triplanar over world space, as the game's shader), sampled
+    // here in uniform control flow; used below only for snow-class shapes.
+    let snow_class = (m.kind_level >> 16u) & 7u;
+    let sc = (max(snow_class, 1u) - 1u) * 3u;
+    let sp = g.snow[sc];
+    let tw0 = pow(abs(in.normal) + vec3<f32>(1e-4), vec3<f32>(6.0));
+    let tw = tw0 / (tw0.x + tw0.y + tw0.z);
+    let pn = in.world * sp.z;
+    let proj_noise = textureSample(t_proj_noise, samp_proj, pn.yz).x * tw.x
+        + textureSample(t_proj_noise, samp_proj, pn.xz).x * tw.y
+        + textureSample(t_proj_noise, samp_proj, pn.xy).x * tw.z;
+    // fProjectedUVDiffuseNormalTilingScale (0.2) times the noise scale.
+    let pd = in.world * (sp.z * 0.2);
+    let proj_diffuse = textureSample(t_proj_diffuse, samp_proj, pd.yz).rgb * tw.x
+        + textureSample(t_proj_diffuse, samp_proj, pd.xz).rgb * tw.y
+        + textureSample(t_proj_diffuse, samp_proj, pd.xy).rgb * tw.z;
     if ((m.flags & F_VERTEX_COLORS) != 0u) {
         base = base * in.color;
     }
@@ -158,6 +181,27 @@ fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     }
     if (!front && (m.flags & F_DOUBLE_SIDED) != 0u) {
         n = -n;
+    }
+    if (snow_class != 0u && g.params.w > 0.5) {
+        // The game's projected material: weight = -falloff scale * noise
+        // + (dot(normal, projection) * vertex alpha - falloff bias); HD shapes take no alpha
+        // factor but add (alpha - 0.5) * 2.5. Projected diffuse normals on: a smooth blend.
+        let vc_alpha = select(1.0, in.color.a, (m.flags & F_VERTEX_COLORS) != 0u);
+        let hd = sp.w > 0.5;
+        let col = g.snow[sc + 1u].rgb;
+        let proj_dir = normalize(g.snow[sc + 2u].xyz);
+        var w = -sp.x * proj_noise + (dot(n, proj_dir) * select(vc_alpha, 1.0, hd) - sp.y);
+        if (hd) {
+            w = w + (vc_alpha - 0.5) * 2.5;
+        }
+        let weight = smoothstep(0.0, 1.0, 5.0 * (0.1 + w));
+        // Brightness: the projected texture times twice the material colour's luminance, in
+        // gamma space (the vanilla x2 colour convention). Calibrated on an in-game capture of the
+        // Solitude glacier (snow tops about twice the ice in sRGB, with the texture's hue); the
+        // game's snow specular is not modelled, so the colour's hue is not applied.
+        let gain = 2.0 * dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let snow_rgb = proj_diffuse * pow(gain, 2.2);
+        base = vec4<f32>(mix(base.rgb, snow_rgb, weight), base.a);
     }
     var emissive = vec3<f32>(0.0);
     if ((m.flags & F_EMIT) != 0u) {

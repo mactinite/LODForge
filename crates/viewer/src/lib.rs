@@ -18,6 +18,7 @@ pub mod mesh;
 pub mod pick;
 pub mod render;
 pub mod scene;
+pub mod snow;
 pub mod trees;
 pub mod viewstate;
 pub mod world;
@@ -101,7 +102,9 @@ pub fn screenshot(cfg: ScreenshotConfig) -> Result<(Vec<u8>, Vec<String>)> {
     if let Some(c) = &cfg.camera {
         load.start = [c.pos[0], c.pos[1]];
     }
-    let (scene, _cache) = load_blocking(cfg.files, world.clone(), &gpu, &layouts, load);
+    let files = cfg.files.clone();
+    let (scene, cache) = load_blocking(cfg.files, world.clone(), &gpu, &layouts, load);
+    renderer.set_projected(&gpu.device, &cache, files.as_ref());
     if scene.quads.is_empty() {
         return Err(anyhow!("nothing loaded for {}", world.world));
     }

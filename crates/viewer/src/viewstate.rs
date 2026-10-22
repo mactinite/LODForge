@@ -108,6 +108,9 @@ pub struct ViewSettings {
     /// Draw the selected shape's stored bounds.
     pub bounds: bool,
     pub sky: [f32; 3],
+    /// Snow / ash LOD materials projected as in game.
+    pub snow: bool,
+    pub snow_materials: crate::snow::SnowMaterials,
 }
 
 impl Default for ViewSettings {
@@ -125,6 +128,8 @@ impl Default for ViewSettings {
             grid: false,
             bounds: true,
             sky: [0.55, 0.68, 0.85],
+            snow: true,
+            snow_materials: crate::snow::SnowMaterials::default(),
         }
     }
 }
@@ -307,10 +312,11 @@ pub fn build_frame<'a>(
             s.shading.index(),
             if s.normal_maps { 1.0 } else { 0.0 },
             s.alpha_override.unwrap_or(-1.0),
-            0.0,
+            if s.snow { 1.0 } else { 0.0 },
         ],
         level_colors: LEVEL_COLORS,
         kind_colors: KIND_COLORS,
+        snow: s.snow_materials.gpu(),
     };
     (frame, globals, stats)
 }

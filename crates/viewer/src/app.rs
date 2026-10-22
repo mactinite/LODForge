@@ -297,6 +297,9 @@ impl App {
             options,
             cancel: self.cancel.clone(),
         }));
+        if let Some(g) = self.gfx.as_mut() {
+            g.renderer.set_projected(&g.gpu.device, &cache, self.cfg.files.as_ref());
+        }
         self.cache = Some(cache);
         self.status = format!("loading {} ({} files)", self.world.world, total);
     }
@@ -627,6 +630,8 @@ impl App {
                     }
                 });
                 ui.checkbox(&mut self.settings.normal_maps, "normal maps");
+                ui.checkbox(&mut self.settings.snow, "LOD snow / ash")
+                    .on_hover_text("The directional snow / ash material the game projects onto objSnow / objAsh shapes");
                 let mut alpha_on = self.settings.alpha_override.is_some();
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut alpha_on, "force alpha test");

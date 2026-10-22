@@ -84,6 +84,9 @@ pub struct Args {
     /// Skip normal maps.
     #[arg(long)]
     pub no_normals: bool,
+    /// Leave out the snow / ash material the game projects onto objSnow / objAsh shapes.
+    #[arg(long)]
+    pub no_snow: bool,
     /// Load only these levels (comma list), e.g. `4` to save time and memory.
     #[arg(long, value_delimiter = ',')]
     pub load_levels: Vec<i32>,
@@ -142,6 +145,26 @@ fn lod_distances(a: &Args) -> lodforge_viewer::lodselect::LodDistances {
     LodDistances::default()
 }
 
+/// The snow / ash LOD materials (MATO) as the load order has them; the vanilla values where a
+/// record is missing.
+fn snow_materials(lo: &lodforge_esp::LoadOrder) -> lodforge_viewer::snow::SnowMaterials {
+    use lodforge_viewer::snow::{DirMaterial, SnowMaterials, MATERIAL_FORMS};
+    let mut out = SnowMaterials::default();
+    let Ok(all) = lodforge_esp::winning_records(lo, lodforge_esp::Sig(*b"MATO")) else { return out };
+    let mut found = 0;
+    for (class, plugin, local) in MATERIAL_FORMS {
+        let Some(id) = lo.find(plugin).and_then(|p| p.global_form_id(local)) else { continue };
+        let Some((_, r)) = all.get(&id) else { continue };
+        let Ok(data) = r.data() else { continue };
+        if let Some(m) = lodforge_esp::fields(&data).find(|f| &f.sig.0 == b"DATA").and_then(|f| DirMaterial::from_mato_data(f.data)) {
+            out.set(class, m);
+            found += 1;
+        }
+    }
+    eprintln!("snow / ash LOD materials: {found} of {} from the load order (vanilla values for the rest)", MATERIAL_FORMS.len());
+    out
+}
+
 /// The worldspace to start on: Tamriel when present, else the first listed.
 fn default_world(worlds: &[String]) -> Option<String> {
     worlds.iter().find(|w| w.eq_ignore_ascii_case("Tamriel")).or_else(|| worlds.first()).cloned()
@@ -182,11 +205,13 @@ pub fn run(a: &Args) -> Result<()> {
     }
     let out: Arc<dyn Files> = Arc::new(out);
     let mut layered = Layered::new().with(out.clone());
+    let mut snow = lodforge_viewer::snow::SnowMaterials::default();
     if let Some(inst) = &a.instance {
         let game = a.game.clone().unwrap_or_else(|| inst.join("Stock Game"));
         let t = std::time::Instant::now();
         let p = crate::profile::open(inst, &a.profile, &game).context("opening the MO2 profile")?;
         eprintln!("profile {}: {} loose files, {} archives in {} ms", a.profile, p.vfs.loose_count(), p.vfs.archives().len(), t.elapsed().as_millis());
+        snow = snow_materials(&p.load_order);
         layered.push(Arc::new(VfsFiles(p.vfs)));
     }
     let files: Arc<dyn Files> = Arc::new(layered);
@@ -200,7 +225,9 @@ pub fn run(a: &Args) -> Result<()> {
         None => default_world(&worlds).expect("worlds is not empty"),
     };
     let load = LoadOptions { texture_budget: a.texture_budget_mb << 20, normal_maps: !a.no_normals, levels: a.load_levels.clone(), ..LoadOptions::default() };
-    let settings = settings(a)?;
+    let mut settings = settings(a)?;
+    settings.snow_materials = snow;
+    settings.snow = !a.no_snow;
     let camera = a.camera.as_deref().map(|c| FreeCam::parse(c).ok_or_else(|| anyhow!("--camera {c}: expected x,y,z[,yaw,pitch]"))).transpose()?.map(|c| FreeCam { fov: a.fov, ..c });
 
     let lod_center = a

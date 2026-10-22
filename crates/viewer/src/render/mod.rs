@@ -13,7 +13,8 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 use crate::mesh::{ShapeKind, ShapeMesh};
-use textures::GpuTexture;
+use textures::{GpuTexture, TexCache};
+use crate::files::Files;
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -168,7 +169,7 @@ impl MaterialGpu {
             flags,
             threshold: f32::from(m.threshold) / 255.0,
             emissive_mult: m.emissive_multiple,
-            kind_level: kind_index(s.kind) | (level_index.min(3) << 8),
+            kind_level: kind_index(s.kind) | (level_index.min(3) << 8) | (m.snow.index() << 16),
             emissive: [m.emissive[0], m.emissive[1], m.emissive[2], 0.0],
             uv: [m.uv_scale[0], m.uv_scale[1], m.uv_offset[0], m.uv_offset[1]],
             tint: [0.0; 4],
@@ -186,6 +187,8 @@ pub struct GlobalsGpu {
     pub params: [f32; 4],
     pub level_colors: [[f32; 4]; 4],
     pub kind_colors: [[f32; 4]; 6],
+    /// Snow / ash LOD materials, see `snow::SnowMaterials::gpu`.
+    pub snow: [[f32; 4]; 12],
 }
 
 /// Shading modes (`params.x`).
@@ -327,6 +330,8 @@ pub struct Layouts {
     /// Clamp-to-edge twin of `sampler` for shapes with `TextureClampMode` 0.
     pub sampler_clamp: wgpu::Sampler,
     pub white: Arc<GpuTexture>,
+    /// 50% grey (the projected noise before the game's texture is loaded).
+    pub grey: Arc<GpuTexture>,
     pub flat_normal: Arc<GpuTexture>,
     pub missing: Arc<GpuTexture>,
 }
@@ -340,18 +345,39 @@ pub struct TextureBindGroup {
 
 impl Layouts {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Layouts {
+        let globals_tex = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let globals = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // The game's projected-material textures (snow / ash LOD).
+                globals_tex(1),
+                globals_tex(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         let materials = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("materials"),
@@ -430,6 +456,7 @@ impl Layouts {
                 true,
                 "white",
             )),
+            grey: Arc::new(textures::solid(device, queue, [128, 128, 128, 255], false, "grey")),
             flat_normal: Arc::new(textures::solid(
                 device,
                 queue,
@@ -732,14 +759,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals"),
-            layout: &layouts.globals,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals_buf.as_entire_binding(),
-            }],
-        });
+        let globals_bg = globals_bind_group(device, &layouts, &globals_buf, &layouts.white, &layouts.grey);
         let tree_quad = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("tree quad"),
             contents: bytemuck::cast_slice(&[0u16, 1, 2, 2, 1, 3]),
@@ -762,6 +782,16 @@ impl Renderer {
             tree_quad,
             targets: None,
         }
+    }
+
+    /// Binds the game's projected diffuse and noise textures (snow / ash LOD) from the load
+    /// order; keeps the placeholders when they are absent.
+    pub fn set_projected(&mut self, device: &wgpu::Device, cache: &TexCache, files: &dyn Files) {
+        let diffuse = cache.get(files, crate::snow::PROJECTED_DIFFUSE, true);
+        let noise = cache.get(files, crate::snow::PROJECTED_NOISE, false);
+        let d = diffuse.unwrap_or_else(|| self.layouts.white.clone());
+        let n = noise.unwrap_or_else(|| self.layouts.grey.clone());
+        self.globals_bg = globals_bind_group(device, &self.layouts, &self.globals_buf, &d, &n);
     }
 
     fn targets(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &Targets {
@@ -936,6 +966,37 @@ impl Renderer {
 }
 
 /// Line segments of an axis-aligned box.
+fn globals_bind_group(
+    device: &wgpu::Device,
+    layouts: &Layouts,
+    buffer: &wgpu::Buffer,
+    projected_diffuse: &GpuTexture,
+    projected_noise: &GpuTexture,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("globals"),
+        layout: &layouts.globals,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&projected_diffuse.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&projected_noise.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(&layouts.sampler),
+            },
+        ],
+    })
+}
+
 pub fn box_lines(min: [f32; 3], max: [f32; 3], color: [u8; 4], out: &mut Vec<LineVertex>) {
     let c = |x: usize, y: usize, z: usize| LineVertex {
         pos: [

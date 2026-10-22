@@ -79,6 +79,8 @@ pub struct Material {
     /// `TextureClampMode` 0 (CLAMP_S_CLAMP_T): the game clamps UVs at the texture edge (terrain
     /// LOD and atlas pages); other modes wrap.
     pub clamp: bool,
+    /// Directional material the game projects onto the shape (snow / ash LOD), from its name.
+    pub snow: crate::snow::SnowClass,
 }
 
 /// Axis-aligned box.
@@ -282,6 +284,7 @@ fn material_of(nif: &Nif, s: &TriShape) -> Material {
             m.uv_scale = l.uv_scale;
             m.uv_offset = l.uv_offset;
             m.clamp = l.texture_clamp_mode == 0;
+            m.snow = crate::snow::class_of(&m.name);
         }
         Some(Block::EffectShader(e)) => {
             m.effect = true;

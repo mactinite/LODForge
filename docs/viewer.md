@@ -56,9 +56,10 @@ stays open beside it.
 | `C` | Run the checks (issues panel; `go` flies to an issue) |
 | `F12` | Save a screenshot in the working directory |
 
-**Levels.** "Game" mode splits the quadtree the way the game does with its default
-`fBlockLevel0Distance` 35000, `fBlockLevel1Distance` 70000 and `fBlockMaximumDistance` 250000
-(the slider scales them), so level transitions and their seams sit where they sit in game. In
+**Levels.** "Game" mode splits the quadtree the way the game does with `fBlockLevel0Distance`,
+`fBlockLevel1Distance` and `fBlockMaximumDistance` from the profile's `skyrimprefs.ini` (with
+`--instance`; else the one in Documents\My Games, else the game's defaults 35000 / 70000 / 250000;
+the slider scales them), so level transitions and their seams sit where they sit in game. In
 the overview the distances are taken from the overview's centre, which makes the quadtree itself
 visible with "block outlines" on. A single level shows every block of that level, for example
 to look at LOD16 up close.
@@ -69,7 +70,14 @@ classic tree LOD and a "large references only" filter.
 **Shading.** Textured (sun and ambient, normal maps), unlit (the textures as stored), normals
 (world-space, as lit), flat (geometry only), by level (LOD4 green, LOD8 yellow, LOD16 orange,
 LOD32 purple), by kind (terrain, water, object, tree billboard, grass) and normal map (the
-normal texture as stored; terrain LOD normal maps keep the up axis in green). "Force alpha test" applies one threshold
+normal texture as stored; terrain LOD normal maps keep the up axis in green). "LOD snow / ash" (on by default, `--no-snow` headless) projects the directional material the game puts on
+`objSnow…` / `objSnowHD…` / `objAsh…` / `objAshHD…` shapes: the game picks SnowLODMaterial,
+SnowLODMaterialHD (Skyrim.esm) or the Dragonborn ash LOD materials by the shape's name and blends
+`textures\effects\projecteddiffuse.dds` onto faces along the material's projection vector, weighted
+by `-falloff scale * noise + dot(normal, projection) * vertex alpha - falloff bias` (HD shapes:
+no alpha factor, plus `(alpha - 0.5) * 2.5`). The parameters are read from the winning MATO
+records with `--instance` (vanilla values otherwise). The snow brightness is calibrated on an
+in-game capture, since the game's snow specular is not reproduced. "Force alpha test" applies one threshold
 to every shape, which shows what alpha-tested foliage and grass billboards look like at the
 game's cut-off. Missing textures render as a magenta checker.
 
@@ -79,7 +87,8 @@ the vertex box and the `BSMultiBoundAABB`, and every texture slot with where it 
 (output, a mod folder, an archive) or `MISSING`. The orange box is the vertex extent, the blue
 one the stored multibound; when they disagree the game culls by the stored one.
 
-**Camera.** The camera line is `x,y,z,yaw,pitch` (yaw clockwise from north, pitch up). "copy
+**Camera.** The camera line is `x,y,z,yaw,pitch` (yaw clockwise from north, pitch up). The field
+of view is horizontal, as the game's `fov` command takes it, so the same number frames the same. "copy
 camera" puts it on the clipboard for `--camera`; "go" accepts the same text, so a position from
 an in-game console (`player.getpos`) or from skyrim-mcp's free camera can be reproduced.
 
@@ -97,9 +106,18 @@ lodforge view --out '...' --world Tamriel --check --json issues.json
 ```
 
 `--levels game|4|8|16|32`, `--lod-distance`, `--layers terrain,objects,trees,...`, `--shading`
-and `--load-levels` apply to screenshots as in the window. A screenshot from the same camera as
-an in-game capture (skyrim-mcp `game_screenshot` after placing its free camera) is the quickest
-way to compare generated LOD with what the game shows.
+and `--load-levels` apply to screenshots as in the window. `--lod-center x,y` picks the levels
+around another point than the camera (the game picks them around the player).
+
+A screenshot from the same camera as an in-game capture is the quickest way to compare generated
+LOD with what the game shows. Capture the game in first person with the player at the spot (the
+eye is about 120 units above the player's z) rather than with the free camera: with the free
+camera active, distant object LOD can drop in and out between frames. Turn off the idle orbit
+camera first (`setini "fAutoVanityModeDelay:Camera" 99999`) and pass the season the game shows
+(`--season SUM` for a summer month with Seasons of Skyrim). On an HDR display capture the
+presented frame (skyrim-mcp `source: frame`), which converts HDR to sRGB; the engine screenshot
+saves the HDR frame as if it were sRGB and looks washed out. Sky, fog and water shading are not
+reproduced, so compare structure, placement and textures rather than overall image similarity.
 
 ## Checks
 
