@@ -33,6 +33,15 @@ Options that matter for big worlds: `--load-levels 4` loads one level only; `--t
 world's tiles would exceed it (the status line and the selection panel say when that happened);
 `--no-normals` skips normal maps.
 
+With `--instance`, `--out` may be left out: the viewer then opens the profile's generated LOD mod
+(the highest-priority enabled mod that LODForge or DynDOLOD wrote), and it starts on Tamriel when
+the output has it. That keeps an MO2 tool entry down to `view --instance "<instance>"`. MO2 stores
+executable arguments with Qt's QSettings, whose INI reader drops every unescaped `"` in a value; an
+entry that needs quotes (a path with a space) must be written in the escaped form
+(`13\arguments="view --out \"...\" ..."`), or entered through MO2's own executables dialog. When
+started from MO2 (a console of its own), the viewer releases that console so no console window
+stays open beside it.
+
 ## Window
 
 | Control | Effect |
