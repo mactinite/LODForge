@@ -35,6 +35,7 @@ pub(crate) struct Bc7Params {
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    pub adapter: wgpu::Adapter,
     pub adapter_info: wgpu::AdapterInfo,
     /// Largest MSAA sample count usable for an Rgba8Unorm + Depth32Float render target (4 without
     /// adapter-specific format features, up to 16).
@@ -54,17 +55,24 @@ pub struct RgbaImage<'a> {
 
 impl Gpu {
     pub fn new() -> Result<Gpu> {
-        pollster::block_on(Self::new_async())
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        Self::with_instance(&instance, None, wgpu::Features::empty())
     }
 
-    async fn new_async() -> Result<Gpu> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+    /// A device on `instance`, able to present to `compatible_surface` when one is given, with
+    /// `extra` features requested on top of the compute ones (those the adapter lacks are left
+    /// out; check `device.features()`).
+    pub fn with_instance(instance: &wgpu::Instance, compatible_surface: Option<&wgpu::Surface<'_>>, extra: wgpu::Features) -> Result<Gpu> {
+        pollster::block_on(Self::new_async(instance, compatible_surface, extra))
+    }
+
+    async fn new_async(instance: &wgpu::Instance, compatible_surface: Option<&wgpu::Surface<'_>>, extra: wgpu::Features) -> Result<Gpu> {
         let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })
+            .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface, ..Default::default() })
             .await
             .map_err(|e| Error::NoAdapter(e.to_string()))?;
         let adapter_info = adapter.get_info();
-        let features = adapter.features() & (wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::TEXTURE_COMPRESSION_BC);
+        let features = adapter.features() & (wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | wgpu::Features::TEXTURE_COMPRESSION_BC | extra);
         let max_msaa = if !features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
             4
         } else {
@@ -96,7 +104,7 @@ impl Gpu {
             })
         };
         let (spec_render, spec_down_h, spec_down_v) = (entry("render_cell"), entry("downscale_h"), entry("downscale_v"));
-        Ok(Gpu { device, queue, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v })
+        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v })
     }
 
     /// BC7 (mode 6) encodes RGBA8 images; returns each image's block data (16 bytes per 4x4

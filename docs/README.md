@@ -11,6 +11,7 @@ Read one focused page first. The large evidence logs are references, not onboard
 | Review license selection and distribution blockers | [Licensing and provenance](licensing.md) |
 | Replace provenance-blocked code | [Re-implementation plan](reimplementation-plan.md) |
 | Compare output or test in game | [Validation](validation.md) |
+| Look at generated LOD without the game | [LOD viewer](viewer.md) |
 | Decide what still blocks compatibility | [Parity assessment](parity.md) |
 | Read the latest measured result | [Full-output qualification](validation-full-20261019.md) |
 | Implement the remaining fixes | [Gap-closure plan](gap-closure-plan.md) |

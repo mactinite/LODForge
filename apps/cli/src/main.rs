@@ -39,6 +39,7 @@ mod texgen_billboards;
 mod texgen_rendered;
 mod texgen_stitched;
 mod tree_lod;
+mod view;
 
 use std::path::PathBuf;
 
@@ -135,6 +136,8 @@ enum Command {
     TreeLod(tree_lod::Args),
     /// Everything xLODGen does (terrain, objects, trees; all worldspaces and seasons) in one run.
     Build(build::Args),
+    /// Inspect generated LOD as the game arranges it (window, or --screenshot / --check headless).
+    View(view::Args),
     /// Compare a LODForge build with a DynDOLOD output folder (object LOD, plugins, occlusion).
     E2eCompare(e2e_compare::Args),
     /// Records and subrecords of a plugin (diagnostics).
@@ -192,6 +195,7 @@ fn main() -> Result<()> {
         Command::ObjectExport(a) => object_export::run(&a),
         Command::TreeLod(a) => tree_lod::run(&a),
         Command::Build(a) => build::run(&a),
+        Command::View(a) => view::run(&a),
         Command::Info(a) => info::run(&a),
         Command::LodSources(a) => lod_sources::run(&a),
         Command::LodModels(a) => lod_models::run(&a),

@@ -38,6 +38,21 @@ not enforce all acceptance criteria below. Lower-level `object-lod`, `tree-lod`,
 `dds-diff`, `nif-scan` and `plugin-dump` commands help isolate differences
 (`--help` documents their arguments).
 
+### LOD viewer and its checks
+
+[`lodforge view`](viewer.md) renders an output folder as the game arranges it and runs a
+checklist over it (missing blocks and textures, broken geometry, culling bounds, atlas UVs,
+terrain seams, floating tree billboards). It is the first thing to run on a fresh build, before
+the game:
+
+```powershell
+.\target\release\lodforge.exe view --out 'D:\LODForge-output\trial-01' --world Tamriel --check --json 'D:\LODForge-output\viewer-check.json'
+.\target\release\lodforge.exe view --out 'D:\LODForge-output\trial-01' --world Tamriel --instance 'D:\Modlists\skyrim-cs' --profile LODForge-E2E
+```
+
+The check exits 2 on errors. A `--screenshot` from the camera of an in-game capture gives a
+side-by-side of generated LOD and what the game shows.
+
 ### Offline asset/material validator
 
 The [validate_output example](../apps/cli/examples/validate_output.rs) adds

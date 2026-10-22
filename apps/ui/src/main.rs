@@ -322,6 +322,34 @@ fn build_status(running: State<'_, Running>) -> Option<i32> {
     done
 }
 
+/// The Done screen's "Inspect LODs": opens the viewer (`lodforge view`) on the build's output.
+#[derive(Deserialize)]
+struct ViewerRequest {
+    instance: String,
+    profile: String,
+    world: String,
+    #[serde(default)]
+    out: Option<String>,
+    #[serde(default)]
+    mo2_mod: Option<String>,
+}
+
+#[tauri::command]
+fn open_viewer(req: ViewerRequest) -> Result<(), String> {
+    let out = match (&req.mo2_mod, &req.out) {
+        (Some(m), _) => Path::new(&req.instance).join("mods").join(m),
+        (None, Some(o)) => PathBuf::from(o),
+        _ => return Err("no output folder to inspect".into()),
+    };
+    if !out.is_dir() {
+        return Err(format!("{} is not a folder", out.display()));
+    }
+    let mut c = command();
+    c.args(["view", "--out"]).arg(&out).args(["--world", &req.world, "--instance", &req.instance, "--profile", &req.profile]);
+    c.stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("running {}: {e}", cli().display()))?;
+    Ok(())
+}
+
 /// The Done screen's "Close LODForge".
 #[tauri::command]
 fn quit(app: tauri::AppHandle) {
@@ -405,7 +433,7 @@ fn main() {
     tauri::Builder::default()
         .manage(Running::default())
         .manage(args)
-        .invoke_handler(tauri::generate_handler![launch_args, list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build, quit])
+        .invoke_handler(tauri::generate_handler![launch_args, list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build, open_viewer, quit])
         .run(tauri::generate_context!())
         .expect("error while running LODForge UI");
 }

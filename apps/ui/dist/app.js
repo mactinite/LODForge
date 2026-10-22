@@ -31,6 +31,7 @@ if (!window.__TAURI__) {
           return null;
         }
         if (cmd === "quit") { document.body.innerHTML = "<p style='padding:24px'>(mock) LODForge closed.</p>"; return null; }
+        if (cmd === "open_viewer") return null;
         if (cmd === "build_status") return ++polls > 8 ? 0 : null;
         return null;
       },
@@ -236,6 +237,9 @@ async function poll() {
     `<br><b>Worldspaces</b>: ${(s.worlds || []).join(", ")}` +
     (state.failed.length ? `<br><b>Did not finish</b>:<ul>${state.failed.map((f) => `<li>${f}</li>`).join("")}</ul>` : "") +
     (!ok ? `<br><span class="hint">Details are in the log on the Build step.</span>` : "");
+  const sel = $("inspectWorld");
+  sel.innerHTML = (s.worlds || []).map((w) => `<option>${w}</option>`).join("");
+  $("inspect").disabled = !(s.worlds || []).length;
   show(5);
 }
 
@@ -257,6 +261,15 @@ $("back").addEventListener("click", () => show(Math.max(0, state.step - 1)));
 $("next").addEventListener("click", () => (state.step === 3 ? startBuild() : show(state.step + 1)));
 $("cancel").addEventListener("click", async () => { await invoke("cancel_build"); status("Cancelled", true); });
 $("closeApp").addEventListener("click", () => invoke("quit"));
+$("inspect").addEventListener("click", async () => {
+  const s = state.lastRequest || {};
+  const world = $("inspectWorld").value;
+  if (!world) return status("No worldspace to inspect", true);
+  try {
+    await invoke("open_viewer", { req: { instance: s.instance, profile: s.profile, world, out: s.out || null, mo2_mod: s.mo2_mod || null } });
+    status(`Viewer opened on ${world}`);
+  } catch (e) { status(String(e), true); }
+});
 $("again").addEventListener("click", () => show(2));
 document.querySelectorAll("input[name=dest], #modName, #outFolder, #enable").forEach((el) => el.addEventListener("input", review));
 function syncGrass() {

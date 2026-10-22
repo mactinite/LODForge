@@ -23,11 +23,17 @@ lodforge-grass = { path = "crates/grass" }
 lodforge-dyndolod = { path = "crates/dyndolod" }
 lodforge-texgen = { path = "crates/texgen" }
 lodforge-lodmodel = { path = "crates/lodmodel" }
+lodforge-viewer = { path = "crates/viewer" }
 anyhow = "1"
 half = "2"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 wgpu = "25"
+winit = "0.30"
+egui = "0.32"
+egui-wgpu = "0.32"
+egui-winit = "0.32"
+glam = "0.30"
 clap = { version = "4", features = ["derive"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 libdeflater = "1"

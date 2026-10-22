@@ -47,6 +47,7 @@ TEXT_FILES = {
     "Unicode-3.0": ["Unicode-3.0.txt"], "MPL-2.0": ["MPL-2.0.txt"], "CC0-1.0": ["CC0-1.0.txt"],
     "Apache-2.0 WITH LLVM-exception": ["Apache-2.0.txt", "LLVM-exception.txt"],
     "GPL-3.0-only": ["GPL-3.0-only.txt"],
+    "BSL-1.0": ["BSL-1.0.txt"], "OFL-1.1": ["OFL-1.1.txt"], "Ubuntu-font-1.0": ["Ubuntu-font-1.0.txt"],
 }
 COPYRIGHT_RE = re.compile(r"copyright\s*(\(c\)|©|\d{4})", re.I)
 NOTICE_GLOBS = ["LICENSE*", "LICENCE*", "COPYING*", "NOTICE*", "license*", "licence*"]

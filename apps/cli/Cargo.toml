@@ -26,6 +26,7 @@ lodforge-dyndolod.workspace = true
 lodforge-texgen.workspace = true
 png.workspace = true
 lodforge-treelod.workspace = true
+lodforge-viewer.workspace = true
 mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]

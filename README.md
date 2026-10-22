@@ -149,6 +149,19 @@ scans the load order at start. For an MO2 tool entry, set the arguments to
 MO2's virtual file system and carries the arguments over through
 `%LOCALAPPDATA%\LODForge\launch-args.json`.
 
+## Inspecting the output
+
+```powershell
+.\target\release\lodforge.exe view --out <output folder> --world Tamriel [--instance <MO2 folder> --profile <name>]
+```
+
+The viewer shows a worldspace's generated LOD as the game arranges it (LOD4 near the camera
+through LOD32 at distance, or one level everywhere), with a free camera, a top-down map, a
+shape inspector and checks for missing blocks and textures, broken geometry, culling bounds,
+terrain seams and floating trees. The UI's Done screen opens it on the build just made. It also
+works headlessly: `--screenshot shot.png --camera x,y,z,yaw,pitch` renders a PNG and `--check
+--json report.json` writes the issue list. See [the viewer page](docs/viewer.md).
+
 ## Release preparation
 
 Windows x64 CI builds and checks the CLI/UI; the release workflow prepares a

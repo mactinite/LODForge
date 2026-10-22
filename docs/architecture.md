@@ -54,9 +54,10 @@ All library package names use the `lodforge-` prefix.
 | [seasons](../crates/seasons/src) | Swap parsing and dependency-based terrain texture delta planning |
 | [grass](../crates/grass/src) | Offline placements and NGIO-compatible cache serialization, without raycast filtering |
 | [lodmodel](../crates/lodmodel/src) | Full-model simplification and generated replacement LOD meshes |
+| [viewer](../crates/viewer/src) | LOD inspection: file discovery, world-space mesh decoding, wgpu rendering, winit/egui window, headless screenshots and checks |
 | [core](../crates/core/src) | Placeholder; not an application service layer |
 | [CLI](../apps/cli/src) (`lodforge`) | Profile loading, stage wiring, command options, diagnostics and comparisons |
-| [UI](../apps/ui/src) (`lodforge-ui`) | Tauri commands and child-process lifecycle |
+| [UI](../apps/ui/src) (`lodforge-ui`) | Tauri commands and child-process lifecycle; launches `lodforge view` from the Done screen |
 
 The libraries use each other directly; `core` is not their dependency root.
 The CLI depends on the functional crates. The UI depends on the CLI executable

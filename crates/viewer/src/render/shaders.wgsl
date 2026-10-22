@@ -1,0 +1,282 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// LODForge viewer shaders: LOD meshes, classic tree billboards and overlay lines.
+
+struct Globals {
+    view_proj: mat4x4<f32>,
+    // xyz camera position; w = 1 for the top-down orthographic overview.
+    cam_pos: vec4<f32>,
+    // xyz toward the sun; w = ambient share.
+    sun_dir: vec4<f32>,
+    // x = shading mode, y = normal maps on, z = alpha test override (<0: as the material), w = unused.
+    params: vec4<f32>,
+    level_colors: array<vec4<f32>, 4>,
+    kind_colors: array<vec4<f32>, 6>,
+};
+
+struct Material {
+    flags: u32,
+    threshold: f32,
+    emissive_mult: f32,
+    // Low 8 bits: shape kind; bits 8..: level index (0 = LOD4).
+    kind_level: u32,
+    emissive: vec4<f32>,
+    // UV scale xy, offset zw.
+    uv: vec4<f32>,
+    // Highlight colour, a = strength.
+    tint: vec4<f32>,
+};
+
+const F_ALPHA_TEST: u32 = 1u;
+const F_DOUBLE_SIDED: u32 = 2u;
+const F_VERTEX_COLORS: u32 = 4u;
+const F_NORMAL_MAP: u32 = 8u;
+const F_EMIT: u32 = 16u;
+const F_UNLIT: u32 = 32u;
+const F_TERRAIN: u32 = 64u;
+const F_WATER: u32 = 128u;
+const F_LARGE_REF: u32 = 256u;
+const F_HAS_NORMALS: u32 = 1024u;
+const F_HAS_TANGENTS: u32 = 2048u;
+
+@group(0) @binding(0) var<uniform> g: Globals;
+@group(1) @binding(0) var<storage, read> materials: array<Material>;
+@group(2) @binding(0) var t_diffuse: texture_2d<f32>;
+@group(2) @binding(1) var t_normal: texture_2d<f32>;
+@group(2) @binding(2) var samp: sampler;
+
+struct VsIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) normal: vec4<f32>,
+    @location(3) tangent: vec4<f32>,
+    @location(4) bitangent: vec4<f32>,
+    @location(5) color: vec4<f32>,
+    @builtin(instance_index) inst: u32,
+};
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) normal: vec3<f32>,
+    @location(3) tangent: vec3<f32>,
+    @location(4) bitangent: vec3<f32>,
+    @location(5) color: vec4<f32>,
+    @location(6) @interpolate(flat) inst: u32,
+};
+
+@vertex
+fn vs_mesh(in: VsIn) -> VsOut {
+    var out: VsOut;
+    let m = materials[in.inst];
+    out.clip = g.view_proj * vec4<f32>(in.pos, 1.0);
+    out.world = in.pos;
+    out.uv = in.uv * m.uv.xy + m.uv.zw;
+    out.normal = in.normal.xyz;
+    out.tangent = in.tangent.xyz;
+    out.bitangent = in.bitangent.xyz;
+    out.color = in.color;
+    out.inst = in.inst;
+    return out;
+}
+
+fn lit(n: vec3<f32>) -> f32 {
+    let ambient = g.sun_dir.w;
+    let d = max(dot(n, normalize(g.sun_dir.xyz)), 0.0);
+    return ambient + (1.0 - ambient) * d;
+}
+
+fn shade(base: vec3<f32>, n: vec3<f32>, m: Material, emissive: vec3<f32>, raw_normal: vec3<f32>) -> vec3<f32> {
+    let mode = i32(g.params.x);
+    let kind = m.kind_level & 255u;
+    let level = (m.kind_level >> 8u) & 3u;
+    var c: vec3<f32>;
+    if (mode == 1) {
+        c = base;
+    } else if (mode == 2) {
+        c = n * 0.5 + 0.5;
+    } else if (mode == 3) {
+        c = vec3<f32>(0.75) * lit(n);
+    } else if (mode == 4) {
+        c = g.level_colors[level].rgb * lit(n);
+    } else if (mode == 5) {
+        c = g.kind_colors[min(kind, 5u)].rgb * lit(n);
+    } else if (mode == 6) {
+        c = raw_normal;
+    } else {
+        if ((m.flags & F_UNLIT) != 0u) {
+            c = base;
+        } else {
+            c = base * lit(n) + emissive;
+        }
+    }
+    return mix(c, m.tint.rgb, m.tint.a);
+}
+
+@fragment
+fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let m = materials[in.inst];
+    // Every sample and derivative first, in uniform control flow.
+    var base = textureSample(t_diffuse, samp, in.uv);
+    let t = textureSample(t_normal, samp, in.uv).xyz * 2.0 - 1.0;
+    let ddx = dpdx(in.world);
+    let ddy = dpdy(in.world);
+    if ((m.flags & F_VERTEX_COLORS) != 0u) {
+        base = base * in.color;
+    }
+    var threshold = m.threshold;
+    var test = (m.flags & F_ALPHA_TEST) != 0u;
+    if (g.params.z >= 0.0) {
+        test = true;
+        threshold = g.params.z;
+    }
+    if (test && base.a < threshold) {
+        discard;
+    }
+    let to_cam = normalize(g.cam_pos.xyz - in.world);
+    var n: vec3<f32>;
+    let normal_maps = g.params.y > 0.5 && (m.flags & F_NORMAL_MAP) != 0u;
+    if ((m.flags & F_TERRAIN) != 0u && normal_maps) {
+        // Terrain LOD normal maps hold model-space normals (the mesh carries none) with the up
+        // axis in the green channel: stored (x, z, y) for a Z-up world.
+        n = normalize(vec3<f32>(t.x, t.z, t.y));
+    } else if ((m.flags & F_HAS_NORMALS) != 0u) {
+        n = normalize(in.normal);
+        if (normal_maps && (m.flags & F_HAS_TANGENTS) != 0u) {
+            n = normalize(normalize(in.tangent) * t.x + normalize(in.bitangent) * t.y + n * t.z);
+        }
+    } else {
+        // Flat normal from the surface itself.
+        n = normalize(cross(ddx, ddy));
+        if (dot(n, to_cam) < 0.0) {
+            n = -n;
+        }
+    }
+    if (!front && (m.flags & F_DOUBLE_SIDED) != 0u) {
+        n = -n;
+    }
+    var emissive = vec3<f32>(0.0);
+    if ((m.flags & F_EMIT) != 0u) {
+        emissive = m.emissive.rgb * m.emissive_mult * base.rgb;
+    }
+    var rgb = shade(base.rgb, n, m, emissive, t * 0.5 + 0.5);
+    var a = 1.0;
+    if ((m.flags & F_WATER) != 0u) {
+        rgb = mix(rgb, vec3<f32>(0.1, 0.3, 0.5), 0.6);
+        a = 0.6;
+    }
+    return vec4<f32>(rgb, a);
+}
+
+// Solid colour over the mesh layout (selection wireframe).
+@fragment
+fn fs_solid(in: VsOut) -> @location(0) vec4<f32> {
+    let m = materials[in.inst];
+    return vec4<f32>(m.tint.rgb, 1.0);
+}
+
+// Classic tree LOD billboards: one quad per instance, built here, facing the camera in the
+// free view and lying flat (as a footprint) in the top-down overview.
+struct TreeIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) rotation: f32,
+    @location(2) size: vec2<f32>,
+    @location(3) uv_min: vec2<f32>,
+    @location(4) uv_max: vec2<f32>,
+    @location(5) flags: u32,
+    @builtin(vertex_index) vi: u32,
+};
+
+struct TreeOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) flags: u32,
+    @location(2) world: vec3<f32>,
+};
+
+@group(1) @binding(0) var tree_diffuse: texture_2d<f32>;
+@group(1) @binding(1) var tree_normal: texture_2d<f32>;
+@group(1) @binding(2) var tree_samp: sampler;
+
+@vertex
+fn vs_tree(in: TreeIn) -> TreeOut {
+    var out: TreeOut;
+    let cx = select(-0.5, 0.5, (in.vi & 1u) == 1u);
+    let cy = select(0.0, 1.0, in.vi >= 2u);
+    var world: vec3<f32>;
+    if (g.cam_pos.w > 0.5) {
+        // Overview: a flat square footprint of the billboard's width.
+        world = vec3<f32>(in.pos.x + cx * in.size.x, in.pos.y + (cy - 0.5) * in.size.x, in.pos.z + 1.0);
+    } else {
+        var to_cam = g.cam_pos.xy - in.pos.xy;
+        let len = length(to_cam);
+        var dir = vec2<f32>(0.0, 1.0);
+        if (len > 1e-3) {
+            dir = to_cam / len;
+        }
+        let right = vec2<f32>(dir.y, -dir.x);
+        world = vec3<f32>(in.pos.xy + right * cx * in.size.x, in.pos.z + cy * in.size.y);
+    }
+    out.clip = g.view_proj * vec4<f32>(world, 1.0);
+    out.uv = mix(in.uv_min, in.uv_max, vec2<f32>(cx + 0.5, 1.0 - cy));
+    out.flags = in.flags;
+    out.world = world;
+    return out;
+}
+
+@fragment
+fn fs_tree(in: TreeOut) -> @location(0) vec4<f32> {
+    var base = textureSample(tree_diffuse, tree_samp, in.uv);
+    let _n = textureSample(tree_normal, tree_samp, in.uv);
+    if ((in.flags & 2u) != 0u) {
+        base = vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    }
+    var threshold = 0.5;
+    if (g.params.z >= 0.0) {
+        threshold = g.params.z;
+    }
+    if (base.a < threshold) {
+        discard;
+    }
+    let mode = i32(g.params.x);
+    var c = base.rgb;
+    if (mode == 0 || mode == 3) {
+        // No normal: a billboard faces the viewer, light it as a vertical surface toward the sun.
+        let ambient = g.sun_dir.w;
+        c = c * (ambient + (1.0 - ambient) * 0.6);
+    } else if (mode == 2) {
+        c = vec3<f32>(0.5, 0.5, 1.0);
+    } else if (mode == 4) {
+        c = g.level_colors[0].rgb;
+    } else if (mode == 5) {
+        c = g.kind_colors[3].rgb;
+    }
+    if ((in.flags & 1u) != 0u) {
+        c = mix(c, vec3<f32>(1.0, 0.6, 0.1), 0.6);
+    }
+    return vec4<f32>(c, 1.0);
+}
+
+// Overlay lines (grid, bounds, selection) in world space.
+struct LineIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct LineOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_line(in: LineIn) -> LineOut {
+    var out: LineOut;
+    out.clip = g.view_proj * vec4<f32>(in.pos, 1.0);
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
