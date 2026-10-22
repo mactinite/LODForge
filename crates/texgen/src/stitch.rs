@@ -306,10 +306,23 @@ pub struct TileDraw<'a> {
     pub tone: Tone,
     /// Use the source's alpha; else alpha 1.
     pub keep_alpha: bool,
+    /// Divide the colour by alpha (TexGen's `unmulta`). Off for sources whose alpha is not
+    /// coverage: PBR landscape textures keep a height / blend mask there, and dividing by it
+    /// brightened the raised parts up to 2x and printed the mask onto the LOD texture as dark
+    /// blotches (Vanaheimr's coastbeach01).
+    pub unmultiply: bool,
+}
+
+/// Whether a source's alpha is a height / blend mask rather than coverage (PBR landscape).
+pub fn alpha_is_height(path: &str) -> bool {
+    path.to_ascii_lowercase().starts_with(r"textures\pbr\landscape\")
 }
 
 impl TileDraw<'_> {
     fn shade(&self, s: [f32; 4]) -> [f32; 4] {
+        if !self.unmultiply {
+            return [self.tone.apply(s[0], 0), self.tone.apply(s[1], 1), self.tone.apply(s[2], 2), if self.keep_alpha { s[3] } else { 1.0 }];
+        }
         // TexGen's `unmulta`: texels at or above the alpha-test threshold (128) have their colour
         // divided by alpha, those below keep it (golden: the golden/ours ratio by source alpha is
         // 1.00 below 128, then 1.76, 1.45, 1.23, 1.07 = 255/a for snow01lod, impextrubble01lod,
@@ -634,15 +647,21 @@ mod tests {
         assert!((t.apply(0.5, 0) - (0.5f32.powf(1.0 / 0.95) - 0.04)).abs() < 1e-6);
         // Alpha >= 128: colour / alpha before the tone; below: unchanged.
         let chain = MipChain::from_level(Level { w: 1, h: 1, px: vec![[0.3, 0.3, 0.3, 0.6]] });
-        let d = TileDraw { chain: &chain, rect: [0.0, 0.0, 1.0, 1.0], tone: Tone { scale: 0.65, ..Tone::IDENTITY }, keep_alpha: true };
+        let d = TileDraw { chain: &chain, rect: [0.0, 0.0, 1.0, 1.0], tone: Tone { scale: 0.65, ..Tone::IDENTITY }, keep_alpha: true, unmultiply: true };
         assert!((d.shade([0.3, 0.3, 0.3, 0.6])[0] - 0.5 * 0.65).abs() < 1e-6);
         assert!((d.shade([0.3, 0.3, 0.3, 0.4])[0] - 0.3 * 0.65).abs() < 1e-6);
+        // A height-mask alpha (PBR landscape) is not divided out.
+        let h = TileDraw { unmultiply: false, ..d };
+        assert!((h.shade([0.3, 0.3, 0.3, 0.6])[0] - 0.3 * 0.65).abs() < 1e-6);
+        assert!(alpha_is_height(r"textures\PBR\landscape\coastbeach01.dds"));
+        assert!(!alpha_is_height(r"textures\landscape\coastbeach01.dds"));
+        assert!(!alpha_is_height(r"textures\pbr\architecture\whiterun\wrroof01.dds"));
     }
 
     #[test]
     fn composite_fills_rect() {
         let chain = MipChain::from_level(Level { w: 2, h: 2, px: vec![[1.0, 0.0, 0.0, 1.0]; 4] });
-        let img = composite(4, 4, &[TileDraw { chain: &chain, rect: [0.0, 0.0, 2.0, 2.0], tone: Tone::IDENTITY, keep_alpha: true }], 0.0, false);
+        let img = composite(4, 4, &[TileDraw { chain: &chain, rect: [0.0, 0.0, 2.0, 2.0], tone: Tone::IDENTITY, keep_alpha: true, unmultiply: true }], 0.0, false);
         assert_eq!(img.px[0], [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(img.px[3], [0.0; 4]);
     }

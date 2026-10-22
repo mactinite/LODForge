@@ -38,6 +38,21 @@ pub fn texel(p: [u8; 4], has_pbr: bool) -> [u8; 4] {
     ]
 }
 
+/// One texel of the copy of a PBR landscape texture: its diffuse alpha is a height / blend mask
+/// for terrain height blending, not opacity, so the colour is only scaled and the copy is
+/// opaque. Darkening by that alpha (as [`texel`] does) printed the height map onto the LOD as
+/// black blotches (Vanaheimr's coastbeach01 on the Solitude coast rocks).
+pub fn landscape_texel(p: [u8; 4], has_pbr: bool) -> [u8; 4] {
+    let scale = if has_pbr { SCALE } else { 1.0 };
+    let c = |v: u8| (f32::from(v) * scale).round().clamp(0.0, 255.0) as u8;
+    [c(p[0]), c(p[1]), c(p[2]), 255]
+}
+
+/// Whether a PBR texture path is a landscape texture (alpha = height, not opacity).
+pub fn is_landscape(stem: &str) -> bool {
+    stem.to_ascii_lowercase().starts_with(r"textures\pbr\landscape\")
+}
+
 /// Writes every requested `...linear.dds` from its `....dds` source into `out`.
 /// Missing or invalid requested sources are errors, not successful partial output.
 pub fn write(vfs: &Vfs, gpu: &Gpu, names: &BTreeSet<String>, out: &Path) -> Result<usize> {
@@ -58,10 +73,14 @@ pub fn write(vfs: &Vfs, gpu: &Gpu, names: &BTreeSet<String>, out: &Path) -> Resu
         let level = u32::from(info.mips().len() > 1);
         let img = lodforge_dds::decode(&bytes, &info, level)
             .with_context(|| format!("decoding {src} for {name}"))?;
+        let landscape = is_landscape(stem);
         let rgba: Vec<u8> = img
             .rgba
             .chunks_exact(4)
-            .flat_map(|p| texel([p[0], p[1], p[2], p[3]], has_pbr))
+            .flat_map(|p| {
+                let p = [p[0], p[1], p[2], p[3]];
+                if landscape { landscape_texel(p, has_pbr) } else { texel(p, has_pbr) }
+            })
             .collect();
         let levels = crate::object_atlas::mip_chain(img.width, img.height, rgba);
         let dds = crate::object_atlas::encode(gpu, &levels)?;
@@ -101,6 +120,16 @@ mod tests {
             names.into_iter().collect::<Vec<_>>(),
             vec!["textures\\pbr\\a\\blinear.dds".to_string()]
         );
+    }
+
+    #[test]
+    fn landscape_alpha_is_height_not_opacity() {
+        assert!(is_landscape(r"textures\pbr\landscape\coastbeach01"));
+        assert!(is_landscape(r"Textures\PBR\Landscape\mountains\mountainslab02"));
+        assert!(!is_landscape(r"textures\pbr\architecture\whiterun\wrroof01"));
+        // Low height alpha keeps the colour (scaled) and becomes opaque.
+        assert_eq!(landscape_texel([200, 100, 0, 20], true), [130, 65, 0, 255]);
+        assert_eq!(landscape_texel([200, 200, 200, 0], false), [200, 200, 200, 255]);
     }
 
     #[test]

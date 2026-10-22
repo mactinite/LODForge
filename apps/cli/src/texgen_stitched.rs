@@ -221,17 +221,17 @@ fn build_atlas(src: &Sources, a: &Atlas, prm: &StitchParams, pbr: bool) -> std::
         if path.contains(r"\pbr\") {
             tone.scale = prm.pbr_scale;
         }
-        chains.push((chain, rect, tone));
+        chains.push((chain, rect, tone, !stitch::alpha_is_height(&path)));
         // The `_n` of the diffuse TexGen really loads (after a copy alias of the diffuse itself:
         // Majestic Mountains' mountainslabtemp.dds -> mountainslab01.dds uses mountainslab01_n).
         let npath = stitch::normal_path(&src.resolve(&path));
         let n = src.size(&npath).and_then(|(nw, nh)| src.chain(&npath, stitch::tile_lod(nw, nh, rect[2], rect[3], prm.bias).floor() as u32));
         nchains.push((n, rect));
     }
-    let draws: Vec<TileDraw> = chains.iter().map(|(c, rect, tone)| TileDraw { chain: c, rect: *rect, tone: *tone, keep_alpha: true }).collect();
+    let draws: Vec<TileDraw> = chains.iter().map(|(c, rect, tone, unmultiply)| TileDraw { chain: c, rect: *rect, tone: *tone, keep_alpha: true, unmultiply: *unmultiply }).collect();
     let diffuse = stitch::composite(w, h, &draws, prm.bias, false);
     let flat = MipChain::from_level(Level::from_rgba8(1, 1, &FLAT_NORMAL));
-    let ndraws: Vec<TileDraw> = nchains.iter().map(|(c, rect)| TileDraw { chain: c.as_deref().unwrap_or(&flat), rect: *rect, tone: stitch::Tone::IDENTITY, keep_alpha: true }).collect();
+    let ndraws: Vec<TileDraw> = nchains.iter().map(|(c, rect)| TileDraw { chain: c.as_deref().unwrap_or(&flat), rect: *rect, tone: stitch::Tone::IDENTITY, keep_alpha: true, unmultiply: true }).collect();
     let normal = stitch::composite(w, h, &ndraws, prm.bias, true);
     Ok((diffuse, normal, alpha))
 }
