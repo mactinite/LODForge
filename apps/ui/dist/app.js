@@ -14,9 +14,19 @@ if (!window.__TAURI__) {
         if (cmd === "mo2_running") return false;
         if (cmd === "start_build") {
           polls = 0;
-          [["Tamriel", "terrain-meshes", null, 3600], ["Tamriel", "terrain-textures", null, 17500], ["Tamriel", "dyndolod-export", null, 3300], ["Tamriel", "objects", null, 8800], ["all", "plugins", null, 10], ["all", "occlusion", null, 10000]].forEach(([world, stage, season, ms], i) => {
-            setTimeout(() => fire("build-line", JSON.stringify({ event: "begin", world, stage, season })), 600 * i + 50);
-            setTimeout(() => fire("build-line", JSON.stringify({ event: "stage", world, stage, season, ms })), 600 * (i + 1));
+          // Two lanes as in the real build: terrain on its own thread beside the other stages
+          // (their begin/stage events interleave), then the stages that wait for both.
+          const lanes = [
+            [["Tamriel", "terrain-meshes", null, 3600], ["Tamriel", "terrain-textures", null, 17500], ["Tamriel", "terrain-textures", "WIN", 4200]],
+            [["all", "texgen", null, 20000], ["Tamriel", "dyndolod-export", null, 3300], ["Tamriel", "objects", null, 8800]],
+          ];
+          lanes.forEach((lane, l) => lane.forEach(([world, stage, season, ms], i) => {
+            setTimeout(() => fire("build-line", JSON.stringify({ event: "begin", world, stage, season })), 700 * i + 50 + 150 * l);
+            setTimeout(() => fire("build-line", JSON.stringify({ event: "stage", world, stage, season, ms })), 700 * (i + 1) + 150 * l);
+          }));
+          [["all", "plugins", null, 10], ["all", "occlusion", null, 10000]].forEach(([world, stage, season, ms], i) => {
+            setTimeout(() => fire("build-line", JSON.stringify({ event: "begin", world, stage, season })), 2500 + 600 * i);
+            setTimeout(() => fire("build-line", JSON.stringify({ event: "stage", world, stage, season, ms })), 2500 + 600 * (i + 1));
           });
           return null;
         }
@@ -158,7 +168,9 @@ async function startBuild() {
 const stageKey = (ev) => `${ev.world}|${ev.stage}|${ev.season ?? ""}`;
 const stageLabel = (ev) => `${ev.world === "all" ? "" : ev.world + " "}${ev.stage}${ev.season ? " [" + ev.season + "]" : ""}`;
 
-// A stage that began but never reported its time did not finish (its error is in the log).
+// A stage that began but never reported its time by the end of the build did not finish (its
+// error is in the log). Stages run on two threads (terrain beside the rest), so several are
+// running at once and a new one beginning says nothing about the others.
 function settleRunning() {
   for (const [key, tr] of state.running) {
     tr.className = "failed";
@@ -168,14 +180,19 @@ function settleRunning() {
   state.running.clear();
 }
 
+function showRunning() {
+  const labels = [...state.running.values()].map((tr) => tr.dataset.label);
+  if (labels.length) status(`Working on ${labels.join(", ")}…`);
+}
+
 function beginStage(ev) {
-  settleRunning();
   const tr = document.createElement("tr");
   tr.className = "running";
+  tr.dataset.label = stageLabel(ev);
   tr.innerHTML = `<td>${ev.world}</td><td>${ev.stage}</td><td>${ev.season ?? ""}</td><td class="num"><span class="spinner"></span></td>`;
   $("stages").tBodies[0].appendChild(tr);
   state.running.set(stageKey(ev), tr);
-  status(`Working on ${stageLabel(ev)}…`);
+  showRunning();
   tr.scrollIntoView({ block: "nearest" });
 }
 
@@ -188,6 +205,7 @@ function addStage(ev) {
     state.running.delete(stageKey(ev));
     running.className = "";
     running.lastElementChild.textContent = time;
+    showRunning();
     return;
   }
   const tr = document.createElement("tr");
