@@ -11,7 +11,8 @@ use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
 use lodforge_esp::{land_textures, scan_worldspaces};
-use lodforge_gpu::terrain_spec::{LevelSpec, TextureKind as GpuKind, TOP_LEVEL};
+use lodforge_dds::mips::{Edge, MipKind};
+use lodforge_gpu::terrain_spec::{LevelFilter, LevelSpec, TextureKind as GpuKind, TOP_LEVEL};
 use lodforge_gpu::{Gpu, RgbaImage};
 use lodforge_seasons::{affected_tiles, effective_swaps, load_swaps, tile_of, Season, TextureKind};
 use lodforge_terrain::bake::{decode_lands, texture_path, TextureCache};
@@ -55,6 +56,28 @@ pub struct Args {
     /// xLODGen golden run's saved settings: LOD4 diffuse only) or `none`.
     #[arg(long, value_enum, default_value = "full", alias = "terrain-mips")]
     pub mips: TerrainMips,
+    /// Resampling: `hq` (default; levels resized from the stitched top tile, linear-light diffuse,
+    /// renormalised normals, float Lanczos mips) or `xlodgen` (per-cell resizes with clamped
+    /// edges and 8-bit gamma-space box mips, as the golden xLODGen run; for comparisons).
+    #[arg(long, value_enum, default_value = "hq")]
+    pub filter: TerrainFilter,
+}
+
+/// How terrain LOD textures are resampled (see [Args::filter]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum TerrainFilter {
+    #[default]
+    Hq,
+    Xlodgen,
+}
+
+impl TerrainFilter {
+    fn level_filter(self) -> LevelFilter {
+        match self {
+            TerrainFilter::Hq => LevelFilter::Stitched,
+            TerrainFilter::Xlodgen => LevelFilter::PerCell,
+        }
+    }
 }
 
 /// Which terrain LOD textures get a mip chain. xLODGen decides this per level and kind
@@ -147,23 +170,65 @@ fn mip_chain(size: u32, rgba: &[u8]) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
+/// Mip chain (excluding the top level) for `filter`: float Lanczos, linear-light diffuse and
+/// renormalised normals (`hq`), or the 8-bit box chain (`xlodgen`).
+fn mips_for(size: u32, rgba: &[u8], kind: Kind, filter: TerrainFilter) -> Vec<(u32, Vec<u8>)> {
+    match filter {
+        TerrainFilter::Xlodgen => mip_chain(size, rgba),
+        TerrainFilter::Hq => {
+            let mk = if kind == Kind::Normal { MipKind::Normal } else { MipKind::Color };
+            lodforge_dds::mips::chain(size, size, rgba, u32::MAX, mk, Edge::Clamp).into_iter().skip(1).map(|(w, _, px)| (w, px)).collect()
+        }
+    }
+}
+
 /// BC7 DDS files (top mip + optional mips) for RGBA images, encoded on the GPU in one batch.
-fn encode_dds(gpu: &Gpu, images: &[(u32, &[u8])], mips: bool) -> Result<Vec<Vec<u8>>> {
-    let chains: Vec<Vec<(u32, Vec<u8>)>> = if mips { images.par_iter().map(|(s, d)| mip_chain(*s, d)).collect() } else { vec![Vec::new(); images.len()] };
+/// Identical images (empty ocean and flat-normal tiles are common) are filtered and encoded once.
+fn encode_dds(gpu: &Gpu, images: &[(u32, &[u8])], mips: bool, kind: Kind, filter: TerrainFilter) -> Result<Vec<Vec<u8>>> {
+    use std::hash::{Hash, Hasher};
+    let hashes: Vec<u64> = images
+        .par_iter()
+        .map(|(s, d)| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            d.hash(&mut h);
+            h.finish()
+        })
+        .collect();
+    // First image with each content; `slot[i]` = its index among the unique ones.
+    let mut first: HashMap<u64, usize> = HashMap::new();
+    let mut unique: Vec<usize> = Vec::new();
+    let mut slot = Vec::with_capacity(images.len());
+    for (i, h) in hashes.iter().enumerate() {
+        let j = *first.entry(*h).or_insert_with(|| {
+            unique.push(i);
+            unique.len() - 1
+        });
+        // A hash collision with different bytes keeps its own entry.
+        if images[unique[j]].1 != images[i].1 {
+            unique.push(i);
+            slot.push(unique.len() - 1);
+        } else {
+            slot.push(j);
+        }
+    }
+    let chains: Vec<Vec<(u32, Vec<u8>)>> = if mips { unique.par_iter().map(|&i| mips_for(images[i].0, images[i].1, kind, filter)).collect() } else { vec![Vec::new(); unique.len()] };
     let mut flat: Vec<RgbaImage> = Vec::new();
-    for ((s, d), chain) in images.iter().zip(&chains) {
-        flat.push(RgbaImage { width: *s, height: *s, rgba: d });
+    for (&i, chain) in unique.iter().zip(&chains) {
+        let (s, d) = images[i];
+        flat.push(RgbaImage { width: s, height: s, rgba: d });
         flat.extend(chain.iter().map(|(cs, cd)| RgbaImage { width: *cs, height: *cs, rgba: cd }));
     }
     let mut encoded = gpu.encode_bc7(&flat)?.into_iter();
-    Ok(images
+    let files: Vec<Vec<u8>> = unique
         .iter()
         .zip(&chains)
-        .map(|((s, _), chain)| {
+        .map(|(&i, chain)| {
             let levels: Vec<Vec<u8>> = (0..=chain.len()).map(|_| encoded.next().unwrap_or_default()).collect();
-            lodforge_dds::write_bc7(*s, *s, &levels)
+            lodforge_dds::write_bc7(images[i].0, images[i].0, &levels)
         })
-        .collect())
+        .collect();
+    Ok(slot.into_iter().map(|j| files[j].clone()).collect())
 }
 
 fn parse_kind(s: &str) -> Result<Kind> {
@@ -355,9 +420,14 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
             for &level in &a.levels {
                 let ls = level_settings(level, kind, a.mips);
                 let b = SpecBaker { textures: &shrunk, ltex: &ltex, params: SpecParams { gamma: ls.gamma, ..params.clone() } };
-                let (img, _) = b.bake_tile(&HashMap::new(), (0, 0), level, ls.size / level as u32);
-                let rgba = img.to_rgba8();
-                default_dds.insert(level, encode_dds(gpu, &[(img.width, &rgba)], ls.mips)?.remove(0));
+                let (size, rgba) = match a.filter {
+                    TerrainFilter::Xlodgen => {
+                        let (img, _) = b.bake_tile(&HashMap::new(), (0, 0), level, ls.size / level as u32);
+                        (img.width, img.to_rgba8())
+                    }
+                    TerrainFilter::Hq => b.default_tile_hq(level, ls.size / level as u32, max_ppc),
+                };
+                default_dds.insert(level, encode_dds(gpu, &[(size, &rgba)], ls.mips, kind, a.filter)?.remove(0));
             }
         }
         let levels: Vec<LevelSpec> = a
@@ -417,7 +487,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
             let constant_default = |level: i32, t: (i32, i32)| kind == Kind::Diffuse && packed.tile_is_default(level, (t.0 - top.0) / level, (t.1 - top.1) / level);
             let needs_gpu = wanted.iter().any(|&(level, t)| !constant_default(level, t));
             let t0 = Instant::now();
-            let images = if needs_gpu { gpu.bake_top_tile(gtex, gkind, 1.0, &levels, &packed.batches)? } else { Vec::new() };
+            let images = if needs_gpu { gpu.bake_top_tile(gtex, gkind, 1.0, &levels, &packed.batches, a.filter.level_filter())? } else { Vec::new() };
             st.gpu += t0.elapsed().as_millis();
 
             for &level in &a.levels {
@@ -429,7 +499,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
                 if !full.is_empty() {
                     let img = images.iter().find(|i| i.level == level as u32).context("level image missing")?;
                     let tiles: Vec<(u32, &[u8])> = full.iter().map(|t| (img.tile_size, img.tile(((t.0 - top.0) / level) as u32, ((t.1 - top.1) / level) as u32))).collect();
-                    for (t, dds) in full.iter().zip(encode_dds(gpu, &tiles, ls.mips)?) {
+                    for (t, dds) in full.iter().zip(encode_dds(gpu, &tiles, ls.mips, kind, a.filter)?) {
                         files.push((**t, dds));
                     }
                 }

@@ -76,6 +76,10 @@ pub struct Args {
     /// diffuse only) or `none`.
     #[arg(long, value_enum, default_value = "full")]
     pub terrain_mips: crate::terrain_textures::TerrainMips,
+    /// Terrain LOD texture resampling: `hq` (default; no cell grid, linear-light diffuse,
+    /// renormalised normals) or `xlodgen` (as the golden xLODGen run).
+    #[arg(long, value_enum, default_value = "hq")]
+    pub terrain_filter: crate::terrain_textures::TerrainFilter,
     /// Material setup of the list. `pbr` (Community Shaders with PBR): pbr_lod texture twins,
     /// PBR texture sets and linear copies from the textures\pbr\ sources. `standard` (non-PBR:
     /// ENB complex material, parallax or vanilla): plain textures only, textures\pbr\ sources
@@ -222,7 +226,7 @@ pub fn run(a: &Args) -> Result<()> {
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
     // Terrain meshes and textures of every worldspace and season run on their own thread from
     // here on; the object stages below wait per worldspace for its meshes.
-    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, json: a.json, lod_fill: !a.no_lod_fill }));
+    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, filter: a.terrain_filter, json: a.json, lod_fill: !a.no_lod_fill }));
     if a.texgen {
         let t = Instant::now();
         begin(a.json, "all", "texgen", None);
@@ -503,6 +507,7 @@ pub fn run(a: &Args) -> Result<()> {
                 hidden_rule: None,
                 no_hidden: false,
                 reuv: false,
+                loose_atlas_uv: false,
                 hidden_study: false,
                 out: out.clone(),
                 golden: None,
@@ -683,6 +688,7 @@ fn object_lod_args(a: &Args, world: &str, out: &std::path::Path, export: Vec<Pat
         hidden_rule: None,
         no_hidden: false,
         reuv: false,
+        loose_atlas_uv: false,
         hidden_study: false,
         out: out.to_path_buf(),
         golden: None,

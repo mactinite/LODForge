@@ -144,6 +144,13 @@ pub enum Pass {
 /// TexGen's `MaxMultiSamples` default; capped by what the adapter supports.
 pub const MAX_SAMPLES: u32 = 16;
 
+/// Billboards are rendered at this many times their size per axis and averaged down. The alpha
+/// test discards whole pixels, so MSAA alone leaves foliage edges inside a texture hard and
+/// stair-stepped (thin needles turn into pixel noise); averaging SUPERSAMPLE^2 samples gives every
+/// edge texel its real coverage. MSAA is off in this mode (the supersampling covers triangle edges
+/// too).
+pub const SUPERSAMPLE: u32 = 4;
+
 pub struct Renderer {
     /// MSAA sample count of the render target.
     pub samples: u32,
@@ -255,7 +262,7 @@ fn material(m: &Mesh, textures: &HashMap<String, TexData>) -> ([f32; 4], [f32; 4
 impl Renderer {
     pub fn new(gpu: &lodforge_gpu::Gpu) -> Renderer {
         let d = &gpu.device;
-        let samples = gpu.max_msaa.min(MAX_SAMPLES);
+        let samples = if SUPERSAMPLE > 1 { 1 } else { gpu.max_msaa.min(MAX_SAMPLES) };
         // `LODFORGE_BILLBOARD_WGSL=<file>` replaces the built-in shader at run time (tuning the
         // shading against golden billboards without a rebuild).
         let source = std::env::var_os("LODFORGE_BILLBOARD_WGSL").and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| include_str!("billboard.wgsl").to_string());
@@ -371,12 +378,13 @@ impl Renderer {
         let mut readbacks = Vec::with_capacity(jobs.len());
         for job in jobs {
             let (scene, view, light, kind) = (job.scene, job.view, job.light, job.pass);
-            let (w, h) = (view.width.max(1), view.height.max(1));
+            let ss = SUPERSAMPLE.max(1);
+            let (w, h) = (view.width.max(1) * ss, view.height.max(1) * ss);
             let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
-            let msaa = d.create_texture(&wgpu::TextureDescriptor { label: Some("msaa"), size, mip_level_count: 1, sample_count: self.samples, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
+            let msaa = (self.samples > 1).then(|| d.create_texture(&wgpu::TextureDescriptor { label: Some("msaa"), size, mip_level_count: 1, sample_count: self.samples, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] }));
             let resolve = d.create_texture(&wgpu::TextureDescriptor { label: Some("resolve"), size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
             let depth = d.create_texture(&wgpu::TextureDescriptor { label: Some("depth"), size, mip_level_count: 1, sample_count: self.samples, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
-            let (mv, rv, dv) = (msaa.create_view(&Default::default()), resolve.create_view(&Default::default()), depth.create_view(&Default::default()));
+            let (mv, rv, dv) = (msaa.as_ref().map(|m| m.create_view(&Default::default())), resolve.create_view(&Default::default()), depth.create_view(&Default::default()));
 
             // Depth range over the whole scene.
             let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
@@ -449,7 +457,10 @@ impl Renderer {
             {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("billboard"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &mv, resolve_target: Some(&rv), ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } })],
+                    color_attachments: &[Some(match &mv {
+                        Some(mv) => wgpu::RenderPassColorAttachment { view: mv, resolve_target: Some(&rv), ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } },
+                        None => wgpu::RenderPassColorAttachment { view: &rv, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } },
+                    })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &dv, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }), stencil_ops: None }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
@@ -490,10 +501,43 @@ impl Renderer {
                     // Row 0 of the texture is the top of the image (clip y = +1).
                     out[y * *w as usize * 4..(y + 1) * *w as usize * 4].copy_from_slice(&data[y * *row as usize..y * *row as usize + *w as usize * 4]);
                 }
-                out
+                downsample(&out, *w, *h, SUPERSAMPLE.max(1))
             })
             .collect()
     }
+}
+
+/// Averages `ss` x `ss` blocks of a supersampled render, as an MSAA resolve does: alpha is the
+/// mean (the texel's coverage) and RGB the mean of colour times alpha (premultiplied; the
+/// background clears to transparent black), which [crate::finish_alpha] un-premultiplies.
+pub fn downsample(px: &[u8], w: u32, h: u32, ss: u32) -> Vec<u8> {
+    if ss <= 1 {
+        return px.to_vec();
+    }
+    let (ow, oh) = (w / ss, h / ss);
+    let n = (ss * ss) as u32;
+    let mut out = vec![0u8; (ow * oh * 4) as usize];
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let mut acc = [0u32; 4];
+            for y in oy * ss..(oy + 1) * ss {
+                for x in ox * ss..(ox + 1) * ss {
+                    let i = ((y * w + x) * 4) as usize;
+                    let a = u32::from(px[i + 3]);
+                    for c in 0..3 {
+                        acc[c] += u32::from(px[i + c]) * a;
+                    }
+                    acc[3] += a;
+                }
+            }
+            let o = ((oy * ow + ox) * 4) as usize;
+            for c in 0..3 {
+                out[o + c] = ((acc[c] + n * 255 / 2) / (n * 255)) as u8;
+            }
+            out[o + 3] = ((acc[3] + n / 2) / n) as u8;
+        }
+    }
+    out
 }
 
 /// Upper bound of the renderer's texture cache.

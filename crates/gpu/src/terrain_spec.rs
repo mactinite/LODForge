@@ -91,6 +91,34 @@ struct RenderParams {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LevelParams {
+    src_side: u32,
+    dst_side: u32,
+    level: u32,
+    tile_size: u32,
+    tiles_per_side: u32,
+    kind: u32,
+    gamma_inv: f32,
+    brightness: f32,
+    contrast: f32,
+    _p: [u32; 3],
+}
+
+/// How the cells of a top tile become level images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LevelFilter {
+    /// Every cell is resized into every level on its own with clamped edges (xLODGen). The
+    /// kernel never sees the neighbouring cells, which leaves a cell grid that grows with the
+    /// level. 8-bit gamma-space values throughout.
+    PerCell,
+    /// Cells are resized to the finest level and stitched; every level is resized from the
+    /// stitched top tile (diffuse in linear light, normals renormalised), so no cell grid.
+    #[default]
+    Stitched,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DownParams {
     cell_px: u32,
     ppc: u32,
@@ -120,6 +148,64 @@ pub enum TextureKind {
 }
 
 impl Gpu {
+    /// Resizes the stitched `base` (side `side`, RGBA8, north-up) into every level buffer.
+    fn levels_from_base(&self, kind: TextureKind, base: &wgpu::Buffer, side: u32, level_bufs: &[(LevelSpec, u32, u32, wgpu::Buffer)]) -> Result<()> {
+        let max_tmp = level_bufs.iter().map(|(_, tps, ts, _)| tps * ts).filter(|&d| d != side).max().unwrap_or(0);
+        let tmp = (max_tmp > 0).then(|| self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("level tmp"), size: u64::from(side) * u64::from(max_tmp) * 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }));
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("levels") });
+        for (l, tps, ts, level_buf) in level_bufs {
+            let dst = tps * ts;
+            let p = LevelParams {
+                src_side: side,
+                dst_side: dst,
+                level: l.level,
+                tile_size: *ts,
+                tiles_per_side: *tps,
+                kind: kind as u32,
+                gamma_inv: if kind == TextureKind::Diffuse { 1.0 / l.gamma } else { 1.0 },
+                brightness: if kind == TextureKind::Diffuse { l.brightness / 100.0 } else { 0.0 },
+                contrast: if kind == TextureKind::Diffuse { l.contrast / 100.0 } else { 0.0 },
+                _p: [0; 3],
+            };
+            let uni = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM });
+            let bind = |pipe: &wgpu::ComputePipeline, with_tmp: bool, with_level: bool| {
+                let mut e = vec![wgpu::BindGroupEntry { binding: 0, resource: uni.as_entire_binding() }];
+                if !with_level || dst == side {
+                    e.push(wgpu::BindGroupEntry { binding: 1, resource: base.as_entire_binding() });
+                }
+                if with_tmp {
+                    e.push(wgpu::BindGroupEntry { binding: 2, resource: tmp.as_ref().unwrap().as_entire_binding() });
+                }
+                if with_level {
+                    e.push(wgpu::BindGroupEntry { binding: 3, resource: level_buf.as_entire_binding() });
+                }
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &pipe.get_bind_group_layout(0), entries: &e })
+            };
+            if dst == side {
+                let g = bind(&self.level_copy, false, true);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("level_copy"), timestamp_writes: None });
+                pass.set_pipeline(&self.level_copy);
+                pass.set_bind_group(0, &g, &[]);
+                pass.dispatch_workgroups(dst.div_ceil(8), dst.div_ceil(8), 1);
+                continue;
+            }
+            let gh = bind(&self.level_h, true, false);
+            let gv = bind(&self.level_v, true, true);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("level_h"), timestamp_writes: None });
+                pass.set_pipeline(&self.level_h);
+                pass.set_bind_group(0, &gh, &[]);
+                pass.dispatch_workgroups(dst.div_ceil(64), side, 1);
+            }
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("level_v"), timestamp_writes: None });
+            pass.set_pipeline(&self.level_v);
+            pass.set_bind_group(0, &gv, &[]);
+            pass.dispatch_workgroups(dst.div_ceil(8), dst.div_ceil(8), 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
     /// Uploads `tex_px`-square RGBA8 textures (index = position).
     pub fn upload_spec_textures(&self, tex_px: u32, textures: &[Vec<u8>]) -> SpecTextures {
         let mut data: Vec<u8> = textures.concat();
@@ -132,7 +218,7 @@ impl Gpu {
 
     /// Renders and downscales `batches` into the levels of one top tile; returns each level's
     /// RGBA (tone curve applied, 8-bit).
-    pub fn bake_top_tile(&self, tex: &SpecTextures, kind: TextureKind, vc_mult: f32, levels: &[LevelSpec], batches: &[CellBatch]) -> Result<Vec<LevelImage>> {
+    pub fn bake_top_tile(&self, tex: &SpecTextures, kind: TextureKind, vc_mult: f32, levels: &[LevelSpec], batches: &[CellBatch], filter: LevelFilter) -> Result<Vec<LevelImage>> {
         let n = 24 * tex.tex_px;
         let storage = |label: &str, bytes: &[u8]| {
             let contents: &[u8] = if bytes.is_empty() { &[0u8; 16] } else { bytes };
@@ -149,21 +235,35 @@ impl Gpu {
             })
             .collect();
         let max_ppc = levels.iter().map(|l| l.ppc).max().unwrap_or(1);
+        // Stitched: the cells go once into a base image at the finest level's pixels per cell
+        // (pre tone curve, rounded), a single 32-cell "tile".
+        let base_spec = LevelSpec { level: TOP_LEVEL, ppc: max_ppc, gamma: 1.0, brightness: 0.0, contrast: 0.0 };
+        let base = (filter == LevelFilter::Stitched).then(|| {
+            let side = TOP_LEVEL * max_ppc;
+            let b = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("base"), size: u64::from(side) * u64::from(side) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+            (base_spec, 1u32, side, b)
+        });
         let render_layout = self.spec_render.get_bind_group_layout(0);
         let down_h_layout = self.spec_down_h.get_bind_group_layout(0);
         let down_v_layout = self.spec_down_v.get_bind_group_layout(0);
         let rp = RenderParams { cell_px: n, tex_px: tex.tex_px, vc_mult, kind: kind as u32 };
         let rp_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&rp), usage: wgpu::BufferUsages::UNIFORM });
-        let down_params: Vec<wgpu::Buffer> = level_bufs
+        let targets: Vec<&(LevelSpec, u32, u32, wgpu::Buffer)> = match &base {
+            Some(b) => vec![b],
+            None => level_bufs.iter().collect(),
+        };
+        let down_params: Vec<wgpu::Buffer> = targets
             .iter()
             .map(|(l, tps, ts, _)| {
+                let stitched = base.is_some();
                 let p = DownParams {
                     cell_px: n,
                     ppc: l.ppc,
                     level: l.level,
                     tile_size: *ts,
                     tiles_per_side: *tps,
-                    round_down: (kind == TextureKind::Diffuse) as u32,
+                    // The base rounds for both kinds (truncating normals tilts them).
+                    round_down: (kind == TextureKind::Diffuse || stitched) as u32,
                     gamma_inv: 1.0 / l.gamma,
                     brightness: l.brightness / 100.0,
                     contrast: l.contrast / 100.0,
@@ -207,7 +307,7 @@ impl Gpu {
                 pass.set_bind_group(0, &render_bind, &[]);
                 pass.dispatch_workgroups(n.div_ceil(8), n.div_ceil(8), slots);
             }
-            for ((l, _, _, level_buf), dp) in level_bufs.iter().zip(&down_params) {
+            for ((l, _, _, level_buf), dp) in targets.iter().zip(&down_params) {
                 let entries = |layout: &wgpu::BindGroupLayout, with_placement: bool| {
                     let mut e = vec![
                         wgpu::BindGroupEntry { binding: 0, resource: dp.as_entire_binding() },
@@ -236,6 +336,10 @@ impl Gpu {
                 pass.dispatch_workgroups(l.ppc.div_ceil(8), l.ppc.div_ceil(8), batch.placements.len() as u32);
             }
             self.queue.submit([encoder.finish()]);
+        }
+
+        if let Some((_, _, side, base_buf)) = &base {
+            self.levels_from_base(kind, base_buf, *side, &level_bufs)?;
         }
 
         // Read back every level image.

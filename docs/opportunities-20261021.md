@@ -139,3 +139,36 @@ OC1 + OC2 + OC3 are done (exact, 494 s -> 91 s on Tamriel). Next, if the stage s
 lower-bound test per (eye, block) with a min pyramid over the cone of rays, so a hidden block
 is proven hidden without its 256 rays, then OC4 or OC5. A quick profile before coding: time `compute` for a plains cell and a
 mountain cell and count steps per ray; that tells how much OC2 will buy versus OC4.
+
+## Visual pass with the LOD viewer (2026-10-21, branch lod-visuals)
+
+Measured on the user's skyrim-cs-base output (Tamriel, Solstheim) with `lodforge view` and two
+new examples: `lod_quality` (terrain tiles: step across cell borders vs inside cells, per
+position in the cell; mean luminance and normal length per mip) and `bto_texels` (texel density
+of object LOD shapes). `dds_png` dumps DDS mips/alpha side by side.
+
+Done:
+
+| Item | Change | Measured |
+|---|---|---|
+| T2 | `lodforge_dds::mips`: float Lanczos chains, colour in linear light, normals renormalised. Terrain (`--terrain-filter hq`, default), atlases, tree atlas, PBR linear copies | Diffuse mip 7 luminance vs top: 0.877 -> 0.994 (LOD32), 0.944 -> 0.996 (LOD8). Normal length mip 7: 0.886 -> 0.994. Terrain textures Tamriel 20.0 s -> 19.3 s (identical tiles encoded once), Solstheim 18 s -> 26 s (unique sea-floor normal tiles; GPU mips would recover it) |
+| T1 | Stitched top tile: cells resized once to the finest level into one base image; every level resized from it (`terrain_levels.wgsl`). `--terrain-filter xlodgen` keeps the per-cell path | Cell-border step barely moves (LOD8 1.18 -> 1.12, LOD32 1.09 -> 1.11): the per-cell clamp was not the grid's cause, see below |
+| O1/O5/B1 | Per-tile mip chains assembled into the page levels (wrap edges; box fallback for tiles below a texel or unaligned), normal tiles resized as vectors, missing normals flat | Tile colours never mix across tiles (unit test) |
+| O1 (UVs) | Shapes whose UVs overshoot their tile (DynDOLOD `AtlasTolerance=0.2`) are re-cut at the tile edges (`Options::recut_overshoot`, `object-lod --loose-atlas-uv` to disable) | Solstheim: 58 of 8,097 atlased parts re-cut |
+| O2 | Tree atlas: per-billboard chains (clamped), padding never enters the mips | |
+| O4 | Billboards rendered 4x supersampled (MSAA off) and kept with soft coverage alpha (`finish_alpha_soft`) instead of TexGen's 0/255 cut | Fixes the "pixelated" Solstheim ash pines (thin needles broke into stair-steps and specks; dense snowy pines hid it) |
+| viewer | Shapes with `TextureClampMode` 0 sample with clamp-to-edge | Removes a false bright line on every LOD32 tile edge |
+
+Findings still open:
+
+- **Terrain cell seams come from the cell render, not the downscale.** LOD4 step at the cell
+  border is 1.51x the mean (0.81 one pixel before), quadrant midlines 1.19x. A content edge
+  survives any correct resize. Suspects: cells without LAND next to land, per-quadrant texture
+  sets, the splat brush clipped at quadrant edges. Needs a per-cell study before changing the
+  render.
+- **BC7 mode 6 blocking (T5) is the largest remaining artefact.** Terrain normal maps step 1.5-1.8x
+  at every 4-px block edge at all levels (this is the "grid" seen in normals); billboards show 4x4
+  colour patches. A multi-mode encoder (e.g. an ISPC/bc7e port) would fix terrain normals,
+  billboards and atlases together.
+- **Texture repetition at LOD4:** the 16-px landscape textures tiled 24x per cell show as a
+  ~10.7 px wallpaper stripe at LOD4 (T7).

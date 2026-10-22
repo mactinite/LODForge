@@ -37,12 +37,14 @@ const F_WATER: u32 = 128u;
 const F_LARGE_REF: u32 = 256u;
 const F_HAS_NORMALS: u32 = 1024u;
 const F_HAS_TANGENTS: u32 = 2048u;
+const F_CLAMP: u32 = 4096u;
 
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
 @group(2) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(2) @binding(1) var t_normal: texture_2d<f32>;
 @group(2) @binding(2) var samp: sampler;
+@group(2) @binding(3) var samp_clamp: sampler;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -117,8 +119,10 @@ fn shade(base: vec3<f32>, n: vec3<f32>, m: Material, emissive: vec3<f32>, raw_no
 fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let m = materials[in.inst];
     // Every sample and derivative first, in uniform control flow.
-    var base = textureSample(t_diffuse, samp, in.uv);
-    let t = textureSample(t_normal, samp, in.uv).xyz * 2.0 - 1.0;
+    // Both address modes are sampled (uniform control flow) and the shape's clamp mode picks one.
+    let clamp_uv = (m.flags & F_CLAMP) != 0u;
+    var base = select(textureSample(t_diffuse, samp, in.uv), textureSample(t_diffuse, samp_clamp, in.uv), clamp_uv);
+    let t = select(textureSample(t_normal, samp, in.uv), textureSample(t_normal, samp_clamp, in.uv), clamp_uv).xyz * 2.0 - 1.0;
     let ddx = dpdx(in.world);
     let ddy = dpdy(in.world);
     if ((m.flags & F_VERTEX_COLORS) != 0u) {

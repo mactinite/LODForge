@@ -449,6 +449,46 @@ impl SpecBaker<'_> {
         (tile, is_default)
     }
 
+    /// A default (content-free) diffuse tile for the stitched `hq` filter, matching what the GPU
+    /// path gives a tile of default cells: the default cell resized to `base_ppc` and rounded
+    /// (the stitched base), then resized in linear light straight to the output size. Every cell
+    /// is the same, so the stitched image is periodic and one cell resized with wrapped edges,
+    /// repeated, is the whole tile. The output size is the default-tile size (32 px) when set,
+    /// else `ppc` per cell. Returns (size, RGBA8) with the tone curve applied.
+    pub fn default_tile_hq(&self, level: i32, ppc: u32, base_ppc: u32) -> (u32, Vec<u8>) {
+        use lodforge_dds::mips::{Edge, MipKind, resize_rgba8};
+        let level = level as u32;
+        let size = self.params.default_size.unwrap_or(ppc * level).max(level);
+        let per = size / level;
+        let mut cell = self.render_cell(None).lanczos(base_ppc, base_ppc);
+        cell.quantize8_with(true);
+        let small = resize_rgba8(base_ppc, base_ppc, &cell.to_rgba8(), (per, per), MipKind::Color, Edge::Wrap);
+        let p = &self.params;
+        let tone = |c: u8| -> u8 {
+            let mut v = f32::from(c) / 255.0;
+            if p.brightness != 0.0 || p.contrast != 0.0 {
+                v = v * (1.0 + p.contrast / 100.0) + p.brightness / 100.0;
+            }
+            if p.gamma != 1.0 {
+                v = v.max(0.0).powf(1.0 / p.gamma);
+            }
+            (v.clamp(0.0, 1.0) * 255.0).round() as u8
+        };
+        let side = per * level;
+        let mut out = vec![0u8; (side * side * 4) as usize];
+        for y in 0..side {
+            for x in 0..side {
+                let s = (((y % per) * per + x % per) * 4) as usize;
+                let d = ((y * side + x) * 4) as usize;
+                for c in 0..3 {
+                    out[d + c] = tone(small[s + c]);
+                }
+                out[d + 3] = 255;
+            }
+        }
+        (side, out)
+    }
+
     /// Diffuse tile (see [`SpecBaker::bake_tile_kind`]).
     pub fn bake_tile(&self, lands: &HashMap<(i32, i32), Land>, origin: (i32, i32), level: i32, ppc: u32) -> (Image, bool) {
         self.bake_tile_kind(lands, origin, level, ppc, Kind::Diffuse)

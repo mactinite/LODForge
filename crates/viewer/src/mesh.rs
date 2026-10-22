@@ -76,6 +76,9 @@ pub struct Material {
     pub uv_scale: [f32; 2],
     pub uv_offset: [f32; 2],
     pub large_ref: bool,
+    /// `TextureClampMode` 0 (CLAMP_S_CLAMP_T): the game clamps UVs at the texture edge (terrain
+    /// LOD and atlas pages); other modes wrap.
+    pub clamp: bool,
 }
 
 /// Axis-aligned box.
@@ -278,6 +281,7 @@ fn material_of(nif: &Nif, s: &TriShape) -> Material {
             m.emissive_multiple = l.emissive_multiple;
             m.uv_scale = l.uv_scale;
             m.uv_offset = l.uv_offset;
+            m.clamp = l.texture_clamp_mode == 0;
         }
         Some(Block::EffectShader(e)) => {
             m.effect = true;

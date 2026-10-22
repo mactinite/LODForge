@@ -44,6 +44,9 @@ pub struct Gpu {
     pub(crate) spec_render: wgpu::ComputePipeline,
     pub(crate) spec_down_h: wgpu::ComputePipeline,
     pub(crate) spec_down_v: wgpu::ComputePipeline,
+    pub(crate) level_h: wgpu::ComputePipeline,
+    pub(crate) level_v: wgpu::ComputePipeline,
+    pub(crate) level_copy: wgpu::ComputePipeline,
 }
 
 /// An RGBA8 image to encode (`rgba.len() == width * height * 4`).
@@ -104,7 +107,19 @@ impl Gpu {
             })
         };
         let (spec_render, spec_down_h, spec_down_v) = (entry("render_cell"), entry("downscale_h"), entry("downscale_v"));
-        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v })
+        let levels = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("terrain_levels"), source: wgpu::ShaderSource::Wgsl(include_str!("terrain_levels.wgsl").into()) });
+        let level_entry = |name: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: None,
+                module: &levels,
+                entry_point: Some(name),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let (level_h, level_v, level_copy) = (level_entry("level_h"), level_entry("level_v"), level_entry("level_copy"));
+        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy })
     }
 
     /// BC7 (mode 6) encodes RGBA8 images; returns each image's block data (16 bytes per 4x4

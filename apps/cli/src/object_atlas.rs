@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 
 use lodforge_archive::Vfs;
+use lodforge_dds::mips::{Edge, MipKind};
 use lodforge_gpu::{Gpu, RgbaImage};
 use lodforge_objlod::atlas_build::AtlasLayout;
 use lodforge_terrain::image::{Image, compare};
@@ -38,23 +39,14 @@ fn blit(dst: &mut [u8], dw: u32, src: &[u8], sw: u32, sh: u32, x: u32, y: u32) {
     }
 }
 
-/// Lanczos mip chain down to 1x1, each level from the previous one.
+/// Colour mip chain down to 1x1 (float, linear light, wrapped edges; see lodforge_dds::mips).
 pub fn mip_chain(w: u32, h: u32, rgba: Vec<u8>) -> Vec<(u32, u32, Vec<u8>)> {
     mip_chain_n(w, h, rgba, u32::MAX)
 }
 
 /// [mip_chain] with at most `levels` levels (the top one included).
 pub fn mip_chain_n(w: u32, h: u32, rgba: Vec<u8>, levels: u32) -> Vec<(u32, u32, Vec<u8>)> {
-    let mut out = vec![(w, h, rgba)];
-    let mut img = Image::from_rgba8(w, h, &out[0].2);
-    let (mut cw, mut ch) = (w, h);
-    while (cw > 1 || ch > 1) && (out.len() as u32) < levels {
-        cw = (cw / 2).max(1);
-        ch = (ch / 2).max(1);
-        img = img.lanczos(cw, ch);
-        out.push((cw, ch, img.to_rgba8()));
-    }
-    out
+    lodforge_dds::mips::chain(w, h, &rgba, levels, MipKind::Color, Edge::Wrap)
 }
 
 pub fn encode(gpu: &Gpu, levels: &[(u32, u32, Vec<u8>)]) -> Result<Vec<u8>> {
@@ -203,64 +195,176 @@ pub fn keep_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)], tiles: &[(u32, u3
     }
 }
 
+/// One atlas tile with its own mip chain: level k is `max(w >> k, 1)` x `max(h >> k, 1)`.
+pub struct TileChain {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub levels: Vec<Vec<u8>>,
+}
+
+impl TileChain {
+    /// The tile's chain, filtered on its own (`edge` decides what lies past its border), so a
+    /// tile's mips never take colour from its neighbours on the page.
+    pub fn new(x: u32, y: u32, w: u32, h: u32, top: &[u8], levels: u32, kind: MipKind, edge: Edge) -> TileChain {
+        let levels = lodforge_dds::mips::chain(w, h, top, levels, kind, edge).into_iter().map(|(_, _, px)| px).collect();
+        TileChain { x, y, w, h, levels }
+    }
+}
+
+/// Number of levels of a `w` x `h` page's chain down to 1x1, at most `cap`.
+fn page_levels(w: u32, h: u32, cap: u32) -> u32 {
+    let mut n = 1;
+    let (mut cw, mut ch) = (w, h);
+    while (cw > 1 || ch > 1) && n < cap {
+        cw = (cw / 2).max(1);
+        ch = (ch / 2).max(1);
+        n += 1;
+    }
+    n
+}
+
+/// 2x2 box downscale (odd edges clamp) of an RGBA8 image.
+fn box_half(w: u32, h: u32, px: &[u8]) -> (u32, u32, Vec<u8>) {
+    let (ow, oh) = ((w / 2).max(1), (h / 2).max(1));
+    let mut out = vec![0u8; (ow * oh * 4) as usize];
+    for y in 0..oh {
+        for x in 0..ow {
+            for c in 0..4 {
+                let at = |xx: u32, yy: u32| u32::from(px[((yy.min(h - 1) * w + xx.min(w - 1)) * 4 + c) as usize]);
+                let s = at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1);
+                out[((y * ow + x) * 4 + c) as usize] = ((s + 2) / 4) as u8;
+            }
+        }
+    }
+    (ow, oh, out)
+}
+
+/// A page's mip chain from its tiles' own chains: level k places every tile whose position and
+/// size are multiples of 2^k at (x >> k, y >> k). Texels no tile covers exactly at a level (gaps,
+/// tiles already below one texel, unaligned tiles) come from a box downscale of the level above.
+/// Level 0 is filled with `fill` where no tile is.
+pub fn assemble(width: u32, height: u32, levels: u32, fill: [u8; 4], tiles: &[TileChain]) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut top: Vec<u8> = fill.repeat((width * height) as usize);
+    for t in tiles {
+        blit(&mut top, width, &t.levels[0], t.w, t.h, t.x, t.y);
+    }
+    let mut out = vec![(width, height, top)];
+    for k in 1..levels {
+        let (pw, ph, prev) = out.last().unwrap();
+        let (w, h, mut px) = box_half(*pw, *ph, prev);
+        let m = 1u32 << k;
+        for t in tiles {
+            let exact = t.x % m == 0 && t.y % m == 0 && t.w % m == 0 && t.h % m == 0;
+            let Some(level) = t.levels.get(k as usize).filter(|_| exact) else { continue };
+            let (tw, th) = (t.w >> k, t.h >> k);
+            if (t.x >> k) + tw <= w && (t.y >> k) + th <= h {
+                blit(&mut px, w, level, tw, th, t.x >> k, t.y >> k);
+            }
+        }
+        out.push((w, h, px));
+    }
+    out
+}
+
+/// Decodes `path` at `w` x `h`: the source's mip of that size when it has one, else its top mip
+/// resized in the working space of `kind` (linear light for colour, renormalised normals).
+fn load_tile(vfs: &Vfs, path: &str, w: u32, h: u32, kind: MipKind) -> Option<Vec<u8>> {
+    let b = vfs.read(&path.to_lowercase()).ok().flatten()?;
+    let info = lodforge_dds::parse(&b).ok()?;
+    let (mut mw, mut mh, mut level) = (info.width, info.height, 0u32);
+    while (mw > w || mh > h) && level + 1 < info.mip_count {
+        mw = (mw / 2).max(1);
+        mh = (mh / 2).max(1);
+        level += 1;
+    }
+    if (mw, mh) == (w, h)
+        && let Ok(img) = lodforge_dds::decode(&b, &info, level)
+        && (img.width, img.height) == (w, h)
+    {
+        return Some(img.rgba);
+    }
+    let img = lodforge_dds::decode(&b, &info, 0).ok()?;
+    if (img.width, img.height) == (w, h) {
+        return Some(img.rgba);
+    }
+    Some(lodforge_dds::mips::resize_rgba8(img.width, img.height, &img.rgba, (w, h), kind, Edge::Wrap))
+}
+
+const FLAT_NORMAL: [u8; 4] = [128, 128, 255, 255];
+
 /// Renders every page of `layout` in `formats`. Entry keys are `diffuse[,normal[,glow]][=alpha]`
 /// (a plain diffuse takes its normal from [normal_for]); tiles smaller than their source use the
-/// source's mip of that size or a Lanczos resize.
+/// source's mip of that size or a resize. Every tile gets its own mip chain (colour in linear
+/// light, normals renormalised, edges wrapped as the source texture repeats) and the page levels
+/// are assembled from them, so distant LOD shows no colour from neighbouring tiles. A tile
+/// whose normal map is missing gets a flat normal.
 pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> Result<Vec<Page>> {
-    let composed: Vec<(usize, Vec<u8>, Vec<u8>, Option<Vec<u8>>)> = (0..layout.pages.len())
+    type Composed = (usize, Vec<(u32, u32, Vec<u8>)>, Vec<(u32, u32, Vec<u8>)>, Option<Vec<(u32, u32, Vec<u8>)>>);
+    let composed: Vec<Composed> = (0..layout.pages.len())
         .into_par_iter()
         .map(|pi| {
             let p = &layout.pages[pi];
             let alpha_page = is_alpha_page(&p.name);
-            let mut diffuse = vec![0u8; (p.width * p.height * 4) as usize];
-            let mut normal = vec![0u8; (p.width * p.height * 4) as usize];
-            let mut glow: Option<Vec<u8>> = None;
-            // DynDOLOD's glow page normal map is flat where no tile is.
-            if layout.entries.iter().any(|e| e.page == pi && crate::glow_atlas::is_glow_key(&e.texture)) {
-                for px in normal.chunks_exact_mut(4) {
-                    px.copy_from_slice(&[128, 128, 255, 255]);
-                }
-            }
-            for e in layout.entries.iter().filter(|e| e.page == pi) {
-                if crate::glow_atlas::is_glow_key(&e.texture) {
-                    // `diffuse,normal,glow` tile, each source scaled to the tile.
-                    let parts: Vec<&str> = e.texture.split(',').collect();
-                    let g = glow.get_or_insert_with(|| vec![0u8; (p.width * p.height * 4) as usize]);
-                    for (dst, src) in [(&mut diffuse, parts[0]), (&mut normal, parts[1]), (g, parts[2])] {
-                        if let Some(rgba) = crate::glow_atlas::load_sized(vfs, src, e.width, e.height) {
-                            blit(dst, p.width, &rgba, e.width, e.height, e.x, e.y);
-                        }
+            let levels = page_levels(p.width, p.height, formats.mips);
+            let entries: Vec<&lodforge_objlod::atlas_build::AtlasEntry> = layout.entries.iter().filter(|e| e.page == pi).collect();
+            let glow_page = entries.iter().any(|e| crate::glow_atlas::is_glow_key(&e.texture));
+            // Per tile: (diffuse, normal, glow) chains.
+            let chains: Vec<(Option<TileChain>, TileChain, Option<TileChain>)> = entries
+                .par_iter()
+                .map(|e| {
+                    let chain = |px: &[u8], kind: MipKind| TileChain::new(e.x, e.y, e.width, e.height, px, levels, kind, Edge::Wrap);
+                    let flat = || FLAT_NORMAL.repeat((e.width * e.height) as usize);
+                    let opaque = |mut px: Vec<u8>| {
+                        // wbPrepareImageAlpha for the DXT1 normal format: every pixel opaque.
+                        px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+                        px
+                    };
+                    if crate::glow_atlas::is_glow_key(&e.texture) {
+                        // `diffuse,normal,glow` tile, each source scaled to the tile.
+                        let parts: Vec<&str> = e.texture.split(',').collect();
+                        let d = load_tile(vfs, parts[0], e.width, e.height, MipKind::Color).map(|px| chain(&px, MipKind::Color));
+                        let n = opaque(load_tile(vfs, parts[1], e.width, e.height, MipKind::Normal).unwrap_or_else(flat));
+                        let g = load_tile(vfs, parts[2], e.width, e.height, MipKind::Color).map(|px| chain(&opaque(px), MipKind::Color));
+                        return (d, chain(&n, MipKind::Normal), g);
                     }
-                    continue;
-                }
-                let sources = e.texture.split('=').next().unwrap_or("");
-                let mut parts = sources.split(',');
-                let d = parts.next().unwrap_or("");
-                let Some(mut rgba) = crate::glow_atlas::load_sized(vfs, d, e.width, e.height) else { continue };
-                if alpha_page && formats.alpha_fill {
-                    fill_average_color(&mut rgba);
-                }
-                blit(&mut diffuse, p.width, &rgba, e.width, e.height, e.x, e.y);
-                let npath = match parts.next() {
-                    Some(n) if !n.is_empty() => n.to_string(),
-                    _ => normal_for(d, |n| vfs.read(&n.to_lowercase()).ok().flatten().is_some()),
-                };
-                let Some(n) = crate::glow_atlas::load_sized(vfs, &npath, e.width, e.height) else { continue };
-                blit(&mut normal, p.width, &n, e.width, e.height, e.x, e.y);
+                    let sources = e.texture.split('=').next().unwrap_or("");
+                    let mut parts = sources.split(',');
+                    let d = parts.next().unwrap_or("");
+                    let Some(mut rgba) = load_tile(vfs, d, e.width, e.height, MipKind::Color) else {
+                        return (None, chain(&flat(), MipKind::Normal), None);
+                    };
+                    if alpha_page && formats.alpha_fill {
+                        fill_average_color(&mut rgba);
+                    }
+                    let npath = match parts.next() {
+                        Some(n) if !n.is_empty() => n.to_string(),
+                        _ => normal_for(d, |n| vfs.read(&n.to_lowercase()).ok().flatten().is_some()),
+                    };
+                    let n = opaque(load_tile(vfs, &npath, e.width, e.height, MipKind::Normal).unwrap_or_else(flat));
+                    (Some(chain(&rgba, MipKind::Color)), chain(&n, MipKind::Normal), None)
+                })
+                .collect();
+            let mut d_tiles = Vec::new();
+            let mut n_tiles = Vec::new();
+            let mut g_tiles = Vec::new();
+            for (d, n, g) in chains {
+                d_tiles.extend(d);
+                n_tiles.push(n);
+                g_tiles.extend(g);
             }
-            // wbPrepareImageAlpha for the DXT1 normal format: every pixel opaque.
-            for px in normal.chunks_exact_mut(4).chain(glow.iter_mut().flat_map(|g| g.chunks_exact_mut(4))) {
-                px[3] = 255;
-            }
-            (pi, diffuse, normal, glow)
+            let d = assemble(p.width, p.height, levels, [0, 0, 0, 0], &d_tiles);
+            let n = assemble(p.width, p.height, levels, FLAT_NORMAL, &n_tiles);
+            let g = glow_page.then(|| assemble(p.width, p.height, levels, [0, 0, 0, 255], &g_tiles));
+            (pi, d, n, g)
         })
         .collect();
     let mut pages = Vec::new();
-    for (pi, diffuse, normal, glow) in composed {
+    for (pi, mut d_levels, n_levels, g_levels) in composed {
         let p = &layout.pages[pi];
         let alpha_page = is_alpha_page(&p.name);
-        let glow_page = glow.is_some();
-        let (mut d_levels, n_levels) = rayon::join(|| mip_chain_n(p.width, p.height, diffuse, formats.mips), || mip_chain_n(p.width, p.height, normal, formats.mips));
+        let glow_page = g_levels.is_some();
         if alpha_page && formats.alpha_fill {
             let tiles: Vec<(u32, u32, u32, u32)> = layout.entries.iter().filter(|e| e.page == pi).map(|e| (e.x, e.y, e.width, e.height)).collect();
             keep_alpha_coverage(&mut d_levels, &tiles);
@@ -268,8 +372,8 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
         let d_enc = if glow_page { Encoding::Bc7 } else if alpha_page { formats.alpha_diffuse } else { formats.diffuse };
         let d_dds = encode_as(gpu, d_enc, &d_levels)?;
         let n_dds = encode_as(gpu, formats.normal, &n_levels)?;
-        let g_dds = match glow {
-            Some(g) => Some(encode(gpu, &mip_chain_n(p.width, p.height, g, formats.mips))?),
+        let g_dds = match &g_levels {
+            Some(g) => Some(encode(gpu, g)?),
             None => None,
         };
         pages.push(Page { name: p.name.clone(), diffuse: d_dds, normal: n_dds, glow: g_dds, top: (d_levels.into_iter().next().unwrap().2, n_levels.into_iter().next().unwrap().2), width: p.width, height: p.height });
@@ -381,6 +485,27 @@ mod tests {
         assert!(before < 0.25, "{before}");
         assert!(after >= 0.25, "{after}");
         assert_eq!(levels.len(), 3);
+    }
+
+    #[test]
+    fn page_mips_keep_tiles_apart() {
+        // Two 4x4 tiles side by side, solid red and solid blue: every page level keeps them pure
+        // (a whole-page filter mixes them into purple at the shared edge).
+        let red = TileChain::new(0, 0, 4, 4, &[255, 0, 0, 255].repeat(16), 8, MipKind::Color, Edge::Wrap);
+        let blue = TileChain::new(4, 0, 4, 4, &[0, 0, 255, 255].repeat(16), 8, MipKind::Color, Edge::Wrap);
+        let levels = assemble(8, 4, page_levels(8, 4, 8), [0, 0, 0, 0], &[red, blue]);
+        assert_eq!(levels.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(), [(8, 4), (4, 2), (2, 1), (1, 1)]);
+        for (w, h, px) in &levels[..3] {
+            for y in 0..*h {
+                for x in 0..*w {
+                    let p = &px[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize];
+                    let want: [u8; 4] = if x < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] };
+                    assert_eq!(p, want, "level {w}x{h} at {x},{y}");
+                }
+            }
+        }
+        // Below one texel per tile the page level is the box average of the level above.
+        assert_eq!(&levels[3].2[..3], &[128, 0, 128]);
     }
 
     #[test]

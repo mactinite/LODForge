@@ -131,10 +131,12 @@ fn final_images(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, views: &[(Item, Vi
         .iter()
         .map(|(_, v)| {
             let mut img = imgs.next().unwrap_or_default();
-            finish_alpha(&mut img, v.width, s.coverage_threshold);
+            // Supersampled renders carry real edge coverage: keep it (see finish_alpha_soft).
+            let finish = |img: &mut Vec<u8>| if render::SUPERSAMPLE > 1 { finish_alpha_soft(img, v.width) } else { finish_alpha(img, v.width, s.coverage_threshold) };
+            finish(&mut img);
             let normal = normals.then(|| {
                 let mut n = imgs.next().unwrap_or_default();
-                finish_alpha(&mut n, v.width, s.coverage_threshold);
+                finish(&mut n);
                 n
             });
             (img, normal)
@@ -305,15 +307,33 @@ pub const BLEED_RADIUS: i32 = 2;
 /// the opaque texels within [`BLEED_RADIUS`] (a square, edges clamped), or the average opaque
 /// colour of the image when there are none.
 pub fn finish_alpha(img: &mut [u8], width: u32, thr: u8) {
+    finish_alpha_with(img, width, thr, false);
+}
+
+/// Coverage below this is treated as empty by [finish_alpha_soft] (stray single samples).
+pub const SOFT_ALPHA_MIN: u8 = 16;
+
+/// [finish_alpha] that keeps the rendered coverage as alpha instead of cutting it to 0 / 255:
+/// texels with any real coverage are un-premultiplied and keep their partial alpha, so the
+/// game's alpha test on the bilinearly filtered texture traces a smooth silhouette between
+/// texels instead of a staircase, and thin foliage fades in the mips instead of breaking up into
+/// pixel noise. TexGen cuts at the coverage threshold.
+pub fn finish_alpha_soft(img: &mut [u8], width: u32) {
+    finish_alpha_with(img, width, SOFT_ALPHA_MIN, true);
+}
+
+fn finish_alpha_with(img: &mut [u8], width: u32, thr: u8, soft: bool) {
     let mut sum = [0u64; 3];
     let mut n = 0u64;
     for px in img.chunks_exact_mut(4) {
         let a = px[3];
-        if opaque(px, thr) {
+        if if soft { a >= thr } else { opaque(px, thr) } {
             for c in &mut px[..3] {
                 *c = ((u32::from(*c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
             }
-            px[3] = 255;
+            if !soft {
+                px[3] = 255;
+            }
             for k in 0..3 {
                 sum[k] += u64::from(px[k]);
             }

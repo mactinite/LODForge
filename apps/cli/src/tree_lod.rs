@@ -140,23 +140,26 @@ pub fn atlas_dds(p: &Profile, t: &TreeLod, gpu: &Gpu) -> Result<Option<Vec<u8>>>
     if w == 0 {
         return Ok(None);
     }
-    let mut rgba = vec![0u8; (w * h * 4) as usize];
     let mut tiles = Vec::new();
+    let mut chains = Vec::new();
     for s in &t.slots {
         let Some(tree) = t.trees.iter().find(|tr| tr.crc == s.crc && tr.index != -1) else { continue };
         let Some(bytes) = p.vfs.read(&tree.billboard.to_lowercase())? else { continue };
         let info = lodforge_dds::parse(&bytes)?;
         let mut img = lodforge_dds::decode(&bytes, &info, 0)?;
         crate::object_atlas::fill_average_color(&mut img.rgba);
-        for row in 0..s.h.min(img.height) {
-            let d = (((s.y + row) * w + s.x) * 4) as usize;
+        let (tw, th) = (s.w.min(img.width), s.h.min(img.height));
+        let mut px = vec![0u8; (tw * th * 4) as usize];
+        for row in 0..th {
             let src = (row * img.width * 4) as usize;
-            let n = (s.w.min(img.width) * 4) as usize;
-            rgba[d..d + n].copy_from_slice(&img.rgba[src..src + n]);
+            px[(row * tw * 4) as usize..((row + 1) * tw * 4) as usize].copy_from_slice(&img.rgba[src..src + (tw * 4) as usize]);
         }
-        tiles.push((s.x, s.y, s.w.min(img.width), s.h.min(img.height)));
+        // Each billboard is filtered on its own, so lower mips never pull in the transparent
+        // padding or a neighbouring billboard.
+        chains.push(crate::object_atlas::TileChain::new(s.x, s.y, tw, th, &px, TREE_ATLAS_MIPS, lodforge_dds::mips::MipKind::Color, lodforge_dds::mips::Edge::Clamp));
+        tiles.push((s.x, s.y, tw, th));
     }
-    let mut levels = crate::object_atlas::mip_chain_n(w, h, rgba, TREE_ATLAS_MIPS);
+    let mut levels = crate::object_atlas::assemble(w, h, TREE_ATLAS_MIPS, [0, 0, 0, 0], &chains);
     crate::object_atlas::keep_alpha_coverage(&mut levels, &tiles);
     let images: Vec<RgbaImage<'_>> = levels.iter().map(|(w, h, p)| RgbaImage { width: *w, height: *h, rgba: p }).collect();
     let blocks = gpu.encode_bc7(&images)?;

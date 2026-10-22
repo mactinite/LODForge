@@ -33,6 +33,8 @@ pub struct Stats {
     /// Source parts remapped into an atlas tile, and those re-cut along UV tile edges first.
     pub atlased_parts: AtomicUsize,
     pub reuv_parts: AtomicUsize,
+    /// Parts re-cut at their atlas tile edges because their UVs overshoot the tile.
+    pub overshoot_parts: AtomicUsize,
     /// Parts whose colours the VC side file marked white (dropped).
     pub vc_whitened: AtomicUsize,
 }

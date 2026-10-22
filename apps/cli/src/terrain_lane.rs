@@ -24,6 +24,7 @@ pub struct LaneArgs {
     /// Extra seasons (codes as given on the command line).
     pub seasons: Vec<String>,
     pub mips: TerrainMips,
+    pub filter: crate::terrain_textures::TerrainFilter,
     pub json: bool,
     /// Fill cells without LAND from the shipped terrain LOD meshes (`--no-lod-fill` clears it).
     pub lod_fill: bool,
@@ -132,6 +133,7 @@ fn run(a: &LaneArgs, shared: &Shared) {
                         top: None,
                         batch: 96,
                         mips: a.mips,
+                        filter: a.filter,
                     };
                     step(world, "terrain-textures", season.as_deref(), &mut || crate::terrain_textures::run_in(&ctx, &args));
                 }

@@ -111,6 +111,7 @@ pub const F_WATER: u32 = 128;
 pub const F_LARGE_REF: u32 = 256;
 pub const F_HAS_NORMALS: u32 = 1024;
 pub const F_HAS_TANGENTS: u32 = 2048;
+pub const F_CLAMP: u32 = 4096;
 
 pub fn kind_index(k: ShapeKind) -> u32 {
     match k {
@@ -159,6 +160,9 @@ impl MaterialGpu {
         }
         if !s.tangents.is_empty() && !s.bitangents.is_empty() {
             flags |= F_HAS_TANGENTS;
+        }
+        if m.clamp {
+            flags |= F_CLAMP;
         }
         MaterialGpu {
             flags,
@@ -320,6 +324,8 @@ pub struct Layouts {
     pub materials: wgpu::BindGroupLayout,
     pub textures: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
+    /// Clamp-to-edge twin of `sampler` for shapes with `TextureClampMode` 0.
+    pub sampler_clamp: wgpu::Sampler,
     pub white: Arc<GpuTexture>,
     pub flat_normal: Arc<GpuTexture>,
     pub missing: Arc<GpuTexture>,
@@ -381,6 +387,12 @@ impl Layouts {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -394,11 +406,23 @@ impl Layouts {
             anisotropy_clamp: 8,
             ..Default::default()
         });
+        let sampler_clamp = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lod clamp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
         Layouts {
             globals,
             materials,
             textures,
             sampler,
+            sampler_clamp,
             white: Arc::new(textures::solid(
                 device,
                 queue,
@@ -449,6 +473,10 @@ impl Layouts {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_clamp),
                 },
             ],
         });

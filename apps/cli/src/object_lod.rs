@@ -62,6 +62,11 @@ pub struct Args {
     /// shapes keep their own texture, as LODGen does).
     #[arg(long)]
     pub reuv: bool,
+    /// Remap shapes whose UVs overshoot their atlas tile (within the export's AtlasTolerance)
+    /// as they are, reaching into neighbouring tiles, as LODGen does (default: re-cut them at
+    /// the tile edges).
+    #[arg(long)]
+    pub loose_atlas_uv: bool,
     /// Build without removal and score candidate hidden-face rules against --golden (the
     /// triangles the golden files lack are the ones LODGen removed).
     #[arg(long)]
@@ -325,6 +330,9 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         if a.reuv {
             opts.reuv = true;
         }
+        if a.loose_atlas_uv {
+            opts.recut_overshoot = false;
+        }
         let lod = ObjectLod::new(export, atlas, opts, grid, &read);
         let load_ms = t0.elapsed().as_millis();
         if !lod.missing_models.is_empty() {
@@ -440,7 +448,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             }
         }
         println!(
-            "  placements {}, missing meshes {}, tree billboards {} (without a FlatTextures line {}), grass instances {} (unmapped {}), passthru shapes {}, HD shapes {}, shapes split at 65,535 {}, AltTextures applied {}, parts atlased {} (re-cut {}), VC-whitened {}",
+            "  placements {}, missing meshes {}, tree billboards {} (without a FlatTextures line {}), grass instances {} (unmapped {}), passthru shapes {}, HD shapes {}, shapes split at 65,535 {}, AltTextures applied {}, parts atlased {} (re-cut {}, cut at tile edges {}), VC-whitened {}",
             Stats::get(&s.placed),
             Stats::get(&s.missing_meshes),
             Stats::get(&s.billboards),
@@ -453,6 +461,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             Stats::get(&s.alt_textures),
             Stats::get(&s.atlased_parts),
             Stats::get(&s.reuv_parts),
+            Stats::get(&s.overshoot_parts),
             Stats::get(&s.vc_whitened)
         );
         if let Some(g) = &a.golden {

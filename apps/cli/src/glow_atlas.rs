@@ -9,7 +9,6 @@
 //! The key collection itself is in [`crate::object_atlas_plan`]; this module lays the page out,
 //! merges layouts and loads tiles at a size.
 
-use lodforge_archive::Vfs;
 use lodforge_objlod::atlas_build::{AtlasEntry, AtlasLayout, AtlasPage};
 
 /// Largest glow tile side.
@@ -94,30 +93,6 @@ pub fn merge(mut main: AtlasLayout, other: AtlasLayout) -> AtlasLayout {
 /// (spec 1.2 and 7.2); the other rows name one or two.
 pub fn is_glow_key(texture: &str) -> bool {
     texture.split('=').next().unwrap_or("").split(',').filter(|p| !p.trim().is_empty()).count() >= 3
-}
-
-/// Decodes `path` at `w` x `h`: the mip of that size when the texture has one, else the top mip
-/// resized with Lanczos.
-pub fn load_sized(vfs: &Vfs, path: &str, w: u32, h: u32) -> Option<Vec<u8>> {
-    let b = vfs.read(&path.to_lowercase()).ok().flatten()?;
-    let info = lodforge_dds::parse(&b).ok()?;
-    let (mut mw, mut mh, mut level) = (info.width, info.height, 0u32);
-    while (mw > w || mh > h) && level + 1 < info.mip_count {
-        mw = (mw / 2).max(1);
-        mh = (mh / 2).max(1);
-        level += 1;
-    }
-    if (mw, mh) == (w, h)
-        && let Ok(img) = lodforge_dds::decode(&b, &info, level)
-        && (img.width, img.height) == (w, h)
-    {
-        return Some(img.rgba);
-    }
-    let img = lodforge_dds::decode(&b, &info, 0).ok()?;
-    if (img.width, img.height) == (w, h) {
-        return Some(img.rgba);
-    }
-    Some(lodforge_terrain::image::Image::from_rgba8(img.width, img.height, &img.rgba).lanczos(w, h).to_rgba8())
 }
 
 #[cfg(test)]

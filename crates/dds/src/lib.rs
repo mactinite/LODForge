@@ -10,6 +10,7 @@
 use texture2ddecoder as t2d;
 
 pub mod bc1;
+pub mod mips;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

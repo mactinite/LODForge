@@ -81,7 +81,15 @@ pub struct Options<'a> {
     /// their own texture and asks DynDOLOD for a tiled mini atlas instead (`MiniAtlasExport`,
     /// spec 7.4), which `lodforge_dyndolod::sidefiles::mini_atlas_requests` reproduces.
     pub reuv: bool,
+    /// A shape remapped into an atlas tile whose UVs leave 0..1 (by up to `atlas_tolerance`) is
+    /// re-cut at the tile edges first, so every piece samples its own tile instead of reaching
+    /// into the neighbouring tiles on the page. LODGen remaps such shapes as they are.
+    pub recut_overshoot: bool,
 }
+
+/// UV slack a shape may have past its atlas tile without being re-cut (half a texel of a
+/// 256-px tile).
+pub const ATLAS_UV_SLACK: f32 = 0.002;
 
 impl Default for Options<'_> {
     fn default() -> Self {
@@ -100,6 +108,7 @@ impl Default for Options<'_> {
             flat: FlatList::default(),
             atlas_tolerance: 0.5,
             reuv: false,
+            recut_overshoot: true,
             grass: None,
             height_map: false,
         }
@@ -285,7 +294,7 @@ impl<'a> ObjectLod<'a> {
         let segments = if q.level == 4 { 16 } else { 1 };
         let mut chunks: BTreeMap<String, Vec<Chunk>> = BTreeMap::new();
         let (mut placed, mut missing, mut billboards, mut billboards_missing, mut alt_used, mut total_tris, mut culled) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
-        let (mut atlased, mut reuv_parts, mut vc_white) = (0usize, 0usize, 0usize);
+        let (mut atlased, mut reuv_parts, mut vc_white, mut overshoot_parts) = (0usize, 0usize, 0usize, 0usize);
         let view = if self.opts.remove_unseen_faces { self.opts.terrain.as_deref().map(|t| t.view(q)) } else { None };
         let rule = self.opts.hidden_rule;
         for &ri in refs {
@@ -362,12 +371,28 @@ impl<'a> ObjectLod<'a> {
                     m.rows.truncate(1);
                 }
                 let recut: Option<MeshPart>;
+                let unit_scale = remap.as_ref().is_some_and(|m| m.rows[0].scale.is_none_or(|s| s == (1.0, 1.0)));
                 let part = if remap.is_none() && self.opts.reuv && self.atlas.lookup(&textures[0], normal_slot, glow_slot, alpha).is_some() && !part.name.to_ascii_lowercase().contains("noreuv") {
                     recut = Some(crate::reuv::recut(part));
                     reuv_parts += 1;
                     let p = recut.as_ref().unwrap();
                     remap = self.atlas.resolve(&textures[0], normal_slot, glow_slot, alpha, &p.uvs, tol);
                     p
+                } else if remap.is_some() && self.opts.recut_overshoot && unit_scale && crate::reuv::needs_recut(&part.uvs, ATLAS_UV_SLACK) {
+                    // Overshooting the tile: cut at the tile edges, every piece wraps into 0..1.
+                    recut = Some(crate::reuv::recut(part));
+                    let p = recut.as_ref().unwrap();
+                    match self.atlas.resolve(&textures[0], normal_slot, glow_slot, alpha, &p.uvs, tol) {
+                        Some(mut m) => {
+                            if passthru {
+                                m.rows.truncate(1);
+                            }
+                            remap = Some(m);
+                            overshoot_parts += 1;
+                            p
+                        }
+                        None => part,
+                    }
                 } else {
                     part
                 };
@@ -548,6 +573,7 @@ impl<'a> ObjectLod<'a> {
         Stats::add(&self.stats.culled_tris[k], culled);
         Stats::add(&self.stats.atlased_parts, atlased);
         Stats::add(&self.stats.reuv_parts, reuv_parts);
+        Stats::add(&self.stats.overshoot_parts, overshoot_parts);
         Stats::add(&self.stats.vc_whitened, vc_white);
         let mut shapes: Vec<BuiltShape> = Vec::new();
         for list in chunks.into_values() {
