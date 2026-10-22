@@ -116,6 +116,75 @@ function renderSeasons() {
   $("seasonHint").textContent = state.info.seasons.length ? "The default season is always built; tick the extra seasons to generate." : "No season swap files found, so only the default season can be built.";
 }
 
+// Quality: a level sets every setting; changing a setting by hand shows "Custom".
+const ATLAS_TILES = [256, 512, 1024, 2048];
+const LEVELS = {
+  performance: { preset: "Low", bc7: "fast", terrainFilter: "hq", atlasTile: 1, billboardScale: 75 },
+  balanced: { preset: "Medium", bc7: "high", terrainFilter: "hq", atlasTile: 2, billboardScale: 100 },
+  quality: { preset: "High", bc7: "high", terrainFilter: "hq", atlasTile: 3, billboardScale: 150 },
+};
+const LEVEL_NAMES = { performance: "Performance", balanced: "Balanced", quality: "Quality", custom: "Custom" };
+const QUALITY_KEYS = Object.keys(LEVELS.balanced);
+const EXPLAIN = {
+  preset: {
+    Low: "DynDOLOD's Low rules: only larger objects get LOD. Small rocks, cliff trims, roads, fences, walls and clutter are left out; trees are flat billboards everywhere.",
+    Medium: "DynDOLOD's Medium rules: most objects get LOD. Hay, road chunks, snow drifts, small rocks and rock piles are left out; trees are billboards.",
+    High: "DynDOLOD's High rules: every object with a LOD model gets LOD, small rocks and road chunks included. Trees near you (LOD4) are 3D models, billboards further out. The most draw calls and VRAM.",
+  },
+  bc7: {
+    fast: "BC7 mode 6 on the GPU: seconds per worldspace, but smooth gradients and foliage break into visible 4x4 blocks (terrain normal maps show a block grid).",
+    high: "All BC7 modes on the CPU for normal maps, billboards and atlases; terrain colour stays on the GPU because it shows no blocking. Block edges on billboards all but disappear and fine foliage detail survives; on terrain normal maps they roughly halve. Adds about 15 s to Tamriel's terrain textures and 13 s to the billboards.",
+    best: "Thorough search for every texture, terrain colour included. Measured no gain over High quality; terrain textures take about 7x and billboards about 2x as long.",
+  },
+  terrainFilter: {
+    hq: "Every LOD level is resized from the whole stitched tile, colour is averaged in linear light and normal maps are renormalised, so distant terrain keeps its brightness (it lost up to 12% before) and its relief.",
+    xlodgen: "Reproduces xLODGen: each cell is resized on its own and mips are 8-bit box filters in gamma space. Only useful for comparing against xLODGen output.",
+  },
+};
+
+function qualityValues() {
+  return { preset: $("preset").value, bc7: $("bc7").value, terrainFilter: $("terrainFilter").value, atlasTile: Number($("atlasTile").value), billboardScale: Number($("billboardScale").value) };
+}
+
+function syncQualityText() {
+  for (const k of ["preset", "bc7", "terrainFilter"]) $(k + "Explain").textContent = EXPLAIN[k][$(k).value] || "";
+  const tile = ATLAS_TILES[Number($("atlasTile").value)];
+  $("atlasTileOut").textContent = `${tile} px (full textures ${Math.max(64, tile / 4)} px)`;
+  const k = Number($("billboardScale").value);
+  $("billboardScaleOut").textContent = `${k}% (${(11 / (k / 100)).toFixed(1)} units/px, up to ${Math.min(4096, Math.max(256, Math.round(1024 * k / 100)))} px)`;
+}
+
+function currentLevel() {
+  const v = qualityValues();
+  return Object.keys(LEVELS).find((name) => QUALITY_KEYS.every((key) => LEVELS[name][key] === v[key])) || "custom";
+}
+
+function setLevel(name) {
+  const r = document.querySelector(`input[name=level][value="${name}"]`);
+  if (r) r.checked = true;
+}
+
+function applyLevel(name) {
+  const l = LEVELS[name];
+  if (!l) return;
+  for (const key of QUALITY_KEYS) $(key).value = String(l[key]);
+  syncQualityText();
+  storeQuality();
+}
+
+function storeQuality() { store("quality", JSON.stringify(qualityValues())); }
+
+function initQuality() {
+  let saved = null;
+  try { saved = JSON.parse(load("quality", "null")); } catch (_) {}
+  const values = saved && typeof saved === "object" ? { ...LEVELS.balanced, ...saved } : LEVELS.balanced;
+  for (const key of QUALITY_KEYS) $(key).value = String(values[key]);
+  syncQualityText();
+  setLevel(currentLevel());
+  document.querySelectorAll("input[name=level]").forEach((r) => r.addEventListener("change", () => { if (r.value !== "custom") applyLevel(r.value); }));
+  for (const key of QUALITY_KEYS) $(key).addEventListener("input", () => { syncQualityText(); setLevel(currentLevel()); storeQuality(); });
+}
+
 function selection() {
   const worlds = [...document.querySelectorAll("[data-world]:checked")].map((e) => e.dataset.world);
   const seasons = [...document.querySelectorAll("[data-season]:checked")].map((e) => e.dataset.season);
@@ -126,6 +195,8 @@ function selection() {
     mode: "dyndolod",
     materials: document.querySelector("input[name=materials]:checked").value,
     preset: $("preset").value, plugins: $("plugins").checked, occlusion: $("occlusion").checked,
+    bc7: $("bc7").value, terrain_filter: $("terrainFilter").value,
+    billboard_scale: Number($("billboardScale").value) / 100, atlas_max_tile: ATLAS_TILES[Number($("atlasTile").value)],
     grass: $("grass").value, grass_source: $("grassSource").value, grass_density: Number($("grassDensity").value) || null,
     mo2_mod: dest === "mo2" ? $("modName").value.trim() : null,
     out: dest === "folder" ? $("outFolder").value.trim() : null,
@@ -139,7 +210,9 @@ function review() {
   const materials = s.materials === "pbr" ? "PBR (Community Shaders)" : "standard (non-PBR)";
   const stages = [s.texgen && "billboards", s.terrain && "terrain", s.objects && `objects (DynDOLOD ${s.preset})`, s.trees && "trees",
     grass, s.objects && s.plugins && "dynamic LOD plugins", s.objects && s.occlusion && "occlusion"].filter(Boolean);
-  $("review").innerHTML = `<b>Review</b><br>${s.worlds.length} worldspace(s): ${s.worlds.join(", ") || "none"}<br>Stages: ${stages.join(", ") || "none"}<br>Materials: ${materials}<br>Seasons: default${s.seasons.length ? " + " + s.seasons.join(", ") : ""}<br>Output: ${s.mo2_mod ? `MO2 mod "${s.mo2_mod}"${s.enable ? " (enabled)" : ""}` : s.out || "(choose a folder)"}`;
+  const bc7 = { fast: "fast BC7", high: "high-quality BC7", best: "best BC7" }[s.bc7];
+  const quality = `${LEVEL_NAMES[currentLevel()]} (${s.preset} object detail, ${bc7}, atlas tiles ${s.atlas_max_tile} px, billboards ${Math.round(s.billboard_scale * 100)}%${s.terrain_filter === "xlodgen" ? ", xLODGen terrain resampling" : ""})`;
+  $("review").innerHTML = `<b>Review</b><br>${s.worlds.length} worldspace(s): ${s.worlds.join(", ") || "none"}<br>Stages: ${stages.join(", ") || "none"}<br>Quality: ${quality}<br>Materials: ${materials}<br>Seasons: default${s.seasons.length ? " + " + s.seasons.join(", ") : ""}<br>Output: ${s.mo2_mod ? `MO2 mod "${s.mo2_mod}"${s.enable ? " (enabled)" : ""}` : s.out || "(choose a folder)"}`;
 }
 
 async function startBuild() {
@@ -282,6 +355,7 @@ function syncGrass() {
   store("grass", g);
 }
 $("grass").addEventListener("change", syncGrass);
+initQuality();
 $("grass").value = load("grass", "off");
 if (!$("grass").value) $("grass").value = "off";
 syncGrass();

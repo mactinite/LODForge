@@ -215,6 +215,19 @@ struct BuildRequest {
     grass_source: Option<String>,
     #[serde(default)]
     grass_density: Option<f32>,
+    /// BC7 encoder: `fast`, `high` or `best` (`--bc7`; the CLI default is `high`).
+    #[serde(default)]
+    bc7: Option<String>,
+    /// Terrain texture resampling: `hq` or `xlodgen` (`--terrain-filter`).
+    #[serde(default)]
+    terrain_filter: Option<String>,
+    /// Billboard resolution multiplier (`--billboard-scale`).
+    #[serde(default)]
+    billboard_scale: Option<f32>,
+    /// Object LOD atlas tile cap for LOD textures (`--atlas-max-tile`; full textures get a
+    /// quarter, `--atlas-full-max-tile`).
+    #[serde(default)]
+    atlas_max_tile: Option<u32>,
     mo2_mod: Option<String>,
     out: Option<String>,
     enable: bool,
@@ -261,6 +274,18 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
     }
     if let Some(m) = &req.materials {
         c.args(["--materials", m]);
+    }
+    if let Some(q) = &req.bc7 {
+        c.args(["--bc7", q]);
+    }
+    if let Some(f) = &req.terrain_filter {
+        c.args(["--terrain-filter", f]);
+    }
+    if let Some(k) = req.billboard_scale {
+        c.args(["--billboard-scale", &k.to_string()]);
+    }
+    if let Some(t) = req.atlas_max_tile {
+        c.args(["--atlas-max-tile", &t.to_string(), "--atlas-full-max-tile", &(t / 4).max(64).to_string()]);
     }
     if let Some(g) = req.grass.as_deref().filter(|g| *g != "off") {
         c.args(["--grass", g]);

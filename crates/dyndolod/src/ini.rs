@@ -64,6 +64,11 @@ impl Ini {
         self.sections.iter().filter(move |s| s.name.eq_ignore_ascii_case(name))
     }
 
+    /// Sets `key` in `section` (appended, so it wins over earlier values in [Ini::get]).
+    pub fn set(&mut self, section: &str, key: &str, value: &str) {
+        self.sections.push(Section { name: section.to_string(), entries: vec![(key.to_string(), value.to_string())] });
+    }
+
     pub fn get(&self, section: &str, key: &str) -> Option<&str> {
         self.sections.iter().filter(|s| s.name.eq_ignore_ascii_case(section)).flat_map(|s| s.entries.iter()).filter(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str()).last()
     }

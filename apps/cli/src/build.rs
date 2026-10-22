@@ -297,6 +297,11 @@ pub fn run(a: &Args) -> Result<()> {
             Ok(mut c) => {
                 c.windows = a.dyn_opts.windows;
                 c.pbr = a.materials.pbr();
+                for (key, v) in [("ObjectLODMaxTileSize", a.dyn_opts.atlas_max_tile), ("FullTextureMaxTileSize", a.dyn_opts.atlas_full_max_tile)] {
+                    if let Some(v) = v {
+                        c.ini.set("DynDOLOD", key, &v.next_power_of_two().clamp(64, 4096).to_string());
+                    }
+                }
                 if !a.json {
                     println!("DynDOLOD configuration: {} rules, {} LOD models, preset {}", c.rules.len(), c.index.len(), a.dyn_opts.preset);
                 }

@@ -3,7 +3,10 @@
 // Third-party components and their notices: THIRD-PARTY-NOTICES.txt.
 //! GPU compute via wgpu (D3D12/Vulkan on Windows): BC7 encoding and terrain LOD baking.
 
+pub mod bc7_cpu;
 pub mod terrain_spec;
+
+pub use bc7_cpu::Bc7Quality;
 
 use std::sync::mpsc;
 
@@ -47,6 +50,8 @@ pub struct Gpu {
     pub(crate) level_h: wgpu::ComputePipeline,
     pub(crate) level_v: wgpu::ComputePipeline,
     pub(crate) level_copy: wgpu::ComputePipeline,
+    /// [Bc7Quality] as u8: which encoder [Gpu::encode_bc7] uses.
+    bc7_quality: std::sync::atomic::AtomicU8,
 }
 
 /// An RGBA8 image to encode (`rgba.len() == width * height * 4`).
@@ -119,12 +124,33 @@ impl Gpu {
             })
         };
         let (level_h, level_v, level_copy) = (level_entry("level_h"), level_entry("level_v"), level_entry("level_copy"));
-        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy })
+        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy, bc7_quality: std::sync::atomic::AtomicU8::new(bc7_cpu::default_quality().as_u8()) })
     }
 
-    /// BC7 (mode 6) encodes RGBA8 images; returns each image's block data (16 bytes per 4x4
-    /// block, row-major), ready to follow a DDS header. Images are submitted together.
+    /// Chooses the BC7 encoder for later [Gpu::encode_bc7] calls (default [Bc7Quality::High]).
+    pub fn set_bc7_quality(&self, q: Bc7Quality) {
+        self.bc7_quality.store(q.as_u8(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn bc7_quality(&self) -> Bc7Quality {
+        Bc7Quality::from_u8(self.bc7_quality.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// BC7 encodes RGBA8 images; returns each image's block data (16 bytes per 4x4 block,
+    /// row-major), ready to follow a DDS header. [Bc7Quality::Fast] uses the GPU mode-6 encoder,
+    /// the others the multi-mode CPU encoder ([bc7_cpu]).
     pub fn encode_bc7(&self, images: &[RgbaImage<'_>]) -> Result<Vec<Vec<u8>>> {
+        match self.bc7_quality() {
+            Bc7Quality::Fast => self.encode_bc7_mode6(images),
+            q => {
+                use rayon::prelude::*;
+                Ok(images.par_iter().map(|img| bc7_cpu::encode(img, q)).collect())
+            }
+        }
+    }
+
+    /// BC7 mode 6 on the GPU (one round trip for all images).
+    pub fn encode_bc7_mode6(&self, images: &[RgbaImage<'_>]) -> Result<Vec<Vec<u8>>> {
         struct Job {
             out: wgpu::Buffer,
             readback: wgpu::Buffer,

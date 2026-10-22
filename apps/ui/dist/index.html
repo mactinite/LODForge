@@ -44,12 +44,45 @@
     <h2>DynDOLOD</h2>
     <p class="hint">Object LOD with DynDOLOD's rules and LOD models, plus dynamic LOD plugins and occlusion. Reads DynDOLOD's configuration from tools\DynDOLOD.</p>
     <div>
-      <div class="row">
-        <label>Preset <select id="preset"><option>Low</option><option selected>Medium</option><option>High</option></select></label>
-      </div>
       <label class="check"><input type="checkbox" id="plugins" checked> <span>Dynamic LOD: DynDOLOD.esm, DynDOLOD.esp and the DynDOLOD DLL NG data files</span></label>
       <label class="check"><input type="checkbox" id="occlusion" checked> <span>Occlusion: Occlusion.esp from the new terrain and object LOD</span></label>
       <p class="hint">Earlier LOD output enabled in the profile (LODForge mods, DynDOLOD output) is not read.</p>
+    </div>
+    <h2>Quality</h2>
+    <p class="hint">Pick a level, or change any setting below (the level then shows Custom). Every setting says what it changes.</p>
+    <div class="levels" id="levels" role="radiogroup" aria-label="Quality level">
+      <label class="level"><input type="radio" name="level" value="performance"><span><b>Performance</b><small>Fewer LOD objects, fast texture compression, smaller textures. Quickest build, lightest on VRAM.</small></span></label>
+      <label class="level"><input type="radio" name="level" value="balanced" checked><span><b>Balanced</b><small>DynDOLOD's Medium rules, high-quality compression, default texture sizes. Recommended.</small></span></label>
+      <label class="level"><input type="radio" name="level" value="quality"><span><b>Quality</b><small>3D trees near you, larger atlas tiles and sharper billboards. Bigger output, more VRAM.</small></span></label>
+      <label class="level"><input type="radio" name="level" value="custom"><span><b>Custom</b><small>Your own mix of the settings below.</small></span></label>
+    </div>
+    <div class="settings">
+      <div class="setting">
+        <label for="preset">Object LOD detail</label>
+        <select id="preset"><option value="Low">Low</option><option value="Medium" selected>Medium</option><option value="High">High</option></select>
+        <p class="explain" id="presetExplain"></p>
+      </div>
+      <div class="setting">
+        <label for="bc7">Texture compression (BC7)</label>
+        <select id="bc7"><option value="fast">Fast (GPU)</option><option value="high" selected>High quality</option><option value="best">Best (slowest)</option></select>
+        <p class="explain" id="bc7Explain"></p>
+      </div>
+      <div class="setting">
+        <label for="terrainFilter">Terrain texture resampling</label>
+        <select id="terrainFilter"><option value="hq" selected>Smooth (recommended)</option><option value="xlodgen">xLODGen-compatible</option></select>
+        <p class="explain" id="terrainFilterExplain"></p>
+      </div>
+      <div class="setting">
+        <label for="atlasTile">Object texture detail <output id="atlasTileOut"></output></label>
+        <input type="range" id="atlasTile" min="0" max="3" step="1" value="2" list="atlasTicks">
+        <datalist id="atlasTicks"><option value="0"></option><option value="1"></option><option value="2"></option><option value="3"></option></datalist>
+        <p class="explain">Largest size a texture may keep on the object LOD atlas. Bigger keeps buildings and rocks sharper up close; atlas pages, disk and VRAM grow with it.</p>
+      </div>
+      <div class="setting">
+        <label for="billboardScale">Billboard resolution <output id="billboardScaleOut"></output></label>
+        <input type="range" id="billboardScale" min="50" max="200" step="25" value="100">
+        <p class="explain">Pixels per tree and trunk billboard (needs "Tree billboards" below). Higher makes distant trees crisper; the tree atlas grows with the square of it.</p>
+      </div>
     </div>
     <h2>Materials</h2>
     <div class="grid two">

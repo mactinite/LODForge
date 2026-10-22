@@ -25,11 +25,26 @@ pub struct Settings {
     pub coverage_threshold: u8,
 }
 
+/// Billboard resolution multiplier (f32 bits) applied by [Settings::default]: 2.0 renders twice
+/// the pixels per side (TexGen units per pixel / 2, size cap x 2).
+static BILLBOARD_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+
+/// Sets the billboard resolution multiplier for every [Settings::default] made afterwards
+/// (clamped to 0.25..4).
+pub fn set_billboard_scale(scale: f32) {
+    BILLBOARD_SCALE.store(scale.clamp(0.25, 4.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn billboard_scale() -> f32 {
+    f32::from_bits(BILLBOARD_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 impl Default for Settings {
     /// TexGen defaults for tree billboards (UPP 11.0, 32..1024 px, Direct 1.35, Ambient 0.55,
-    /// light from the top).
+    /// light from the top), times [billboard_scale].
     fn default() -> Self {
-        Settings { units_per_pixel: 11.0, min_size: 32, max_size: 1024, light: Light { direct: 1.35, ambient: 0.55, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7 }, coverage_threshold: 128 }
+        let k = billboard_scale();
+        Settings { units_per_pixel: 11.0 / k, min_size: 32, max_size: ((1024.0 * k) as u32).clamp(256, 4096), light: Light { direct: 1.35, ambient: 0.55, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7 }, coverage_threshold: 128 }
     }
 }
 
@@ -153,7 +168,7 @@ pub fn make_billboard(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, scene: &Scen
 /// Standard billboards for a batch of items in two GPU round trips (all pre-passes, then all final
 /// renders).
 ///
-/// Framing (spec §2.1): a pre-pass of the front view framed on the geometry finds the opaque
+/// Framing (spec Â§2.1): a pre-pass of the front view framed on the geometry finds the opaque
 /// silhouette; the final render spans it vertically and symmetrically about the origin
 /// horizontally, `4 * ceil(h * 2 * halfWidth / height / 4)` pixels wide. `Depth` comes from the
 /// same measurement of the side view.
@@ -219,7 +234,7 @@ pub struct ViewImage {
 }
 
 /// Views of trunk billboards: from the back (diffuse 27.7 dB and 97.5% alpha agreement on the
-/// golden trunks against 20.9 dB and 84.5% from 0° / 90°: single-sided cards are culled differently
+/// golden trunks against 20.9 dB and 84.5% from 0Â° / 90Â°: single-sided cards are culled differently
 /// from the two sides).
 pub const TRUNK_YAWS: [f32; 2] = [180.0, 270.0];
 
@@ -240,8 +255,8 @@ pub fn make_rendered_billboard(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, sce
     make_rendered_billboards(gpu, renderer, &[Item { scene, textures: tex, scale }], s, yaws).pop().flatten()
 }
 
-/// Both views of rendered billboards for a batch of items in two GPU round trips (spec §1.2 /
-/// §2.1, fitted on the 119 golden trunk billboards): per view a pre-pass framed on the geometry,
+/// Both views of rendered billboards for a batch of items in two GPU round trips (spec Â§1.2 /
+/// Â§2.1, fitted on the 119 golden trunk billboards): per view a pre-pass framed on the geometry,
 /// then a final render framed exactly on the trimmed silhouette at
 /// `4 * ceil(h * Width_n / Height_n / 4)` x `h` pixels. `yaws`: front and side view; TexGen renders
 /// trunk billboards from the back, [`TRUNK_YAWS`].
@@ -302,7 +317,7 @@ pub fn make_rendered_billboards(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, it
 /// TexGen's `BleedRadius` default.
 pub const BLEED_RADIUS: i32 = 2;
 
-/// TexGen's `unmulta` + bleed (spec §2.3): texels passing the opacity test become opaque with their
+/// TexGen's `unmulta` + bleed (spec Â§2.3): texels passing the opacity test become opaque with their
 /// colour un-premultiplied, the rest transparent. A transparent texel then takes the mean colour of
 /// the opaque texels within [`BLEED_RADIUS`] (a square, edges clamped), or the average opaque
 /// colour of the image when there are none.
@@ -402,7 +417,7 @@ fn sidecar_tail(src: &Source) -> String {
     s
 }
 
-/// The `.txt` sidecar of a standard billboard (spec §1.3) as TexGen writes it: CRLF lines, an empty
+/// The `.txt` sidecar of a standard billboard (spec Â§1.3) as TexGen writes it: CRLF lines, an empty
 /// last line, `CRC32` of the final DDS.
 pub fn sidecar(b: &Billboard, scale: f32, crc: u32, src: &Source) -> String {
     format!(

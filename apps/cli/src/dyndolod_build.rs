@@ -67,6 +67,14 @@ pub struct Opts {
     /// Skip Occlusion.esp.
     #[arg(long)]
     pub no_occlusion: bool,
+    /// Largest atlas tile of a LOD texture in pixels (`ObjectLODMaxTileSize`; default: the
+    /// DynDOLOD INI, else 1024). Bigger tiles keep more texture detail on object LOD.
+    #[arg(long)]
+    pub atlas_max_tile: Option<u32>,
+    /// Largest atlas tile of a full (non-LOD) texture (`FullTextureMaxTileSize`; default: the
+    /// DynDOLOD INI, else 256).
+    #[arg(long)]
+    pub atlas_full_max_tile: Option<u32>,
     /// Folder for LODGen's input files (export, atlas map, terrain .bin, grass); default:
     /// `.lodforge-work-<pid>` next to the output, removed after the build.
     #[arg(long)]
@@ -1162,11 +1170,11 @@ impl BillboardDims {
 ///
 /// ```text
 /// BSFadeNode "<texture stem>"          identity transform
-/// └─ BSTriShape "GrassLOD1"            identity transform, 8 vertices / 4 triangles,
-///    │                                 position + UV + normal + colour (white, alpha 255)
-///    ├─ BSLightingShaderProperty       type 0, flags1 ZBuffer_Test, flags2 ZBuffer_Write |
-///    │  └─ BSShaderTextureSet          Double_Sided | Vertex_Colors; slot 0 `texture`, slot 1 `normal`
-///    └─ NiAlphaProperty                alpha test (> 128), no blending
+/// â””â”€ BSTriShape "GrassLOD1"            identity transform, 8 vertices / 4 triangles,
+///    â”‚                                 position + UV + normal + colour (white, alpha 255)
+///    â”œâ”€ BSLightingShaderProperty       type 0, flags1 ZBuffer_Test, flags2 ZBuffer_Write |
+///    â”‚  â””â”€ BSShaderTextureSet          Double_Sided | Vertex_Colors; slot 0 `texture`, slot 1 `normal`
+///    â””â”€ NiAlphaProperty                alpha test (> 128), no blending
 /// ```
 ///
 /// Grass Optimizations accepts a LOD file only with exactly one BSTriShape and identity

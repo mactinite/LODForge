@@ -219,7 +219,10 @@ fn encode_dds(gpu: &Gpu, images: &[(u32, &[u8])], mips: bool, kind: Kind, filter
         flat.push(RgbaImage { width: s, height: s, rgba: d });
         flat.extend(chain.iter().map(|(cs, cd)| RgbaImage { width: *cs, height: *cs, rgba: cd }));
     }
-    let mut encoded = gpu.encode_bc7(&flat)?.into_iter();
+    // Terrain diffuse shows no BC7 block artefacts with mode 6 (lod_quality: block-edge step
+    // 1.00x), so `high` keeps it on the GPU; normal maps go through the multi-mode encoder.
+    let fast_diffuse = kind == Kind::Diffuse && gpu.bc7_quality() == lodforge_gpu::Bc7Quality::High;
+    let mut encoded = if fast_diffuse { gpu.encode_bc7_mode6(&flat)? } else { gpu.encode_bc7(&flat)? }.into_iter();
     let files: Vec<Vec<u8>> = unique
         .iter()
         .zip(&chains)
@@ -536,7 +539,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
             println!("  LOD{level:<2}: {} tiles: {b} baked, {d} default, {r} reused", b + d + r);
         }
         println!(
-            "  stages (ms): reuse {} | pack {} | gpu render+downscale {} | bc7+mips {} | write{} {}  — {} top tiles in {bake_ms} ms",
+            "  stages (ms): reuse {} | pack {} | gpu render+downscale {} | bc7+mips {} | write{} {}  â€” {} top tiles in {bake_ms} ms",
             st.reuse,
             st.pack,
             st.gpu,

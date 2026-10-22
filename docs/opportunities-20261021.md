@@ -158,6 +158,7 @@ Done:
 | O2 | Tree atlas: per-billboard chains (clamped), padding never enters the mips | |
 | O4 | Billboards rendered 4x supersampled (MSAA off) and kept with soft coverage alpha (`finish_alpha_soft`) instead of TexGen's 0/255 cut | Fixes the "pixelated" Solstheim ash pines (thin needles broke into stair-steps and specks; dense snowy pines hid it) |
 | viewer | Shapes with `TextureClampMode` 0 sample with clamp-to-edge | Removes a false bright line on every LOD32 tile edge |
+| UI | Options page "Quality" section: Performance / Balanced / Quality / Custom levels over object LOD detail (DynDOLOD rules), BC7 encoder, terrain resampling, atlas tile cap (`--atlas-max-tile`, full textures a quarter) and billboard resolution (global `--billboard-scale`), each with an explanation | |
 
 Findings still open:
 
@@ -166,9 +167,22 @@ Findings still open:
   survives any correct resize. Suspects: cells without LAND next to land, per-quadrant texture
   sets, the splat brush clipped at quadrant edges. Needs a per-cell study before changing the
   render.
-- **BC7 mode 6 blocking (T5) is the largest remaining artefact.** Terrain normal maps step 1.5-1.8x
-  at every 4-px block edge at all levels (this is the "grid" seen in normals); billboards show 4x4
-  colour patches. A multi-mode encoder (e.g. an ISPC/bc7e port) would fix terrain normals,
-  billboards and atlases together.
+- **BC7 (T5): done 2026-10-21.** `lodforge_gpu::bc7_cpu` encodes with every BC7 mode on the CPU
+  (Intel ISPC texture compressor via `intel_tex_2`, MIT). Global `--bc7 fast|high|best`, default
+  `high`; the UI Quality section exposes it. Measured block-border step / inside-block step
+  (`lod_quality`, `bc7_blocks`):
+
+  | Content | fast (GPU mode 6) | high (ISPC very fast) | best (ISPC basic) |
+  |---|---|---|---|
+  | Terrain normals LOD8 / LOD32 | 1.75 / 2.19 | 1.28 / 1.56 | 1.28 / 1.51 |
+  | Terrain diffuse LOD4 / LOD32 | 1.00 / 1.02 | 0.99 / 1.02 | 0.99 / 1.02 |
+  | Tree billboards colour / normals (572) | 1.58 / 2.39 | 1.07 / 1.35 | 1.07 / 1.31 |
+  | Time: Tamriel terrain textures | 18.5 s | ~34 s | 140 s |
+  | Time: 572 billboards | 19.7 s | 32.3 s | 70.9 s |
+
+  Terrain diffuse shows no blocking with mode 6, so `high` keeps it on the GPU. ISPC's
+  "ultra fast" profile is no better than mode 6 on normals; "very fast" matches "fast" and
+  "basic". The mode-6 inside-block step on billboards (8.5 vs 13.5) also shows it was smearing
+  detail inside blocks.
 - **Texture repetition at LOD4:** the 16-px landscape textures tiled 24x per cell show as a
   ~10.7 px wallpaper stripe at LOD4 (T7).

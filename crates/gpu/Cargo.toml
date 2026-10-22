@@ -10,6 +10,8 @@ wgpu.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
+intel_tex_2.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 lodforge-dds.workspace = true

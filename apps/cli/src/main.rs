@@ -51,8 +51,23 @@ use profile::ProfileArgs;
 #[derive(Parser)]
 #[command(name = "lodforge", version, about = "Fast LOD generation for Skyrim SE")]
 struct Cli {
+    /// BC7 encoder for every texture written: `high` (default; all modes, CPU), `best` (slower,
+    /// thorough search) or `fast` (GPU, mode 6 only: blocky on gradients and foliage).
+    #[arg(long, global = true, value_enum, default_value = "high")]
+    bc7: Bc7Arg,
+    /// Billboard resolution multiplier (tree, trunk and grass billboards): 0.5 = half the pixels
+    /// per side, 2 = double. 1 is TexGen's default (11 units per pixel, at most 1024 px).
+    #[arg(long, global = true, default_value_t = 1.0)]
+    billboard_scale: f32,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Bc7Arg {
+    Fast,
+    High,
+    Best,
 }
 
 #[derive(Subcommand)]
@@ -168,7 +183,14 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    lodforge_gpu::bc7_cpu::set_default_quality(match cli.bc7 {
+        Bc7Arg::Fast => lodforge_gpu::Bc7Quality::Fast,
+        Bc7Arg::High => lodforge_gpu::Bc7Quality::High,
+        Bc7Arg::Best => lodforge_gpu::Bc7Quality::Best,
+    });
+    lodforge_texgen::set_billboard_scale(cli.billboard_scale);
+    match cli.command {
         Command::Inspect { profile, json } => inspect::run(&profile, json),
         Command::BsaScan { profile } => scan::bsa_scan(&profile.open()?.vfs),
         Command::SeasonDelta { profile, world, golden, margin } => season_delta::run(&profile, &world, golden.as_deref(), margin),
