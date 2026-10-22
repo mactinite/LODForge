@@ -630,7 +630,7 @@ pub(crate) fn ignored_texture(texture: &str, masks: &[String]) -> bool {
 /// atlas pages (tiled shapes included). `grass` are the grass billboard views of the grass
 /// stage ([grass_billboard_views]; the files must already be in the VFS), empty without
 /// `--grass bto`.
-pub fn atlas(p: &Profile, c: &Config, world: &Worldspace, exports: &WorldExport, mini: &[lodforge_texgen::stitch::MiniAtlasRow], grass: &[String], trees: &[String]) -> Result<AtlasLayout> {
+pub fn atlas(p: &Profile, c: &Config, world: &Worldspace, exports: &WorldExport, mini: &[lodforge_texgen::stitch::MiniAtlasRow], grass: &[String], trees: &[String], match_far: Option<(&Path, f32)>) -> Result<AtlasLayout> {
     let settings = AtlasSettings::from_config(c);
     // Never atlased: `IgnoreTexture` masks and the vanilla HD LOD texture pair the export
     // header names (`IsHDTextureMask`).
@@ -640,9 +640,9 @@ pub fn atlas(p: &Profile, c: &Config, world: &Worldspace, exports: &WorldExport,
     // Tree billboards (FlatTextures) and grass views go on the `_Alpha` page as one-part keys.
     let mut billboards: Vec<String> = grass.to_vec();
     billboards.extend(trees.iter().cloned());
-    let input = crate::object_atlas_plan::PlanInput { settings, tolerance: 0.2, ignore_masks: &masks, mini, billboards: &billboards, base: format!("textures\\DynDOLOD\\LOD\\DynDOLOD_{}", world.editor_id) };
+    let input = crate::object_atlas_plan::PlanInput { settings, tolerance: 0.2, ignore_masks: &masks, mini, billboards: &billboards, base: format!("textures\\DynDOLOD\\LOD\\DynDOLOD_{}", world.editor_id), match_far };
     let (layout, st) = crate::object_atlas_plan::plan(p, exports, &input);
-    println!("  atlas plan: {} models, {} keys: {} main, {} alpha, {} glow tiles, {} mini rows; skipped {} tiled, {} missing, {} ignored", st.models, st.keys, st.main, st.alpha, st.glow, st.mini, st.skipped_tiled, st.skipped_missing, st.skipped_ignored);
+    println!("  atlas plan: {} models, {} keys: {} main, {} alpha, {} glow tiles, {} mini rows; skipped {} tiled, {} missing, {} ignored; {} far-LOD bakes matched to LOD4", st.models, st.keys, st.main, st.alpha, st.glow, st.mini, st.skipped_tiled, st.skipped_missing, st.skipped_ignored, st.matched);
     Ok(layout)
 }
 

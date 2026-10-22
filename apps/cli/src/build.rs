@@ -90,6 +90,13 @@ pub struct Args {
     /// which darken e.g. mountain textures by 14% below LOD4).
     #[arg(long, value_enum, default_value = "flat")]
     pub lod_texture_tone: LodTextureTone,
+    /// With `--lod-texture-tone flat`: how far (0..1) a pre-baked LOD texture that only LOD8+
+    /// models use (e.g. `textures\lod\mtncliff04lod.dds` from a LOD texture pack) is moved
+    /// toward the mean colour of the LOD4 textures of the same references. 0 leaves such bakes
+    /// as shipped; 1 matches the texture means outright, which looks too bright because the
+    /// LOD4 shapes also carry darkening vertex colours.
+    #[arg(long, default_value_t = 0.5)]
+    pub far_lod_match: f32,
     /// Material setup of the list. `pbr` (Community Shaders with PBR): pbr_lod texture twins,
     /// PBR texture sets and linear copies from the textures\pbr\ sources. `standard` (non-PBR:
     /// ENB complex material, parallax or vanilla): plain textures only, textures\pbr\ sources
@@ -468,7 +475,7 @@ pub fn run(a: &Args) -> Result<()> {
             let grass_views: Vec<String> = grass_inputs.as_ref().map(|g| crate::dyndolod_build::grass_billboard_views(&g.files)).unwrap_or_default();
             step("dyndolod-atlas", None, &mut || {
                 let Some(we) = pending.take() else { return Ok(()) };
-                let atlas = crate::dyndolod_build::atlas(&p, c, ws, &we, &world_mini, &grass_views, &tree_billboards)?;
+                let atlas = crate::dyndolod_build::atlas(&p, c, ws, &we, &world_mini, &grass_views, &tree_billboards, (a.lod_texture_tone == LodTextureTone::Flat && a.far_lod_match > 0.0).then_some((out.as_path(), a.far_lod_match.min(1.0))))?;
                 let bin = crate::dyndolod_build::terrain_bin(&p.load_order, ws, parent)?;
                 let paths = crate::dyndolod_build::write_world_files(&export_dir, world, &we, &bin, &atlas)?;
                 std::fs::copy(work.join("LODGen_SSE_FlatTextures.txt"), export_dir.join("LODGen_SSE_FlatTextures.txt"))?;

@@ -41,6 +41,16 @@ pub struct PlanInput<'a> {
     pub billboards: &'a [String],
     /// `textures\DynDOLOD\LOD\DynDOLOD_<World>` (page names get `.dds`, `_Alpha.dds`, `_Glow.dds`).
     pub base: String,
+    /// Far-LOD bake matching: `Some(output dir)` scales the tiles of pre-baked LOD textures that
+    /// only LOD8+ models use (not written by this build) to the mean colour of the LOD4 textures
+    /// of the same references, so a cliff does not darken when its `_lod_1` model with its own
+    /// baked texture (e.g. `textures\lod\mtncliff04lod.dds`, from a vanilla-look LOD texture
+    /// pack) replaces the `_lod_0` model showing the current full texture.
+    /// The strength (0..1) moves the tile that fraction of the way from its own mean to the LOD4
+    /// mean: 1 matches the texture means outright, which overshoots on screen because the LOD4
+    /// shapes also carry darkening vertex colours and a different normal map; 0.5 put the far
+    /// cliffs of the Throat of the World on the near ones in the viewer.
+    pub match_far: Option<(&'a std::path::Path, f32)>,
 }
 
 #[derive(Debug, Default)]
@@ -51,6 +61,8 @@ pub struct PlanStats {
     pub alpha: usize,
     pub glow: usize,
     pub mini: usize,
+    /// Far-LOD bakes whose tiles get an RGB factor (`PlanInput::match_far`).
+    pub matched: usize,
     pub skipped_tiled: usize,
     pub skipped_missing: usize,
     pub skipped_ignored: usize,
@@ -127,6 +139,9 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
         glow_map: bool,
         alpha: Option<(u16, u8)>,
         fits: bool,
+        /// Mean vertex-colour luminance (0..1; 1 without colours): what the shape's diffuse
+        /// is multiplied by on screen.
+        vc: f32,
     }
     let loaded: HashMap<String, Vec<Shape>> = model_list
         .par_iter()
@@ -143,6 +158,7 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
                     glow_map: matches!(&part.shader, ShaderSource::Lighting(l) if l.flags2 & SLSF2_GLOW_MAP != 0),
                     alpha: part.alpha,
                     fits: !lodforge_objlod::reuv::needs_recut(&part.uvs, input.tolerance),
+                    vc: part.colors.as_ref().filter(|c| !c.is_empty()).map_or(1.0, |c| c.iter().map(|p| 0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])).sum::<f32>() / (255.0 * c.len() as f32)),
                 })
                 .collect();
             Some((m.clone(), shapes))
@@ -251,6 +267,130 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
         layout.mini_rows.push((r.source.clone(), format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", r.source, r.w, r.h, r.x, r.y, r.dest, r.atlas_w, r.atlas_h, r.scale[0], r.scale[1])));
     }
     stats.mini = layout.mini_rows.len();
+    if let Some((out, strength)) = input.match_far {
+        layout.tones = far_lod_tones(p, exports, &alts, |m| loaded.get(m).map(|shapes| shapes.iter().map(|s| (s.index, s.name.clone(), s.textures.clone(), s.vc)).collect()), out, strength);
+        stats.matched = layout.tones.len();
+    }
     let _ = AtlasEntry { texture: String::new(), width: 0, height: 0, x: 0, y: 0, page: 0 };
     (layout, stats)
+}
+
+/// RGB factors for the diffuses that only LOD8+ models of some references use and that this
+/// build did not write (pre-baked LOD textures from the load order): the mean colour of the
+/// LOD4 diffuses of the same references over the bake's own mean, per channel, clamped to
+/// 0.5..2. Means are alpha-weighted (alpha >= 128) over a small mip, in the stored (sRGB)
+/// encoding, so the ratio is what the LOD shader sees. A `...linear.dds` LOD4 diffuse that is not
+/// in the VFS yet is taken as its source times the PBR scale.
+fn far_lod_tones(p: &Profile, exports: &WorldExport, alts: &[AltTextures], shapes_of: impl Fn(&str) -> Option<Vec<(usize, String, [String; 9], f32)>>, out: &std::path::Path, strength: f32) -> BTreeMap<String, [f32; 3]> {
+    let mut lod4_used: HashSet<String> = HashSet::new();
+    // far diffuse -> (LOD4 diffuse -> (references, sum of their vertex-colour factors))
+    let mut pairs: HashMap<String, HashMap<String, (usize, f32)>> = HashMap::new();
+    let diffuses = |alt: &AltTextures, ref_id: &str, model: &str| -> Vec<(String, f32)> {
+        let m = model.to_ascii_lowercase().replace('/', "\\");
+        let Some(shapes) = shapes_of(&m) else { return Vec::new() };
+        shapes
+            .iter()
+            .filter_map(|(index, name, textures, vc)| {
+                let t = alt.textures_for(ref_id, *index, name).map(|t| t[0].clone()).unwrap_or_else(|| textures[0].clone());
+                (!t.is_empty()).then(|| (texture_key(&t), *vc))
+            })
+            .collect()
+    };
+    for (s, alt) in exports.seasons.iter().zip(alts) {
+        for l in &s.lines {
+            let ref_id = format!("{:08X}", l.ref_id);
+            let d4 = diffuses(alt, &ref_id, &l.columns[0]);
+            lod4_used.extend(d4.iter().map(|(d, _)| d.clone()));
+            if d4.is_empty() {
+                continue;
+            }
+            let mut far: HashSet<String> = HashSet::new();
+            for c in &l.columns[1..] {
+                far.extend(diffuses(alt, &ref_id, c).into_iter().map(|(d, _)| d));
+            }
+            for f in far {
+                if d4.iter().any(|(d, _)| *d == f) {
+                    continue;
+                }
+                let e = pairs.entry(f).or_default();
+                for (d, vc) in &d4 {
+                    let v = e.entry(d.clone()).or_insert((0, 0.0));
+                    v.0 += 1;
+                    v.1 += vc;
+                }
+            }
+        }
+    }
+    let ours = |d: &str| p.vfs.loose_path(d).is_some_and(|path| path.starts_with(out));
+    let candidates: Vec<(String, HashMap<String, (usize, f32)>)> = pairs.into_iter().filter(|(f, _)| !lod4_used.contains(f) && !ours(f)).collect();
+    let means: HashMap<String, [f32; 3]> = candidates
+        .iter()
+        .flat_map(|(f, d4)| std::iter::once(f.clone()).chain(d4.keys().cloned()))
+        .collect::<HashSet<_>>()
+        .into_par_iter()
+        .filter_map(|t| mean_color(p, &t).map(|m| (t, m)))
+        .collect();
+    let mut tones = BTreeMap::new();
+    for (f, d4) in candidates {
+        let Some(mf) = means.get(&f) else { continue };
+        // Target: the LOD4 texture means (the vertex colours are recorded for the record; the
+        // strength stands in for what they and the LOD4 shading take off on screen).
+        let (mut sum, mut n) = ([0f32; 3], 0usize);
+        for (d, (count, _vc_sum)) in &d4 {
+            if let Some(m) = means.get(d) {
+                for c in 0..3 {
+                    sum[c] += m[c] * *count as f32;
+                }
+                n += count;
+            }
+        }
+        if n == 0 {
+            continue;
+        }
+        let tone: [f32; 3] = std::array::from_fn(|c| if mf[c] > 1.0 { 1.0 + ((sum[c] / n as f32 / mf[c]).clamp(0.5, 2.0) - 1.0) * strength } else { 1.0 });
+        if tone.iter().any(|t| (t - 1.0).abs() > 0.02) {
+            tones.insert(f, tone);
+        }
+    }
+    tones
+}
+
+/// Alpha-weighted mean RGB (0..255, as stored) of a texture over its smallest mip of at least
+/// 64 px; `None` when unreadable.
+fn mean_color(p: &Profile, path: &str) -> Option<[f32; 3]> {
+    let mut scale = 1.0f32;
+    let bytes = match p.vfs.read(path).ok().flatten() {
+        Some(b) => b,
+        None => {
+            // A linear copy this build writes later: its source times the PBR scale.
+            let src = path.strip_suffix("linear.dds").map(|s| format!("{s}.dds"))?;
+            scale = crate::pbr_linear::SCALE;
+            p.vfs.read(&src).ok().flatten()?
+        }
+    };
+    let info = lodforge_dds::parse(&bytes).ok()?;
+    let mut level = 0u32;
+    while level + 1 < info.mip_count && (info.width >> (level + 1)).max(1) >= 64 {
+        level += 1;
+    }
+    let img = lodforge_dds::decode(&bytes, &info, level).ok()?;
+    let (mut sum, mut n) = ([0f64; 3], 0f64);
+    for px in img.rgba.chunks_exact(4) {
+        if px[3] < 128 {
+            continue;
+        }
+        for c in 0..3 {
+            sum[c] += f64::from(px[c]);
+        }
+        n += 1.0;
+    }
+    if n == 0.0 {
+        for px in img.rgba.chunks_exact(4) {
+            for c in 0..3 {
+                sum[c] += f64::from(px[c]);
+            }
+            n += 1.0;
+        }
+    }
+    (n > 0.0).then(|| std::array::from_fn(|c| (sum[c] / n) as f32 * scale))
 }

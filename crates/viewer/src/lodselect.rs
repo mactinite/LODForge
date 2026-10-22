@@ -17,6 +17,66 @@ pub const BLOCK_LEVEL0_DISTANCE: f32 = 35000.0;
 pub const BLOCK_LEVEL1_DISTANCE: f32 = 70000.0;
 pub const BLOCK_MAXIMUM_DISTANCE: f32 = 250000.0;
 
+/// The LOD level switch distances in use: the game's defaults, or a profile's
+/// `[TerrainManager]` values from SkyrimPrefs.ini (DynDOLOD-style lists raise them).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LodDistances {
+    pub level0: f32,
+    pub level1: f32,
+    pub maximum: f32,
+}
+
+impl Default for LodDistances {
+    fn default() -> Self {
+        LodDistances {
+            level0: BLOCK_LEVEL0_DISTANCE,
+            level1: BLOCK_LEVEL1_DISTANCE,
+            maximum: BLOCK_MAXIMUM_DISTANCE,
+        }
+    }
+}
+
+impl LodDistances {
+    /// Reads `fBlockLevel0Distance`, `fBlockLevel1Distance` and `fBlockMaximumDistance` from
+    /// SkyrimPrefs.ini text; keys that are missing or unreadable keep the game's defaults.
+    pub fn from_prefs_ini(text: &str) -> LodDistances {
+        let mut d = LodDistances::default();
+        let mut in_section = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_section = line.eq_ignore_ascii_case("[TerrainManager]");
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let Ok(v) = v.trim().parse::<f32>() else { continue };
+            if !(v.is_finite() && v > 0.0) {
+                continue;
+            }
+            match k.trim().to_ascii_lowercase().as_str() {
+                "fblocklevel0distance" => d.level0 = v,
+                "fblocklevel1distance" => d.level1 = v,
+                "fblockmaximumdistance" => d.maximum = v,
+                _ => {}
+            }
+        }
+        d
+    }
+
+    /// Distance up to which `level` is shown instead of the next coarser one.
+    pub fn switch_distance(&self, level: i32) -> f32 {
+        match level {
+            4 => self.level0,
+            8 => self.level1,
+            16 => self.maximum,
+            _ => f32::INFINITY,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum LodMode {
     /// Every block of one level.
@@ -32,14 +92,9 @@ impl Default for LodMode {
     }
 }
 
-/// Distance up to which `level` is shown instead of the next coarser one.
+/// Distance up to which `level` is shown with the game's default distances.
 pub fn switch_distance(level: i32) -> f32 {
-    match level {
-        4 => BLOCK_LEVEL0_DISTANCE,
-        8 => BLOCK_LEVEL1_DISTANCE,
-        16 => BLOCK_MAXIMUM_DISTANCE,
-        _ => f32::INFINITY,
-    }
+    LodDistances::default().switch_distance(level)
 }
 
 /// Blocks to draw for a camera at `cam` (x, y). `present` holds every block that has a file;
@@ -48,6 +103,7 @@ pub fn switch_distance(level: i32) -> f32 {
 /// checks report the missing file).
 pub fn visible(
     mode: LodMode,
+    distances: &LodDistances,
     cam: [f32; 2],
     present: &HashSet<QuadId>,
     grid_sw: (i32, i32),
@@ -69,18 +125,25 @@ pub fn visible(
             roots.dedup();
             let mut out = Vec::new();
             for r in roots {
-                descend(r, cam, distance_mult, present, &mut out);
+                descend(r, cam, distances, distance_mult, present, &mut out);
             }
             out
         }
     }
 }
 
-fn descend(q: QuadId, cam: [f32; 2], mult: f32, present: &HashSet<QuadId>, out: &mut Vec<QuadId>) {
+fn descend(
+    q: QuadId,
+    cam: [f32; 2],
+    d: &LodDistances,
+    mult: f32,
+    present: &HashSet<QuadId>,
+    out: &mut Vec<QuadId>,
+) {
     let here = present.contains(&q);
     if let Some(children) = q.children() {
         let child_level = q.level / 2;
-        let split = q.distance_xy(cam) < switch_distance(child_level) * mult;
+        let split = q.distance_xy(cam) < d.switch_distance(child_level) * mult;
         // Split when the camera is close enough, or when this block is missing and finer ones
         // exist (a finer block beats a hole); never split into nothing.
         let finer = children
@@ -88,7 +151,7 @@ fn descend(q: QuadId, cam: [f32; 2], mult: f32, present: &HashSet<QuadId>, out: 
             .any(|c| present.contains(c) || has_descendant(*c, present));
         if finer && (split || !here) {
             for c in children {
-                descend(c, cam, mult, present, out);
+                descend(c, cam, d, mult, present, out);
             }
             return;
         }
@@ -128,9 +191,21 @@ mod tests {
     }
 
     #[test]
+    fn prefs_ini_distances() {
+        let d = LodDistances::from_prefs_ini(
+            "[Display]\nfBlockLevel0Distance=1\n[TerrainManager]\nfBlockLevel0Distance=57344.0000\nfBlockLevel1Distance=147456.0000\nfBlockMaximumDistance=327680.0000\n",
+        );
+        assert_eq!(d.level0, 57344.0);
+        assert_eq!(d.level1, 147456.0);
+        assert_eq!(d.maximum, 327680.0);
+        let d = LodDistances::from_prefs_ini("[TerrainManager]\nfBlockLevel1Distance=x\n");
+        assert_eq!(d, LodDistances::default());
+    }
+
+    #[test]
     fn single_level() {
         let p = grid(&[4, 8, 16, 32], 64);
-        let v = visible(LodMode::Single(16), [0.0, 0.0], &p, (0, 0), 32);
+        let v = visible(LodMode::Single(16), &LodDistances::default(), [0.0, 0.0], &p, (0, 0), 32);
         assert_eq!(v.len(), 16);
         assert!(v.iter().all(|q| q.level == 16));
     }
@@ -138,8 +213,7 @@ mod tests {
     #[test]
     fn game_mode_covers_everything_once() {
         let p = grid(&[4, 8, 16, 32], 128);
-        let v = visible(
-            LodMode::Game { distance_mult: 1.0 },
+        let v = visible(LodMode::Game { distance_mult: 1.0 }, &LodDistances::default(),
             [10000.0, 10000.0],
             &p,
             (0, 0),
@@ -162,8 +236,7 @@ mod tests {
         }));
         // The far corner (~500k units away, past fBlockMaximumDistance) is LOD32.
         assert!(v.iter().any(|q| q.level == 32));
-        let far = visible(
-            LodMode::Game { distance_mult: 1.0 },
+        let far = visible(LodMode::Game { distance_mult: 1.0 }, &LodDistances::default(),
             [1.0e7, 1.0e7],
             &p,
             (0, 0),
@@ -181,8 +254,7 @@ mod tests {
             x: 0,
             y: 0,
         });
-        let v = visible(
-            LodMode::Game { distance_mult: 1.0 },
+        let v = visible(LodMode::Game { distance_mult: 1.0 }, &LodDistances::default(),
             [1000.0, 1000.0],
             &p,
             (0, 0),

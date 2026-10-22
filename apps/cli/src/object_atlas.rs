@@ -335,6 +335,14 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                     let Some(mut rgba) = load_tile(vfs, d, e.width, e.height, MipKind::Color) else {
                         return (None, chain(&flat(), MipKind::Normal), None);
                     };
+                    // Far-LOD bake matching: the planner's per-diffuse RGB factors.
+                    if let Some(t) = layout.tones.get(&d.to_lowercase()) {
+                        for px in rgba.chunks_exact_mut(4) {
+                            for c in 0..3 {
+                                px[c] = (f32::from(px[c]) * t[c]).round().clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                    }
                     if alpha_page && formats.alpha_fill {
                         fill_average_color(&mut rgba);
                     }

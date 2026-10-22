@@ -26,6 +26,8 @@ fn main() -> Result<()> {
     let mut textures: BTreeMap<String, Option<(lodforge_dds::Image, lodforge_dds::Image)>> = BTreeMap::new();
     // (texture, name) -> (shapes, sum tex lum mip0, sum tex lum mip3, sum vc lum, vc shapes, sum rgb0)
     let mut groups: BTreeMap<(String, String), (usize, f64, f64, f64, usize, [f64; 3])> = BTreeMap::new();
+    let mut tri_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut uv_sum: BTreeMap<(String, String), (f64, f64, f64)> = BTreeMap::new();
     for f in &args {
         let bytes = std::fs::read(f)?;
         let nif = lodforge_nif::parse(&bytes)?;
@@ -37,6 +39,7 @@ fn main() -> Result<()> {
             let tex = tex.trim_start_matches("data\\").to_string();
             let tex = if tex.starts_with("textures") { tex } else { format!("textures\\{tex}") };
             let name = s.av.net.name.clone().unwrap_or_default();
+            *tri_counts.entry((tex.clone(), name.clone())).or_insert(0) += s.triangles.len();
             if !pat.is_empty() && !name.to_lowercase().contains(&pat) && !tex.contains(&pat) {
                 continue;
             }
@@ -51,7 +54,17 @@ fn main() -> Result<()> {
                 let m3 = lodforge_dds::decode(&b, &i, 3.min(i.mip_count.saturating_sub(1))).ok()?;
                 Some((m0, m3))
             });
-            let Some((m0, m3)) = img else { continue };
+            let Some((m0, m3)) = img else {
+                // Texture not on disk: still list the shape (flags and vertex colours).
+                let vc = l.flags2 & (1 << 5) != 0 && !s.colors.is_empty();
+                let e = groups.entry((format!("{tex} [not found; flags2 {:#x}]", l.flags2), name)).or_insert((0, 0.0, 0.0, 0.0, 0, [0.0; 3]));
+                e.0 += 1;
+                if vc {
+                    e.3 += s.colors.iter().map(|c| luma([f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])).sum::<f64>() / s.colors.len() as f64;
+                    e.4 += 1;
+                }
+                continue;
+            };
             let (mut u0, mut v0, mut u1, mut v1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
             for uv in &s.uvs {
                 u0 = u0.min(uv[0]);
@@ -59,26 +72,50 @@ fn main() -> Result<()> {
                 u1 = u1.max(uv[0]);
                 v1 = v1.max(uv[1]);
             }
-            let mean = |im: &lodforge_dds::Image| -> [f64; 3] {
+            // Mean over the texels the triangles cover: 10 barycentric samples per triangle,
+            // weighted by the triangle's world area (an atlased merged shape's UV bounding box
+            // would span the whole page).
+            let mean = |im: &lodforge_dds::Image| -> [f64; 5] {
                 let (w, h) = (im.width as f32, im.height as f32);
-                let (x0, y0) = (((u0.clamp(0.0, 1.0)) * w) as u32, ((v0.clamp(0.0, 1.0)) * h) as u32);
-                let (x1, y1) = (((u1.clamp(0.0, 1.0)) * w).ceil() as u32, ((v1.clamp(0.0, 1.0)) * h).ceil() as u32);
-                let (x1, y1) = (x1.clamp(x0 + 1, im.width), y1.clamp(y0 + 1, im.height));
-                let mut s = [0f64; 3];
+                let mut acc = [0f64; 5];
                 let mut n = 0f64;
-                for y in y0..y1 {
-                    for x in x0..x1 {
-                        let p = ((y * im.width + x) * 4) as usize;
-                        for c in 0..3 {
-                            s[c] += f64::from(im.rgba[p + c]);
+                let _ = (u0, v0, u1, v1);
+                for tri in &s.triangles {
+                    let p: Vec<[f32; 3]> = tri.iter().map(|&i| s.positions[i as usize]).collect();
+                    let u: Vec<[f32; 2]> = tri.iter().map(|&i| s.uvs[i as usize]).collect();
+                    let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+                    let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+                    let c = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                    let area = f64::from((c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt());
+                    if area <= 0.0 {
+                        continue;
+                    }
+                    let wgt = area / 10.0;
+                    for (a, b) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5), (0.33, 0.33), (0.25, 0.25), (0.5, 0.25), (0.25, 0.5)] {
+                        let (a, b, g): (f32, f32, f32) = (a, b, 1.0 - a - b);
+                        let uu = g * u[0][0] + a * u[1][0] + b * u[2][0];
+                        let vv = g * u[0][1] + a * u[1][1] + b * u[2][1];
+                        let x = ((uu.rem_euclid(1.0)) * w) as u32 % im.width.max(1);
+                        let y = ((vv.rem_euclid(1.0)) * h) as u32 % im.height.max(1);
+                        let i = ((y * im.width + x) * 4) as usize;
+                        for k in 0..3 {
+                            acc[k] += f64::from(im.rgba[i + k]) * wgt;
                         }
-                        n += 1.0;
+                        acc[3] += f64::from(uu.rem_euclid(1.0)) * wgt;
+                        acc[4] += f64::from(vv.rem_euclid(1.0)) * wgt;
+                        n += wgt;
                     }
                 }
-                [s[0] / n, s[1] / n, s[2] / n]
+                if n <= 0.0 {
+                    return [0.0; 5];
+                }
+                [acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n, acc[4] / n]
             };
-            let c0 = mean(m0);
-            let c3 = mean(m3);
+            let m = mean(m0);
+            let c0 = [m[0], m[1], m[2]];
+            let m3v = mean(m3);
+            let c3 = [m3v[0], m3v[1], m3v[2]];
+            uv_sum.entry((tex.clone(), name.clone())).and_modify(|e| { e.0 += m[3]; e.1 += m[4]; e.2 += 1.0; }).or_insert((m[3], m[4], 1.0));
             let vc = l.flags2 & (1 << 5) != 0 && !s.colors.is_empty();
             let vcl = if vc { s.colors.iter().map(|c| luma([f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])).sum::<f64>() / s.colors.len() as f64 } else { 0.0 };
             let e = groups.entry((tex.clone(), name)).or_insert((0, 0.0, 0.0, 0.0, 0, [0.0; 3]));
@@ -94,11 +131,13 @@ fn main() -> Result<()> {
             }
         }
     }
-    println!("{:>3} {:>7} {:>7} {:>7} {:>8}  {:18} texture", "n", "lum0", "lum3", "vclum", "rgb0", "shape");
+    println!("{:>3} {:>8} {:>7} {:>7} {:>7} {:>8}  {:18} texture", "n", "tris", "lum0", "lum3", "vclum", "rgb0", "shape");
     for ((tex, name), (n, l0, l3, vl, nvc, rgb)) in &groups {
         let nf = *n as f64;
         let vcs = if *nvc > 0 { format!("{:7.1}", vl / *nvc as f64) } else { "      -".into() };
-        println!("{n:>3} {:7.1} {:7.1} {vcs} ({:3.0},{:3.0},{:3.0})  {:18} {tex}", l0 / nf, l3 / nf, rgb[0] / nf, rgb[1] / nf, rgb[2] / nf, name.chars().take(18).collect::<String>());
+        let tris = tri_counts.get(&(tex.clone(), name.clone())).copied().unwrap_or(0);
+        let uv = uv_sum.get(&(tex.clone(), name.clone())).map(|(u, v, k)| format!("uv {:.3},{:.3}", u / k, v / k)).unwrap_or_default();
+        println!("{n:>3} {tris:>8} {:7.1} {:7.1} {vcs} ({:3.0},{:3.0},{:3.0})  {:18} {tex}  {uv}", l0 / nf, l3 / nf, rgb[0] / nf, rgb[1] / nf, rgb[2] / nf, name.chars().take(18).collect::<String>());
     }
     Ok(())
 }

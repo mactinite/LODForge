@@ -54,9 +54,14 @@ pub struct Args {
     /// clockwise from north, pitch up. Without it the screenshot is a top-down map.
     #[arg(long, allow_hyphen_values = true)]
     pub camera: Option<String>,
-    /// Field of view (degrees).
+    /// Horizontal field of view (degrees), as the game's `fov` console command takes it.
     #[arg(long, default_value_t = 70.0)]
     pub fov: f32,
+    /// Centre of the game-mode LOD arrangement `x,y` for --screenshot (default: the camera). The
+    /// game picks LOD levels around the player, so a free-camera capture whose player stands
+    /// elsewhere needs the player's position here.
+    #[arg(long, allow_hyphen_values = true)]
+    pub lod_center: Option<String>,
     /// Screenshot size `WxH`.
     #[arg(long, default_value = "1920x1080")]
     pub size: String,
@@ -113,7 +118,28 @@ fn settings(a: &Args) -> Result<ViewSettings> {
         "game" => LodMode::Game { distance_mult: a.lod_distance },
         l => LodMode::Single(l.trim_start_matches("lod").parse().with_context(|| format!("--levels {l}: expected game, 4, 8, 16 or 32"))?),
     };
-    Ok(ViewSettings { mode, layers: Layers::parse(&a.layers), shading: Shading::parse(&a.shading).ok_or_else(|| anyhow!("--shading {}: expected textured, unlit, normals, flat, level or kind", a.shading))?, normal_maps: !a.no_normals, ..ViewSettings::default() })
+    Ok(ViewSettings { mode, lod_distances: lod_distances(a), layers: Layers::parse(&a.layers), shading: Shading::parse(&a.shading).ok_or_else(|| anyhow!("--shading {}: expected textured, unlit, normals, flat, level or kind", a.shading))?, normal_maps: !a.no_normals, ..ViewSettings::default() })
+}
+
+/// The game arrangement's switch distances: the profile's SkyrimPrefs.ini (profile-local INIs
+/// first, then the one in Documents\My Games), else the game's defaults.
+fn lod_distances(a: &Args) -> lodforge_viewer::lodselect::LodDistances {
+    use lodforge_viewer::lodselect::LodDistances;
+    let mut candidates = Vec::new();
+    if let Some(inst) = &a.instance {
+        candidates.push(inst.join("profiles").join(&a.profile).join("skyrimprefs.ini"));
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        candidates.push(std::path::PathBuf::from(home).join(r"Documents\My Games\Skyrim Special Edition\SkyrimPrefs.ini"));
+    }
+    for p in candidates {
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            let d = LodDistances::from_prefs_ini(&text);
+            eprintln!("LOD distances {} / {} / {} from {}", d.level0, d.level1, d.maximum, p.display());
+            return d;
+        }
+    }
+    LodDistances::default()
 }
 
 /// The worldspace to start on: Tamriel when present, else the first listed.
@@ -177,6 +203,15 @@ pub fn run(a: &Args) -> Result<()> {
     let settings = settings(a)?;
     let camera = a.camera.as_deref().map(|c| FreeCam::parse(c).ok_or_else(|| anyhow!("--camera {c}: expected x,y,z[,yaw,pitch]"))).transpose()?.map(|c| FreeCam { fov: a.fov, ..c });
 
+    let lod_center = a
+        .lod_center
+        .as_deref()
+        .map(|c| {
+            let v: Vec<f32> = c.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            if v.len() == 2 { Ok([v[0], v[1]]) } else { Err(anyhow!("--lod-center {c}: expected x,y")) }
+        })
+        .transpose()?;
+
     if a.check {
         let w = world::discover(files.as_ref(), lister.as_ref(), &world_name, a.season.as_deref());
         let t = std::time::Instant::now();
@@ -203,7 +238,7 @@ pub fn run(a: &Args) -> Result<()> {
         let (w, h) = a.size.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))).ok_or_else(|| anyhow!("--size {}: expected WxH", a.size))?;
         let wf = world::discover(files.as_ref(), lister.as_ref(), &world_name, a.season.as_deref());
         let t = std::time::Instant::now();
-        let (bytes, messages) = lodforge_viewer::screenshot(lodforge_viewer::ScreenshotConfig { files, world: wf, load, settings, camera, width: w, height: h, samples: a.samples })?;
+        let (bytes, messages) = lodforge_viewer::screenshot(lodforge_viewer::ScreenshotConfig { files, world: wf, load, settings, camera, lod_center, width: w, height: h, samples: a.samples })?;
         for m in &messages {
             eprintln!("{m}");
         }

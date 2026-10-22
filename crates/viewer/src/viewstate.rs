@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::{ViewParams, aabb_in_frustum};
-use crate::lodselect::{self, LodMode};
+use crate::lodselect::{self, LodDistances, LodMode};
 use crate::mesh::{FileKind, ShapeKind};
 use crate::pick::Hit;
 use crate::render::{
@@ -92,6 +92,8 @@ impl Layers {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewSettings {
     pub mode: LodMode,
+    /// Switch distances for the game arrangement (from the profile's SkyrimPrefs.ini when known).
+    pub lod_distances: LodDistances,
     pub layers: Layers,
     pub shading: Shading,
     pub normal_maps: bool,
@@ -112,6 +114,7 @@ impl Default for ViewSettings {
     fn default() -> Self {
         ViewSettings {
             mode: LodMode::default(),
+            lod_distances: LodDistances::default(),
             layers: Layers::default(),
             shading: Shading::Textured,
             normal_maps: true,
@@ -132,6 +135,7 @@ pub fn visible_quads(
     scene: &Scene,
     world: &WorldFiles,
     mode: LodMode,
+    distances: &LodDistances,
     cam_xy: [f32; 2],
 ) -> Vec<usize> {
     let sw = world.grid_origin();
@@ -145,7 +149,7 @@ pub fn visible_quads(
         }
         let top = present.iter().map(|q| q.level).max().unwrap_or(32);
         let all: HashSet<QuadId> = present.iter().copied().collect();
-        for q in lodselect::visible(mode, cam_xy, &all, sw, top) {
+        for q in lodselect::visible(mode, distances, cam_xy, &all, sw, top) {
             if let Some(&i) = scene.by_id.get(&(q, kind)) {
                 out.push(i);
             }

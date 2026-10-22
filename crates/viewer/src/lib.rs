@@ -78,6 +78,8 @@ pub struct ScreenshotConfig {
     pub settings: ViewSettings,
     /// `None`: a top-down overview of the whole world.
     pub camera: Option<FreeCam>,
+    /// Centre of the game-mode LOD arrangement (x, y); `None`: the camera position.
+    pub lod_center: Option<[f32; 2]>,
     pub width: u32,
     pub height: u32,
     pub samples: u32,
@@ -111,7 +113,8 @@ pub fn screenshot(cfg: ScreenshotConfig) -> Result<(Vec<u8>, Vec<String>)> {
             (ViewParams::overview(&o, aspect), o.center)
         }
     };
-    let visible = viewstate::visible_quads(&scene, &world, cfg.settings.mode, cam_xy);
+    let cam_xy = cfg.lod_center.unwrap_or(cam_xy);
+    let visible = viewstate::visible_quads(&scene, &world, cfg.settings.mode, &cfg.settings.lod_distances, cam_xy);
     let (frame, globals, _) = viewstate::build_frame(&scene, &visible, &cfg.settings, &view, None);
     let rgba = headless::render_rgba(
         &gpu.device,

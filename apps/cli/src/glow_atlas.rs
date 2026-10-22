@@ -108,7 +108,7 @@ mod tests {
         assert_eq!(pos, vec![(0, 0), (256, 0), (512, 0), (768, 0), (0, 256), (256, 256)]);
         assert!(is_glow_key("a,a_n,a_g"));
         assert!(!is_glow_key("a,a_n=4"));
-        let m = merge(AtlasLayout { pages: vec![AtlasPage { name: "p".into(), width: 1, height: 1 }], entries: vec![AtlasEntry { texture: "t".into(), width: 1, height: 1, x: 0, y: 0, page: 0 }], mini_rows: Vec::new() }, l);
+        let m = merge(AtlasLayout { pages: vec![AtlasPage { name: "p".into(), width: 1, height: 1 }], entries: vec![AtlasEntry { texture: "t".into(), width: 1, height: 1, x: 0, y: 0, page: 0 }], mini_rows: Vec::new(), tones: Default::default() }, l);
         assert_eq!(m.pages.len(), 2);
         assert_eq!(m.entries[1].page, 1);
     }

@@ -193,6 +193,9 @@ pub struct AtlasLayout {
     /// Ready-made lines that point a source into a mini atlas (DynDOLOD's 10-column re-UV rows,
     /// `source  w  h  x  y  miniatlas  W  H  scaleU  scaleV`), with their source.
     pub mini_rows: Vec<(String, String)>,
+    /// Per diffuse (lower-case key): RGB factors applied to its tile when the page is composed
+    /// (far-LOD bake matching, see the CLI's `object_atlas_plan`).
+    pub tones: std::collections::BTreeMap<String, [f32; 3]>,
 }
 
 impl AtlasLayout {
@@ -220,7 +223,7 @@ impl AtlasLayout {
 /// the next page. Pages are cropped to the power of two covering their tiles. The first page is
 /// `<base>.dds`, further ones `<base>01.dds`, `<base>02.dds`, ... (xLODGen 4.1.5o naming).
 pub fn layout(textures: &[(String, u32, u32)], width: u32, height: u32, base: &str) -> AtlasLayout {
-    let mut out = AtlasLayout { pages: Vec::new(), mini_rows: Vec::new(), entries: textures.iter().map(|(t, w, h)| AtlasEntry { texture: t.clone(), width: *w, height: *h, x: 0, y: 0, page: usize::MAX }).collect() };
+    let mut out = AtlasLayout { pages: Vec::new(), mini_rows: Vec::new(), tones: Default::default(), entries: textures.iter().map(|(t, w, h)| AtlasEntry { texture: t.clone(), width: *w, height: *h, x: 0, y: 0, page: usize::MAX }).collect() };
     let mut blocks: Vec<BinBlock> = textures.iter().enumerate().map(|(i, (_, w, h))| BinBlock { index: i, w: *w, h: *h, x: 0, y: 0 }).collect();
     let mut num = 0usize;
     while !blocks.is_empty() {

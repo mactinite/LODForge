@@ -14,7 +14,8 @@ pub struct FreeCam {
     pub pos: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
-    /// Vertical field of view, degrees.
+    /// Horizontal field of view, degrees: the game's `fov` console value (and skyrim-mcp's
+    /// vantage `fov`) is horizontal, so the same number gives the same framing.
     pub fov: f32,
 }
 
@@ -47,7 +48,13 @@ impl FreeCam {
 
     /// Reversed-Z infinite perspective (depth 1 at the near plane, 0 at infinity).
     pub fn projection(&self, aspect: f32, near: f32) -> Mat4 {
-        Mat4::perspective_infinite_reverse_rh(self.fov.to_radians(), aspect, near)
+        Mat4::perspective_infinite_reverse_rh(self.vertical_fov(aspect), aspect, near)
+    }
+
+    /// Vertical field of view (radians) for an aspect ratio, from the horizontal `fov`.
+    pub fn vertical_fov(&self, aspect: f32) -> f32 {
+        let half = (self.fov.to_radians() * 0.5).tan() / aspect.max(1e-3);
+        2.0 * half.atan()
     }
 
     /// Turns by mouse deltas (pixels); positive dx turns right, positive dy looks down.

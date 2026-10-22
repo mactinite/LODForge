@@ -1857,3 +1857,34 @@ run (512 px, gamma 1.0, quality 10). Tamriel `step`: 32 LOD32 textures at 2048^2
 meshes 9,901-36,823 land vertices per quad (13 of 16 hit the budget, worst error 8.55), terrain
 texture stage 41 s instead of 14 s for the default season (16 tiles of 4x the pixels through the
 hq resize and BC7), textures folder 2.5 GB.
+
+### Far-LOD bake matching (2026-10-22)
+
+The LOD4 -> LOD8 darkening of cliffs the user circled at the Throat of the World (viewer, camera
+`29532,-109046,48587,76.8,-32.6`) is not the stitched-texture tone: the LOD8/16 cliff shapes
+sample `textures\lod\mtncliff04lod.dds`, the pre-baked texture of the `mountaincliff04_lod_1/2`
+models from "HD LODs Textures SE" (vanilla-brown, mean luminance 48), while the `_lod_0` model
+at LOD4 shows the PBR `mountainslab02linear.dds` copy (mean 73); 2,756 mountaincliff references
+in Tamriel, no TexGen rule re-renders such bakes (DynDOLOD would show the same step).
+`shape_colors` now samples the texels the triangles cover (10 samples each, area-weighted) and
+prints the mean UV, which located the tile on the page.
+
+`build --far-lod-match <0..1>` (default 0.5, with `--lod-texture-tone flat`): the atlas planner
+pairs every diffuse that only LOD8+ models of a reference use, that no LOD4 model uses and that
+this build did not write, with the LOD4 diffuses of the same references, and moves the tile that
+fraction of the way from its own alpha-weighted mean to theirs per channel (ratio clamped
+0.5..2; `linear` copies not yet written are their source times the PBR scale). Tamriel: 22
+bakes matched. Measured in the user's circled regions, objects only (`shape_colors` means, viewer
+`--layers objects`):
+
+| Strength | near LOD4 (red) lit | far LOD8 (blue) lit | unlit near / far |
+|---|---|---|---|
+| 0 (as shipped) | 57.4 | 47.0 (-18%) | 64.4 / 54.1 |
+| 1.0 | 56.6 | 65.0 (+15%) | 63.4 / 74.3 |
+| vertex-colour-weighted target | 54.8 | 45.5 | 61.2 / 53.3 |
+| **0.5 (default)** | 55.2 | **53.2 (-4%)** | 61.6 / 62.2 |
+
+The LOD4 texture-times-vertex-colour mean (73 x 0.70 = 51) equals the bake's 48, so a
+vertex-colour-weighted target changes nothing, yet the regions differ by 18% on screen: the LOD4
+HD shapes and the bakes are lit differently (normal maps, shading), which the half strength
+stands in for. In-game check pending.

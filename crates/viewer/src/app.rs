@@ -518,7 +518,7 @@ impl App {
         let view = self.view_params();
         let (o, d) = view.ray(px as f32, py as f32, w, h);
         let visible =
-            viewstate::visible_quads(&self.scene, &self.world, self.settings.mode, [x, y]);
+            viewstate::visible_quads(&self.scene, &self.world, self.settings.mode, &self.settings.lod_distances, [x, y]);
         let layers = self.settings.layers;
         let ground = pick::pick(&self.scene, &visible, &|k, l| layers.shows(k, l), o, d)
             .map(|h| h.point[2])
@@ -1103,7 +1103,7 @@ impl App {
         // Scene.
         let view = self.view_params();
         let visible =
-            viewstate::visible_quads(&self.scene, &self.world, self.settings.mode, self.cam_xy());
+            viewstate::visible_quads(&self.scene, &self.world, self.settings.mode, &self.settings.lod_distances, self.cam_xy());
         if let Some(p) = self.pending_pick.take() {
             let (o, d) = view.ray(p.x as f32, p.y as f32, w as f32, h as f32);
             let layers = self.settings.layers;
