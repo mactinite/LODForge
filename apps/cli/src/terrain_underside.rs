@@ -41,6 +41,10 @@ pub struct Args {
     /// and `TerrainUndersideIgnoreHide_<W>` from `DynDOLOD_SSE.ini` (and `TerrainUndersideQuality`).
     #[arg(long)]
     pub dyndolod: Option<PathBuf>,
+    /// Leave cells without LAND flat instead of filling them from the shipped terrain LOD meshes
+    /// (as the terrain meshes stage does).
+    #[arg(long)]
+    pub no_lod_fill: bool,
 }
 
 /// The export lines DynDOLOD adds for a worldspace from `DynDOLOD_SSE.ini` (`MinX=` ...,
@@ -140,6 +144,12 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             );
             s.apply_bounds(&ControlFile::parse(&extra));
             let mut input = export::terrain_input(lo, world, parent, south_west, 32)?;
+            if !a.no_lod_fill {
+                let f = crate::terrain_meshes::fill_from_lod_meshes(p, world, parent, &mut input);
+                if f.filled > 0 {
+                    println!("  {}", f.line());
+                }
+            }
             // DynDOLOD's underside input is the worldspace's object bounds (NAM0/NAM9), spec 4.2:
             // the cells the rectangle touches, a max corner on a cell line excluded (Tamriel's
             // NAM9 (253952, 208896) = cells up to 61, 50, as its export says).

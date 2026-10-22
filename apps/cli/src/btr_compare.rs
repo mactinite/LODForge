@@ -24,5 +24,8 @@ pub fn run(a: &Args) -> Result<()> {
             println!("  {e}");
         }
     }
+    for r in lodforge_btr::compare::compare_heights(&a.a, &a.b).map_err(anyhow::Error::msg)? {
+        println!("{}", r.line());
+    }
     Ok(())
 }

@@ -34,6 +34,30 @@ pub struct Args {
     /// Golden folder of .btr files: byte comparison plus the tolerant comparison (0.5 local units).
     #[arg(long)]
     pub golden: Option<PathBuf>,
+    /// Leave cells without LAND flat at the default land height instead of filling them from the
+    /// terrain LOD meshes the game ships (docs/re/terrain-lod-spec.md 2.3).
+    #[arg(long)]
+    pub no_lod_fill: bool,
+}
+
+/// Fills the cells without LAND of `input` from the shipped terrain LOD meshes (`lodforge_btr::fill`),
+/// reading each mesh's archived copy first so that generated loose files are not mistaken for the
+/// game's data.
+pub fn fill_from_lod_meshes(
+    p: &Profile,
+    world: &lodforge_esp::Worldspace,
+    parent: Option<&lodforge_esp::Worldspace>,
+    input: &mut lodforge_btr::TerrainInput,
+) -> lodforge_btr::fill::FillReport {
+    let landed = export::land_cells(world, parent);
+    let read = |path: &str| {
+        p.vfs
+            .read_archived(path)
+            .ok()
+            .flatten()
+            .or_else(|| p.vfs.read(path).ok().flatten())
+    };
+    lodforge_btr::fill::from_lod_meshes(input, &|c| landed.contains(&c), &read)
 }
 
 pub fn run(a: &Args) -> Result<()> {
@@ -81,6 +105,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             input.default_water = Some(w);
         }
     }
+    let fill = (!a.no_lod_fill).then(|| fill_from_lod_meshes(p, world, None, &mut input));
     let cell_count = input.cells.len();
     let export_ms = t.elapsed().as_millis();
 
@@ -139,6 +164,9 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         quads.len(),
         total.elapsed().as_millis()
     );
+    if let Some(f) = &fill {
+        println!("  {}", f.line());
+    }
     for &level in LEVELS.iter().filter(|&&l| l <= input.max_level) {
         let of_level: Vec<&(Btr, f64, bool)> =
             built.iter().filter(|(b, _, _)| b.level == level).collect();
@@ -206,6 +234,9 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             for e in &r.examples {
                 println!("    {e}");
             }
+        }
+        for r in lodforge_btr::compare::compare_heights(&out_dir, g).map_err(anyhow::Error::msg)? {
+            println!("  {}", r.line());
         }
     }
     Ok(())

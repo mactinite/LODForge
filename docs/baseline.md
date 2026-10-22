@@ -1798,3 +1798,34 @@ as is Occlusion.esp and every other asset (28,212 files); only DynDOLOD.esm/.esp
 
 Not done here: overlapping the CPU and GPU inside the terrain-texture bake, worlds in parallel
 inside the object lane, and the remaining fixed per-run cost (default tiles, GPU upload).
+
+## Cells without LAND filled from the shipped terrain LOD meshes (2026-10-21, main working tree)
+
+Why: Skyrim.esm has no LAND for Tamriel's outer cells. `lodforge inspect` on
+`D:\Modlists\skyrim-cs-base` (profile Default, 107 plugins) gives Tamriel LAND cells
+-57,-43 .. 61,50, so a terrain LOD built from the plugins alone is flat default land (-27000
+under -14000 water) from there to the edge of every top-level quad, where the vanilla meshes
+show coast and mountains. The golden xLODGen runs had Sheson's `SSE-Terrain-Tamriel-Extend.esm`
+active (9,424 restored cells; "Data from -64,-64 to 63,96"). `crates/btr/src/fill.rs` (spec 2.3)
+now fills every cell without LAND inside the top-level quads the export touches from the finest
+shipped mesh covering its LOD4 block (`meshes\terrain\tamriel\tamriel.4.*.btr`, 2,304 LOD4 files
+over -96..92 in `Skyrim - Meshes1.bsa`; one, `4.-20.8`, from USSEP's archive), archived copy first.
+
+`lodforge terrain-meshes --instance D:\Modlists\skyrim-cs-base --world Tamriel --golden
+<no-seasons-20261017-031139>\output\meshes\terrain\tamriel` (release, 20 threads):
+
+| | without fill (`--no-lod-fill`) | with fill |
+|---|---|---|
+| Cells exported | 11,186 LAND cells, rectangle -57..61 x -43..50 | 16,384 (-64..63 x -64..63): 5,198 filled from 386 LOD4 meshes, 0 unreadable, 0 grid points uncovered |
+| Files | 744 LOD4 / 208 LOD8 / 56 LOD16 / 16 LOD32 | 1,024 / 256 / 64 / 16 (golden: 1,312 / 336 / 88 / 24, its extra y = 64..96 rows) |
+| Export + build + write | - | 46 + 997 + 489 ms, 1.63 s total |
+| Heights vs golden, LOD4 (`compare_heights`: both meshes sampled at every grid point of the common files) | rms 5,591 game units, max 51,028 (744 files, 12.4 M points) | rms 11.9, max 5,240 (1,024 files, 17.0 M points) |
+| LOD8 / LOD16 / LOD32 rms | 8,212 / 7,659 / 10,310 | 24.9 / 44.5 / 126.1 |
+
+The LOD4 mesher threshold is 5 local units = 20 game units, so the filled quads sit inside it on
+average. The worst LOD4 files with the fill (`4.-48.36` max 5,240 rms 245, `4.-44.36` max 4,312
+rms 186, `4.-44.32` max 1,328 rms 29) differ identically without it: interior cells whose load
+order differs from the golden instance, not the fill. The LOD32 worst files are the y = 32 row,
+where the Extend plugin's synthetic northern seabed (y > 50) differs from the vanilla meshes'
+under the water. Not checked in game. The three interior files are the only LOD4 files above
+rms 50 in either run.

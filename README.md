@@ -72,6 +72,13 @@ profile, or exclude them with `--exclude-mod`, before building; the generated
 mod's `DynDOLOD.esm`, `DynDOLOD.esp` and `Occlusion.esp` are dropped from the
 input set automatically.
 
+Not needed: the "xLODGen Resource - SSE Terrain Tamriel" plugins. LODForge fills
+Tamriel's outer cells, whose LAND records Skyrim.esm lacks, from the terrain LOD
+meshes the game ships (`docs/re/terrain-lod-spec.md` 2.3; `--no-lod-fill` turns
+it off). Keep those plugins disabled for DynDOLOD-mode builds in particular:
+`Occlusion.esp` copies the winning worldspace record, and the Extend plugin's
+enlarged object bounds would stay in it after the plugin is removed.
+
 ## Build and run
 
 From the repository root in PowerShell:

@@ -252,6 +252,27 @@ Artefact to note: along the north and east sides of the exported rectangle the g
 the shared grid row/column the flat fill height instead of the real cell's edge (LOD8 example above:
 source -3584, mesh -3375). Reproducing this is optional; a rewrite should prefer the real data.
 
+**Cells without LAND, filled from the shipped meshes `[ours]`.** Skyrim.esm has no LAND for
+Tamriel's outer cells (the load order alone gives -57,-43 .. 61,50; the Extend plugin of the
+"xLODGen Resource - SSE Terrain Tamriel" mod restores -64,-64 .. 63,96 at generation time), but
+the game ships terrain LOD meshes built from the full data (`Skyrim - Meshes1.bsa`,
+`meshes\terrain\tamriel\tamriel.4.*.btr`, LOD4 blocks -96..92). LODForge therefore fills every
+cell without a LAND record inside the top-level lattice quads the export touches (`quads(max_level)`
+of the exported rectangle, so the same quads the texture stage's top tiles cover) from the finest
+shipped mesh covering its LOD4 block: the mesh's land triangles are sampled at the cell's 33 x 33
+grid points (a level-L vertex at local (i * 128 / L, j * 128 / L) is world height z * L + z_shift;
+skirts have no ground area and are skipped), LOD8/16/32 meshes are tried when the LOD4 file is
+missing, a point no triangle covers keeps the default land height, and a cell with no readable
+mesh stays flat. Filled cells keep their CELL water (new cells get the default water) and no hide
+flags; they have no LAND for the texture stage, so they render the default texture and normal, as
+the resource plugin's layer-less LANDs do in xLODGen. The archived copy of a mesh is read before a
+loose one, so an earlier generated loose LOD is not mistaken for the game's data. `fill.rs`;
+`--no-lod-fill` on `build`, `terrain-meshes` and `terrain-underside` restores the flat fill.
+Tamriel on the cs-base list: 5,198 cells filled from 386 LOD4 meshes, the output grows from the
+LAND rectangle to -64..63 x -64..63 (the 16 LOD32 quads), and the LOD4 heights sit within rms 11.9
+game units of the golden run made with the Extend plugin (5,591 flat; mesher threshold 20), see
+`docs/baseline.md` "Cells without LAND filled from the shipped terrain LOD meshes".
+
 ### 2.4 Water height per cell `[golden]` `[ours]`
 
 `water = if DATA is one byte { none } else if |XCLW| < 2^24 { XCLW } else { DNAM water }`

@@ -141,3 +141,13 @@ pub fn parse_lodsettings(bytes: &[u8]) -> Option<((i32, i32), i32)> {
     let max_level = i32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
     Some((sw, max_level))
 }
+
+/// The cells that have a LAND record, as the export uses them: the parent worldspace's when the
+/// child uses its parent's land data (PNAM flag 0x01).
+pub fn land_cells(world: &Worldspace, parent: Option<&Worldspace>) -> std::collections::HashSet<(i32, i32)> {
+    let land_world = match parent {
+        Some(p) if world.parent_flags & 0x01 != 0 => p,
+        _ => world,
+    };
+    land_world.land_by_cell().into_keys().collect()
+}

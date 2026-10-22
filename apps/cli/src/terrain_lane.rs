@@ -25,6 +25,8 @@ pub struct LaneArgs {
     pub seasons: Vec<String>,
     pub mips: TerrainMips,
     pub json: bool,
+    /// Fill cells without LAND from the shipped terrain LOD meshes (`--no-lod-fill` clears it).
+    pub lod_fill: bool,
 }
 
 #[derive(Default)]
@@ -112,7 +114,7 @@ fn run(a: &LaneArgs, shared: &Shared) {
         Ok(ctx) => {
             // Every worldspace's meshes first (seconds in all): the object stages wait on them.
             for world in &a.worlds {
-                let args = crate::terrain_meshes::Args { profile: a.profile.clone(), world: world.clone(), out: a.out.clone(), seasons: a.seasons.clone(), settings: None, golden: None };
+                let args = crate::terrain_meshes::Args { profile: a.profile.clone(), world: world.clone(), out: a.out.clone(), seasons: a.seasons.clone(), settings: None, golden: None, no_lod_fill: !a.lod_fill };
                 step(world, "terrain-meshes", None, &mut || crate::terrain_meshes::run_with(ctx.p, &args));
                 meshes_done(world);
             }

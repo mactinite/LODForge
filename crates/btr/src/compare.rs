@@ -248,3 +248,111 @@ pub fn compare_dirs(a: &Path, b: &Path, tol: f32) -> Result<Vec<LevelReport>, St
     }
     Ok(levels.into_values().collect())
 }
+
+/// Height comparison of two folders: the land of every file present in both, sampled at the
+/// quad's grid points through [`crate::fill::rasterize`], per level. A direct measure of the
+/// terrain difference in game units, independent of how each mesher triangulated it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeightReport {
+    pub level: i32,
+    pub files: usize,
+    /// Grid points both land shapes cover.
+    pub points: usize,
+    /// Grid points only one side covers.
+    pub one_side: usize,
+    pub max_abs: f32,
+    pub rms: f32,
+    /// The files with the largest difference: (name, max |diff|, rms).
+    pub worst: Vec<(String, f32, f32)>,
+}
+
+impl HeightReport {
+    pub fn line(&self) -> String {
+        let worst: Vec<String> = self
+            .worst
+            .iter()
+            .map(|(n, m, r)| format!("{n} max {m:.0} rms {r:.1}"))
+            .collect();
+        format!(
+            "LOD{}: heights at {} grid points of {} files: max |diff| {:.1}, rms {:.2} game units; {} points covered on one side only{}{}",
+            self.level,
+            self.points,
+            self.files,
+            self.max_abs,
+            self.rms,
+            self.one_side,
+            if worst.is_empty() { "" } else { "; worst: " },
+            worst.join(", ")
+        )
+    }
+}
+
+pub fn compare_heights(a: &Path, b: &Path) -> Result<Vec<HeightReport>, String> {
+    use crate::input::CELL_STEPS;
+    let fa = btr_files(a).map_err(|e| format!("{}: {e}", a.display()))?;
+    let fb = btr_files(b).map_err(|e| format!("{}: {e}", b.display()))?;
+    let pairs: Vec<_> = fa
+        .iter()
+        .filter_map(|(k, pa)| fb.get(k).map(|pb| (*k, pa.clone(), pb.clone())))
+        .collect();
+    let load = |p: &Path| -> Result<Btr, String> {
+        let nif = parse(&std::fs::read(p).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        Btr::from_nif(&nif).ok_or_else(|| format!("{}: not a BTR layout", p.display()))
+    };
+    let per_file: Vec<Result<_, String>> = pairs
+        .par_iter()
+        .map(|(k, pa, pb)| {
+            let (ba, bb) = (load(pa)?, load(pb)?);
+            let (level, x, y) = *k;
+            let n = level as usize * CELL_STEPS as usize + 1;
+            let origin = (x * CELL_STEPS, y * CELL_STEPS);
+            let ha = crate::fill::rasterize(&ba, (x, y), origin, n);
+            let hb = crate::fill::rasterize(&bb, (x, y), origin, n);
+            let (mut points, mut one, mut max, mut sum) = (0usize, 0usize, 0f64, 0f64);
+            for (p, q) in ha.iter().zip(&hb) {
+                match (p, q) {
+                    (Some(p), Some(q)) => {
+                        let d = (f64::from(*p) - f64::from(*q)).abs();
+                        points += 1;
+                        max = max.max(d);
+                        sum += d * d;
+                    }
+                    (None, None) => {}
+                    _ => one += 1,
+                }
+            }
+            Ok((level, format!("{level}.{x}.{y}"), points, one, max, sum))
+        })
+        .collect();
+    #[derive(Default)]
+    struct Acc {
+        report: HeightReport,
+        sum_sq: f64,
+        files: Vec<(String, f32, f32)>,
+    }
+    let mut levels: BTreeMap<i32, Acc> = BTreeMap::new();
+    for r in per_file {
+        let (level, name, points, one, max, sum) = r?;
+        let e = levels.entry(level).or_default();
+        e.report.level = level;
+        e.report.files += 1;
+        e.report.points += points;
+        e.report.one_side += one;
+        e.report.max_abs = e.report.max_abs.max(max as f32);
+        e.sum_sq += sum;
+        let rms = if points > 0 { (sum / points as f64).sqrt() as f32 } else { 0.0 };
+        e.files.push((name, max as f32, rms));
+    }
+    Ok(levels
+        .into_values()
+        .map(|mut a| {
+            let r = &mut a.report;
+            r.rms = if r.points > 0 { (a.sum_sq / r.points as f64).sqrt() as f32 } else { 0.0 };
+            a.files.sort_by(|p, q| q.1.total_cmp(&p.1));
+            a.files.truncate(4);
+            r.worst = a.files;
+            a.report
+        })
+        .collect())
+}

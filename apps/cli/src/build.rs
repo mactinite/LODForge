@@ -44,6 +44,10 @@ pub struct Args {
     pub enable: bool,
     #[arg(long)]
     pub no_terrain: bool,
+    /// Leave cells without LAND flat instead of filling them from the terrain LOD meshes the game
+    /// ships (terrain meshes and underside; docs/re/terrain-lod-spec.md 2.3).
+    #[arg(long)]
+    pub no_lod_fill: bool,
     #[arg(long)]
     pub no_objects: bool,
     #[arg(long)]
@@ -218,7 +222,7 @@ pub fn run(a: &Args) -> Result<()> {
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
     // Terrain meshes and textures of every worldspace and season run on their own thread from
     // here on; the object stages below wait per worldspace for its meshes.
-    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, json: a.json }));
+    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, json: a.json, lod_fill: !a.no_lod_fill }));
     if a.texgen {
         let t = Instant::now();
         begin(a.json, "all", "texgen", None);
@@ -537,7 +541,7 @@ pub fn run(a: &Args) -> Result<()> {
             && let Some(c) = &dyn_cfg
             && crate::dyndolod_build::wants_underside(c, world)
         {
-            let args = crate::terrain_underside::Args { profile: a.profile.clone(), world: world.clone(), out: out.clone(), quality: 10.0, from_export: None, golden: None, dyndolod: Some(c.dir.clone()) };
+            let args = crate::terrain_underside::Args { profile: a.profile.clone(), world: world.clone(), out: out.clone(), quality: 10.0, from_export: None, golden: None, dyndolod: Some(c.dir.clone()), no_lod_fill: a.no_lod_fill };
             let mut built = false;
             if let Some(l) = &lane {
                 l.wait_meshes(world);

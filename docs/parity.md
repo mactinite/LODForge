@@ -65,7 +65,8 @@ Blindly enabling True PBR on all BTOs would diverge from the reference.
 The current source has AltTextures/VC side files, converted PBR albedo,
 PGPatcher CRC lookup, TexGen PBR twins, dynamic TXST/MODS, frozen HD-mask keys,
 passthrough effect-shader merge hashes, tree brightness handling, missing-normal
-fallbacks and vanilla-LOD blanking. Do not reopen these as wholly absent based
+fallbacks, vanilla-LOD blanking and the fill of LAND-less edge cells from the shipped
+terrain LOD meshes (spec 2.3; the Terrain Tamriel resource plugins are not needed). Do not reopen these as wholly absent based
 on the original audit tables.
 
 The [latest port measurements](baseline.md#lodgen-port-fixes-p4-g3-g9-g10-g11-2026-10-19-branch-claudeobjlod-port-fixes-1d734a)

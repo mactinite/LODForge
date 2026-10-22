@@ -213,6 +213,16 @@ impl Vfs {
         }
     }
 
+    /// Reads the archived copy of a file (the BSA layer alone), whether or not a loose file
+    /// overrides it: vanilla data even when a generated loose file sits on top.
+    pub fn read_archived(&self, rel: &str) -> Result<Option<Vec<u8>>> {
+        let n = normalize(rel);
+        match self.archived.get(&n) {
+            Some(&(a, f)) => self.archives[a as usize].read(f as usize).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Paths whose winning copy is in an archive (not overridden by a loose file).
     pub fn archived_paths(&self) -> impl Iterator<Item = &str> {
         self.archived.keys().filter(|k| !self.loose.contains_key(*k)).map(String::as_str)

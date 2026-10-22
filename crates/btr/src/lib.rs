@@ -7,7 +7,7 @@
 //! and the NIF format specification.
 //!
 //! Pipeline: [`input::TerrainInput`] (from the load order, [`export`], or from a terrain dump,
-//! [`terrain_bin`]) -> [`mesh::build_quad`] per quad of the lattice -> [`btr::Btr`] file
+//! [`terrain_bin`]; [`fill`] adds the cells without LAND from the shipped terrain LOD meshes) -> [`mesh::build_quad`] per quad of the lattice -> [`btr::Btr`] file
 //! description -> NIF bytes through the `lodforge-nif` writer. [`underside`] runs the same mesher
 //! at LOD32 for DynDOLOD's `<World>_Underside.nif`; [`compare`] is the tolerant comparison of
 //! two output folders.
@@ -16,6 +16,7 @@ pub mod bounds;
 pub mod btr;
 pub mod compare;
 pub mod export;
+pub mod fill;
 pub mod greedy;
 pub mod input;
 pub mod mesh;
