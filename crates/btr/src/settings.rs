@@ -13,6 +13,12 @@ pub struct LevelSettings {
     /// Optimize Unseen: -1 off, 0 on (under-water points are not candidates), v > 0 on with
     /// shallow terrain pushed at least v game units below the water surface.
     pub water_delta: f32,
+    /// Shoreline mode (LODForge, `WaterFloorLOD<L>`), game units. With Optimize Unseen on and a
+    /// value > 0, under-water points stay candidates and the bed is clamped to this depth below
+    /// the water: open water stays flat and cheap, while river channels and shores keep their
+    /// vertices instead of being bridged by bank-to-bank triangles. <= 0: xLODGen's rule (points
+    /// deeper than the push-down are not candidates).
+    pub water_floor: f32,
     /// Z translation of every shape of the level (`ZShiftLOD<L>`), game units; 0 by default.
     pub z_shift: f32,
 }
@@ -56,14 +62,31 @@ pub fn skirt_depth(skirts: i32, level: i32) -> f32 {
 }
 
 impl Default for Settings {
+    /// LODForge's defaults: xLODGen's ([`Settings::xlodgen`]) with distant water kept readable.
+    /// LOD8 / 16 / 32 push shallow terrain 550 units under the water (xLODGen's own LOD32 value;
+    /// no z-fighting with the water plane) and use the shoreline mode with a 1,100-unit bed, so
+    /// rivers and lake shores keep their shape in the distance.
+    fn default() -> Self {
+        let mut s = Settings::xlodgen();
+        for l in [8, 16, 32] {
+            let lv = s.level_mut(l);
+            lv.water_delta = 550.0;
+            lv.water_floor = 1100.0;
+        }
+        s
+    }
+}
+
+impl Settings {
     /// xLODGen's defaults as written into every observed control file: quality 5 / 8 / 8 / 10,
     /// max vertices 32,767, Optimize Unseen off / on / on / 550, skirts 256, protected cell
-    /// borders, no hidden quads, water on.
-    fn default() -> Self {
+    /// borders, no hidden quads, water on, no shoreline mode. Control files start from these.
+    pub fn xlodgen() -> Self {
         let lvl = |quality, water_delta| LevelSettings {
             quality,
             max_verts: 32767,
             water_delta,
+            water_floor: -1.0,
             z_shift: 0.0,
         };
         Settings {
@@ -138,7 +161,7 @@ impl ControlFile {
     /// Parses `Key=Value` lines; unknown keys are ignored, later duplicates win (as xLODGen's
     /// options file is appended to its own export).
     pub fn parse(text: &str) -> Self {
-        let mut c = ControlFile::default();
+        let mut c = ControlFile { settings: Settings::xlodgen(), ..ControlFile::default() };
         for line in text.lines() {
             let line = line.trim();
             let Some((key, value)) = line.split_once('=') else {
@@ -176,6 +199,7 @@ impl ControlFile {
                         ("MaxVertsLOD", 1),
                         ("WaterDeltaLOD", 2),
                         ("ZShiftLOD", 3),
+                        ("WaterFloorLOD", 4),
                     ] {
                         if let Some(l) =
                             key.strip_prefix(prefix).and_then(|l| l.parse::<i32>().ok())
@@ -191,7 +215,8 @@ impl ControlFile {
                                         int().map(|v| v.max(0) as u32).unwrap_or(s.max_verts)
                                 }
                                 2 => s.water_delta = num().unwrap_or(s.water_delta),
-                                _ => s.z_shift = num().unwrap_or(s.z_shift),
+                                3 => s.z_shift = num().unwrap_or(s.z_shift),
+                                _ => s.water_floor = num().unwrap_or(s.water_floor),
                             }
                         }
                     }
@@ -245,6 +270,9 @@ impl ControlFile {
             kv(&format!("QualityLOD{l}"), s.quality.to_string());
             kv(&format!("MaxVertsLOD{l}"), s.max_verts.to_string());
             kv(&format!("WaterDeltaLOD{l}"), s.water_delta.to_string());
+            if s.water_floor > 0.0 {
+                kv(&format!("WaterFloorLOD{l}"), s.water_floor.to_string());
+            }
         }
         kv("Skirts", self.settings.skirts.to_string());
         out

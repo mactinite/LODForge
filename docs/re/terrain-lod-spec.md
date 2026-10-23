@@ -480,6 +480,22 @@ to 17 local units with a mode at -16.75. With v / L = 550 / 32 = 17.19 the obser
 - The readme's intent (coast-line detail kept, no z-fighting between shallow terrain and the water
   plane) is the requirement; the exact numbers are the reference tool's.
 
+**LODForge shoreline mode (default, not xLODGen's)** `[ours: settings.rs, mesh.rs]`. With the
+reference rule at LOD8/16 (on, delta 0) under-water points are never candidates: rivers narrower
+than the 2L-point lattice are bridged bank to bank, and shallow beds and beaches sit on the water
+plane (z-fighting at distance). LODForge's `Settings::default()` therefore uses delta 550 at LOD8 /
+16 / 32 plus `WaterFloorLOD<L>=1100`: wet points stay candidates with heights clamped to
+[water - 1100/L, water - 550/L] (open water is flat at the floor and stays cheap), and dry points
+are lifted to at least water + Quality + 1 local units. The greedy keeps the surface within Quality
+of these heights, so (with 550/L >= Quality, true at LOD8/16/32) no dry point is drawn under the
+water, no wet point above it, and nothing within one unit of the plane; this matters most at LOD32,
+which the world map shows. Tamriel (cs-base, 2026-10-22), xLODGen rule -> shoreline mode:
+under-water grid points drawn as land LOD8/16 123,634 / 232,232 -> 0 / 0; shore points drawn under
+water LOD8/16/32 4.1 / 6.2 / 6.7 % -> 0 / 0 / 0; points within 1 unit of the water plane
+64,805 / 145,327 / 56,558 -> 0 / 0 / 0; land vertices +14 / +32 / +13 %. Control files (`ControlFile::parse`)
+start from `Settings::xlodgen()` and keep the reference behaviour unless they set
+`WaterFloorLOD<L>`; `terrain-meshes` prints these numbers per level ("water outline").
+
 ### 3.8 Skirts `[golden]` `[cfg]`
 
 With `Skirts=256` every border edge of the land mesh (an edge whose two vertices both lie on the

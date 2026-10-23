@@ -39,6 +39,8 @@ pub struct QuadOptions {
     pub max_verts: u32,
     /// Optimize Unseen value in game units: < 0 off, 0 on, > 0 on with the push-down.
     pub water_delta: f32,
+    /// Shoreline mode bed depth in game units (see `LevelSettings::water_floor`); <= 0 off.
+    pub water_floor: f32,
     /// `Skirts` key (see [`skirt_depth`]); <= 0 none.
     pub skirts: i32,
     pub protect_cell_borders: bool,
@@ -56,6 +58,7 @@ impl QuadOptions {
             quality: l.quality,
             max_verts: l.max_verts,
             water_delta: l.water_delta,
+            water_floor: l.water_floor,
             skirts: settings.skirts,
             protect_cell_borders: settings.protect_cell_borders,
             ignore_water: settings.ignore_water,
@@ -109,9 +112,106 @@ pub struct QuadMesh {
     pub max_error: f64,
     /// Whether any problem stopped at its point budget.
     pub budget_hit: bool,
+    /// How well the land mesh keeps the water's outline (grid points with water).
+    pub shore: ShoreStats,
+}
+
+/// Land mesh vs water plane at the grid points of water cells, comparing the source terrain with
+/// the mesh surface over that point.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ShoreStats {
+    /// Grid points whose source terrain is under the water.
+    pub wet: u32,
+    /// ... where the mesh surface is at or above the water (river or shore lost).
+    pub wet_exposed: u32,
+    /// Grid points whose source terrain is above the water, within [`SHORE_BAND`] grid steps of a
+    /// wet point (the shore band).
+    pub shore: u32,
+    /// ... where the mesh surface is under the water (shore eroded).
+    pub shore_drowned: u32,
+    /// Grid points of water cells where the mesh surface is within one local unit of the water
+    /// plane (L game units: z-fighting at a distance).
+    pub near_plane: u32,
+}
+
+impl ShoreStats {
+    pub fn add(&mut self, o: &ShoreStats) {
+        self.wet += o.wet;
+        self.wet_exposed += o.wet_exposed;
+        self.shore += o.shore;
+        self.shore_drowned += o.shore_drowned;
+        self.near_plane += o.near_plane;
+    }
 }
 
 const SKIRT_RESERVE: u32 = 2000;
+
+/// Width of the shore band of [`ShoreStats`] in grid steps (128 game units each).
+pub const SHORE_BAND: usize = 4;
+
+/// [`ShoreStats`] of a quad: the mesh surface (triangles over grid points, heights `zmod`) is
+/// sampled at every grid point and compared with the source heights `z` and the water `water`
+/// (local units, NaN = no water).
+fn shore_stats(n: usize, z: &[f32], water: &[f32], zmod: &[f32], points: &[(usize, usize)], triangles: &[[u32; 3]]) -> ShoreStats {
+    let mut surface = vec![f32::NAN; n * n];
+    for t in triangles {
+        let p = t.map(|v| points[v as usize]);
+        let h = p.map(|(i, j)| zmod[j * n + i]);
+        let (x0, x1) = (p.iter().map(|q| q.0).min().unwrap(), p.iter().map(|q| q.0).max().unwrap());
+        let (y0, y1) = (p.iter().map(|q| q.1).min().unwrap(), p.iter().map(|q| q.1).max().unwrap());
+        let f = |a: (usize, usize)| (a.0 as f64, a.1 as f64);
+        let (a, b, c) = (f(p[0]), f(p[1]), f(p[2]));
+        let det = (b.1 - c.1) * (a.0 - c.0) + (c.0 - b.0) * (a.1 - c.1);
+        if det == 0.0 {
+            continue;
+        }
+        for j in y0..=y1 {
+            for i in x0..=x1 {
+                let (x, y) = (i as f64, j as f64);
+                let l0 = ((b.1 - c.1) * (x - c.0) + (c.0 - b.0) * (y - c.1)) / det;
+                let l1 = ((c.1 - a.1) * (x - c.0) + (a.0 - c.0) * (y - c.1)) / det;
+                let l2 = 1.0 - l0 - l1;
+                if l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9 {
+                    continue;
+                }
+                surface[j * n + i] = (l0 * f64::from(h[0]) + l1 * f64::from(h[1]) + l2 * f64::from(h[2])) as f32;
+            }
+        }
+    }
+    // Shore band: dry points near a wet one (separable max filter of the wet mask).
+    let wet: Vec<bool> = (0..n * n).map(|k| !water[k].is_nan() && z[k] < water[k]).collect();
+    let mut rows = vec![false; n * n];
+    for j in 0..n {
+        for i in 0..n {
+            let (lo, hi) = (i.saturating_sub(SHORE_BAND), (i + SHORE_BAND).min(n - 1));
+            rows[j * n + i] = (lo..=hi).any(|k| wet[j * n + k]);
+        }
+    }
+    let mut s = ShoreStats::default();
+    for j in 0..n {
+        for i in 0..n {
+            let k = j * n + i;
+            let (w, m) = (water[k], surface[k]);
+            if w.is_nan() || m.is_nan() {
+                continue;
+            }
+            if (m - w).abs() < 1.0 {
+                s.near_plane += 1;
+            }
+            if wet[k] {
+                s.wet += 1;
+                s.wet_exposed += u32::from(m >= w);
+            } else {
+                let (lo, hi) = (j.saturating_sub(SHORE_BAND), (j + SHORE_BAND).min(n - 1));
+                if (lo..=hi).any(|r| rows[r * n + i]) {
+                    s.shore += 1;
+                    s.shore_drowned += u32::from(m < w);
+                }
+            }
+        }
+    }
+    s
+}
 
 /// Builds the quad whose south-west cell is (qx, qy).
 pub fn build_quad(
@@ -196,6 +296,8 @@ pub fn build_quad(
     } else {
         Some(opts.water_delta / lvl)
     };
+    // Shoreline mode: the bed is clamped to `floor` below the water and stays a candidate.
+    let floor = delta.filter(|_| opts.water_floor > 0.0).map(|d| (opts.water_floor / lvl).max(d));
     let mut zmod = z.clone();
     let mut deep = vec![false; n * n];
     if let Some(d) = delta {
@@ -206,6 +308,15 @@ pub fn build_quad(
             }
             if z[i] >= w {
                 zmod[i] = z[i] + d / 100.0;
+                // Shoreline mode: dry ground stays at least `Quality` + 1 local units above the
+                // water. The greedy keeps the surface within `Quality` of these heights, so every
+                // dry point stays at least one unit above the water plane: no drowned shore (the
+                // map's LOD32 outline) and no beach sharing the water plane's depth.
+                if floor.is_some() {
+                    zmod[i] = zmod[i].max(w + opts.quality.max(0.0) + 1.0);
+                }
+            } else if let Some(f) = floor {
+                zmod[i] = z[i].min(w - d).max(w - f);
             } else {
                 zmod[i] = z[i].min(w - d);
                 deep[i] = z[i] < w - d;
@@ -364,6 +475,7 @@ pub fn build_quad(
             .push(if opts.flip { [t[0], t[2], t[1]] } else { t });
     }
     land.grid_triangles = land.triangles.len();
+    let shore = shore_stats(n, &z, &water, &zmod, &grid_points, &triangles);
 
     // Skirts: a vertical quad under every border edge, facing away from the quad; two new
     // vertices per edge (the observed convention: 128 skirt vertices for the 64 border edges of
@@ -439,6 +551,7 @@ pub fn build_quad(
         water: water_cells,
         max_error,
         budget_hit,
+        shore,
     })
 }
 
@@ -591,6 +704,78 @@ mod tests {
                 assert!(has(&a, k as f32 * 256.0, l as f32 * 256.0));
             }
         }
+    }
+
+    #[test]
+    fn shoreline_mode_keeps_narrow_rivers_and_lifts_beaches() {
+        // LOD16 quad of 16 x 16 cells: land at 400 with water at 0, a river 3 grid points wide
+        // (bed -300) running north-south at grid x 200..202, and a beach at 5 (just above the
+        // water) over grid x 300..340. The river is narrower than the 32-point lattice.
+        let cells = (0..16)
+            .flat_map(|y| {
+                (0..16).map(move |x| {
+                    let mut c = TerrainCell::flat(x, y, 400.0, Some(0.0));
+                    for row in 0..GRID {
+                        for col in 0..GRID {
+                            let gx = x * 32 + col as i32;
+                            c.heights[row * GRID + col] = match gx {
+                                200..=202 => -300.0,
+                                300..=340 => 5.0,
+                                _ => 400.0,
+                            };
+                        }
+                    }
+                    c
+                })
+            })
+            .collect();
+        let w = world(cells);
+        let f = w.sampler();
+
+        let xl = build_quad(&f, &QuadOptions::for_level(&Settings::xlodgen(), 16), 0, 0, &full_coverage).unwrap();
+        assert!(xl.shore.wet > 0);
+        assert!(xl.shore.wet_exposed > 0, "xLODGen's rule bridges the river: {:?}", xl.shore);
+        assert!(xl.shore.near_plane > 0, "the beach shares the water plane: {:?}", xl.shore);
+
+        let m = build_quad(&f, &QuadOptions::for_level(&Settings::default(), 16), 0, 0, &full_coverage).unwrap();
+        assert_eq!(m.shore.wet, xl.shore.wet);
+        assert_eq!(m.shore.wet_exposed, 0, "{:?}", m.shore);
+        assert_eq!(m.shore.near_plane, 0, "{:?}", m.shore);
+        assert_eq!(m.shore.shore_drowned, 0, "{:?}", m.shore);
+        // Wet vertices sit between the push-down and the bed, dry ones at least Quality + 1 up.
+        let (d, fl, lift) = (550.0 / 16.0, 1100.0 / 16.0, 8.0 + 1.0);
+        for p in &m.land.positions[..m.land.grid_vertices] {
+            assert!(p[2] >= lift - 1e-3 || (p[2] <= -d + 1e-3 && p[2] >= -fl - 1e-3), "vertex height {}", p[2]);
+        }
+        // The same guarantee at the map's LOD32 (quality 10): no drowned shore, no lost river.
+        let cells32 = (0..32)
+            .flat_map(|y| {
+                (0..32).map(move |x| {
+                    let mut c = TerrainCell::flat(x, y, 400.0, Some(0.0));
+                    for row in 0..GRID {
+                        for col in 0..GRID {
+                            let gx = x * 32 + col as i32;
+                            c.heights[row * GRID + col] = match gx {
+                                400..=405 => -300.0,
+                                600..=700 => 5.0 + (gx - 600) as f32 * 3.0,
+                                _ => 400.0,
+                            };
+                        }
+                    }
+                    c
+                })
+            })
+            .collect();
+        let w32 = world(cells32);
+        let m32 = build_quad(&w32.sampler(), &QuadOptions::for_level(&Settings::default(), 32), 0, 0, &full_coverage).unwrap();
+        assert!(m32.shore.wet > 0 && m32.shore.shore > 0);
+        assert_eq!((m32.shore.wet_exposed, m32.shore.shore_drowned, m32.shore.near_plane), (0, 0, 0), "{:?}", m32.shore);
+
+        // Control files reproduce xLODGen (no shoreline mode unless asked for).
+        assert_eq!(crate::ControlFile::parse("").settings, Settings::xlodgen());
+        let c = crate::ControlFile::parse("WaterDeltaLOD16=550\nWaterFloorLOD16=900\n");
+        assert_eq!(c.settings.level(16).water_floor, 900.0);
+        assert!(c.to_text().contains("WaterFloorLOD16=900"));
     }
 
     #[test]

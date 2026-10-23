@@ -456,6 +456,7 @@ mod tests {
             water,
             max_error: 0.0,
             budget_hit: false,
+            shore: Default::default(),
         }
     }
 

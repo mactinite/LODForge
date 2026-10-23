@@ -133,7 +133,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         .collect();
 
     let t = Instant::now();
-    let built: Vec<(Btr, f64, bool)> = quads
+    let built: Vec<(Btr, f64, bool, lodforge_btr::mesh::ShoreStats)> = quads
         .par_iter()
         .map(|&(level, qx, qy)| {
             let opts = QuadOptions::for_level(&settings, level);
@@ -144,6 +144,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
                 Btr::from_mesh(&m, settings.level(level).z_shift),
                 m.max_error,
                 m.budget_hit,
+                m.shore,
             ))
         })
         .collect::<Result<_>>()?;
@@ -157,7 +158,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         .collect();
     let written: usize = built
         .par_iter()
-        .map(|(b, _, _)| -> Result<usize> {
+        .map(|(b, _, _, _)| -> Result<usize> {
             let files = b.write_variants(&world.editor_id, &variants)?;
             for (name, bytes) in &files {
                 std::fs::write(out_dir.join(name), bytes)?;
@@ -176,26 +177,26 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         println!("  {}", f.line());
     }
     for &level in LEVELS.iter().filter(|&&l| l <= input.max_level) {
-        let of_level: Vec<&(Btr, f64, bool)> =
-            built.iter().filter(|(b, _, _)| b.level == level).collect();
+        let of_level: Vec<&(Btr, f64, bool, lodforge_btr::mesh::ShoreStats)> =
+            built.iter().filter(|(b, _, _, _)| b.level == level).collect();
         let verts: Vec<usize> = of_level
             .iter()
-            .map(|(b, _, _)| b.land.positions.len())
+            .map(|(b, _, _, _)| b.land.positions.len())
             .collect();
         let tris: Vec<usize> = of_level
             .iter()
-            .map(|(b, _, _)| b.land.triangles.len())
+            .map(|(b, _, _, _)| b.land.triangles.len())
             .collect();
         let water_tris: usize = of_level
             .iter()
-            .map(|(b, _, _)| b.water.iter().map(|w| w.triangles.len()).sum::<usize>())
+            .map(|(b, _, _, _)| b.water.iter().map(|w| w.triangles.len()).sum::<usize>())
             .sum();
         let with_water = of_level
             .iter()
-            .filter(|(b, _, _)| !b.water.is_empty())
+            .filter(|(b, _, _, _)| !b.water.is_empty())
             .count();
-        let worst = of_level.iter().map(|(_, e, _)| *e).fold(0.0, f64::max);
-        let budget = of_level.iter().filter(|(_, _, h)| *h).count();
+        let worst = of_level.iter().map(|(_, e, _, _)| *e).fold(0.0, f64::max);
+        let budget = of_level.iter().filter(|(_, _, h, _)| *h).count();
         let q = |v: &[usize]| {
             let mut s = v.to_vec();
             s.sort_unstable();
@@ -217,11 +218,22 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             q(&verts),
             q(&tris)
         );
+        let mut shore = lodforge_btr::mesh::ShoreStats::default();
+        for (_, _, _, s) in &of_level {
+            shore.add(s);
+        }
+        let pct = |a: u32, b: u32| if b == 0 { 0.0 } else { 100.0 * f64::from(a) / f64::from(b) };
+        println!(
+            "         water outline: wet points shown dry {} / {} ({:.1}%), shore points drowned {} / {} ({:.1}%), within 1 unit of the water plane {}",
+            shore.wet_exposed, shore.wet, pct(shore.wet_exposed, shore.wet),
+            shore.shore_drowned, shore.shore, pct(shore.shore_drowned, shore.shore),
+            shore.near_plane
+        );
     }
 
     if let Some(g) = &a.golden {
         let (mut same, mut differ, mut missing) = (0, 0, 0);
-        for (b, _, _) in &built {
+        for (b, _, _, _) in &built {
             let name = b.file_name(&world.editor_id, None);
             match std::fs::read(g.join(&name)) {
                 Ok(gold) => {

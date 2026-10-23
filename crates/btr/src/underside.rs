@@ -139,6 +139,7 @@ pub fn build(input: &TerrainInput, s: &UndersideSettings) -> Result<Vec<Undersid
         quality: s.quality,
         max_verts: s.max_verts,
         water_delta: -1.0,
+        water_floor: -1.0,
         skirts: 0,
         protect_cell_borders: false,
         ignore_water: true,
