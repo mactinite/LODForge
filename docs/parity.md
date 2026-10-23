@@ -146,6 +146,29 @@ the corresponding LODForge branch does not fully do so. The observed golden uses
 These are not all proven visible regressions. Use the original audit as the long
 tail inventory, and record new evidence here before promoting an item to a blocker.
 
+### Child world copies vs the Ultra golden (skyrim-cs-base, 2026-10-23)
+
+Golden: `LODForge-golden\dyndolod-ultra-csbase-20261022` (DynDOLOD 3 Alpha-215, High rules,
+Ultra, "Child > parent" Low, Tamriel only). After `mod_world_ignore.txt`, the plugins' linear
+textures and `--child-parent Low`, Tamriel gets 365 `_DynDOLOD_CHILD` copies, golden 364, 361
+in both. Rules here come from DynDOLOD's output, logs and shipped configs only (no reverse
+engineering of its executables). Open:
+
+- **Duplicate key (ours only, 4).** DynDOLOD's debug log keys references as
+  `<model>_<round(x/100)>_<round(y/100)>_<round(z/100)>_<scale%>` and treats a child reference
+  whose key matches a parent reference as already present; LODForge matches base + position to 1
+  unit, so near-twins get copied twice: `jksthepawnedprawnesp&000800` (RTPawnedPrawn01, Tamriel
+  twin `00080A` 9 units away), `&00081C` (RTChimney01, twin `000819`), `jksskyrimesp&0147D2`
+  (WRScafGuardTower01 in Whiterun, Tamriel twin `014D59`, same key `195_-47_-28_160`). Within a
+  child world DynDOLOD also drops exact duplicates ("Duplicate reference ignored for LOD ... adds
+  same model at same position, rotation and scale"): `jkshaelgasbunkhouseesp&000817` duplicates
+  `JKs Skyrim.esp 13000EAA`. Fix: use that key for both checks (whether rotation is part of it is
+  unconfirmed).
+- **Golden only (3).** `jksskyrimesp&0024C1` (SovngardeStatue01, scale 0.3, Whiterun),
+  `jkstempleofthedivinesesp&0008F8` (SCastleWall06 at exactly the position of Skyrim.esm
+  `0F4FEE`; probably our base+position check), `skyrimesm&0391FE` (a Tamriel pine copied into
+  Solitude: the parent -> child direction, `ScanParent`).
+
 ## Exit criteria
 
 Use the [validation matrix](validation.md). Certification requires equivalent
