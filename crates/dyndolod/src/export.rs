@@ -599,6 +599,11 @@ pub fn build_dynamic(inp: &ExportInput<'_>) -> Result<Vec<DynamicRef>, String> {
         let p = &inp.world.refs[&id];
         let base_id = inp.swaps.get(&p.base).copied().unwrap_or(p.base);
         let Some(b) = inp.bases.get(&base_id) else { continue };
+        // Bases without a model (engine markers such as CollisionMarker 00000021, used by
+        // collision-box references) have nothing to show at distance. DynDOLOD skips them too.
+        if b.model.trim().is_empty() {
+            continue;
+        }
         // Child worldspace copies are static object LOD only.
         if p.flags & FLAG_DELETED != 0 || crate::childworld::is_copy(id) {
             continue;
@@ -696,13 +701,17 @@ mod parent_tests {
     use super::*;
 
     fn full_model_fixture(action: &str, present: bool, lod_paths: &[&str], flags: u32) -> Result<Vec<DynamicRef>, String> {
+        fixture_with_model("object.nif", action, present, lod_paths, flags)
+    }
+
+    fn fixture_with_model(model: &str, action: &str, present: bool, lod_paths: &[&str], flags: u32) -> Result<Vec<DynamicRef>, String> {
         let mut world = Worldspace::default();
         world.refs.insert(1, lodforge_esp::Placement {
             base: 100, flags, position: [0.0; 3], rotation: [0.0; 3], scale: 1.0,
             has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0,
             cell: Some((0, 0)), offset: 0, plugin: 0,
         });
-        let bases = HashMap::from([(100, Base { form_id: 100, signature: *b"DOOR", model: "object.nif".into(), ..Default::default() })]);
+        let bases = HashMap::from([(100, Base { form_id: 100, signature: *b"DOOR", model: model.into(), ..Default::default() })]);
         let rules: Vec<_> = if action.is_empty() { Vec::new() } else { vec![crate::rules::Rule::parse(&format!("object,,,,Far LOD,{action},0"), "test").unwrap()] };
         let index = crate::lodmodels::LodIndex::scan(lod_paths.iter().copied(), &["meshes".into()], &[], &HashSet::new());
         let materials = HashMap::new();
@@ -732,6 +741,17 @@ mod parent_tests {
         assert_eq!(refs[0].model, "meshes\\object_lod_0.nif");
         let refs = full_model_fixture("Unchanged", true, &["meshes\\object_dyndolod_lod.nif", "meshes\\object_lod_0.nif"], 0).unwrap();
         assert_eq!(refs[0].model, "meshes\\object_dyndolod_lod.nif");
+    }
+
+    #[test]
+    fn model_less_bases_are_skipped_not_failed() {
+        // JK's Skyrim places persistent Is Full LOD collision boxes on CollisionMarker (no MODL):
+        // the persistent full-LOD fallback must not turn them into a missing-model error.
+        for model in ["", "  "] {
+            assert!(fixture_with_model(model, "", false, &[], 0x10400).unwrap().is_empty());
+            assert!(fixture_with_model(model, "Replace", false, &[], 0).unwrap().is_empty());
+            assert!(fixture_with_model(model, "Unchanged", false, &[], 0).unwrap().is_empty());
+        }
     }
 
     #[test]
