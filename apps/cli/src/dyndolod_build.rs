@@ -85,6 +85,12 @@ pub struct Opts {
     /// placements from the load order); `go` needs no cache.
     #[arg(long, value_enum, default_value = "off")]
     pub grass: GrassMode,
+    /// Tree LOD (`--mode dyndolod`): `classic` (default; billboards in the game's tree LOD,
+    /// at most 256 tree types per list) or `ultra` (DynDOLOD's Ultra tree LOD: every tree in
+    /// object LOD, with the rule's LOD models where the preset asks for them (High: a 3D model
+    /// at LOD4) and its billboard otherwise, and empty tree LOD lists).
+    #[arg(long, value_enum, default_value = "classic")]
+    pub tree_lod: TreeLodMode,
     /// Grass placements for `--grass bto`: always the NGIO grass cache (precache in game with NGIO).
     /// Cells without a cache file get no grass (one warning per worldspace); nothing is generated
     /// from the load order any more. Kept so existing command lines keep working.
@@ -158,6 +164,10 @@ pub struct Config {
     pub pbr: bool,
     /// `Windows` (glow LOD windows).
     pub windows: bool,
+    /// Ultra tree LOD: trees in object LOD (`--tree-lod ultra`).
+    pub ultra: bool,
+    /// `Configs\DynDOLOD_SSE_mesh_crc32.txt` (empty when missing).
+    pub mesh_crc: lodforge_dyndolod::lodmodels::MeshCrcTable,
     /// Winning TXST texture sets (MODS alternate textures).
     pub texture_sets: HashMap<u32, Vec<String>>,
     pub reference_states: HashMap<u32, lodforge_dyndolod::export::ReferenceState>,
@@ -168,6 +178,7 @@ impl Config {
         let data_override = |path: &str| p.vfs.read(path).ok().flatten().map(|b| lodforge_dyndolod::ini::decode(&b));
         let src = RuleSource { rules_dir: dir.join("Rules"), data_override: &data_override };
         let rules = rules::build_rules(&src, "SSE", preset, !static_lod, &p.plugin_names);
+        let mesh_crc = std::fs::read(dir.join(r"Configs\DynDOLOD_SSE_mesh_crc32.txt")).map(|b| lodforge_dyndolod::lodmodels::MeshCrcTable::parse(&String::from_utf8_lossy(&b))).unwrap_or_default();
         let ini = Ini::read(&dir.join("DynDOLOD_SSE.ini")).with_context(|| format!("reading {}", dir.join("DynDOLOD_SSE.ini").display()))?;
         let cfg = |k: &str| ini.get("DynDOLOD", k).unwrap_or("").to_string();
         let list = |k: &str| -> Vec<String> { cfg(k).split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect() };
@@ -182,7 +193,7 @@ impl Config {
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
         let reference_states = lodforge_dyndolod::export::read_reference_states(lo)?;
-        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, pbr: true, texture_sets, reference_states })
+        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states })
     }
 
     /// Re-reads LOD model discovery after files were added to the VFS (generated LOD models).
@@ -226,7 +237,7 @@ fn parallax_diff(p: &Profile) -> ParallaxGenDiff {
 pub fn with_resolver<R>(p: &Profile, c: &Config, f: impl FnOnce(&Resolver<'_>) -> R) -> R {
     let read = |path: &str| p.vfs.read(path).ok().flatten();
     let exists = |path: &str| p.vfs.exists(path);
-    let r = Resolver { rules: &c.rules, index: &c.index, parallax: &c.parallax, materials: &c.materials, plugins: &p.plugin_names, owners: &c.owners, read: &read, exists: &exists, level32: false };
+    let r = Resolver { rules: &c.rules, index: &c.index, parallax: &c.parallax, materials: &c.materials, plugins: &p.plugin_names, owners: &c.owners, read: &read, exists: &exists, level32: false, mesh_crc: &c.mesh_crc };
     f(&r)
 }
 
@@ -454,7 +465,7 @@ pub fn export_world(p: &Profile, c: &Config, r: &Resolver<'_>, world: &Worldspac
             Some(s) => c.swaps.swaps.get(&s).map(|secs| secs.values().flat_map(|m| m.iter().map(|(a, b)| (*a, *b))).collect()).unwrap_or_default(),
             None => HashMap::new(),
         };
-        let inp = ExportInput { swaps: &season_swaps, world, bases: &c.bases, materials: &c.materials, resolver: r, rules: &c.rules, plugins: &p.plugin_names, owners: &c.owners, ignore_base_edid: &c.ignore_edid, large_refs: &large, xesp_lod: &c.xesp_lod, tree_max_tilt: tilt, tree_object_bounds: &bounds, windows: c.windows, reference_states: &c.reference_states };
+        let inp = ExportInput { swaps: &season_swaps, world, bases: &c.bases, materials: &c.materials, resolver: r, rules: &c.rules, plugins: &p.plugin_names, owners: &c.owners, ignore_base_edid: &c.ignore_edid, large_refs: &large, xesp_lod: &c.xesp_lod, tree_max_tilt: tilt, tree_object_bounds: &bounds, windows: c.windows, ultra: c.ultra, reference_states: &c.reference_states };
         let (lines, skipped) = lodforge_dyndolod::export::build_lines(&inp);
         out.lod_bases.extend(lodforge_dyndolod::export::large_object_bases(&lines, &large));
         let mut h = header.clone();
@@ -936,6 +947,14 @@ pub fn complex_grass_flat(c: &Config, flat: &str) -> String {
         out.push_str("\r\n");
     }
     out
+}
+
+/// Where trees get their LOD (see `Opts::tree_lod`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum TreeLodMode {
+    #[default]
+    Classic,
+    Ultra,
 }
 
 /// Grass LOD flavour.

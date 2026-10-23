@@ -249,6 +249,27 @@ pub fn run(a: &Args) -> Result<()> {
     run_with(&p, a)
 }
 
+/// Ultra tree LOD: an empty `<World>[.SEASON].lst` (type count 0) for the default season and
+/// each built season, so the game draws no tree LOD while the trees are in object LOD (DynDOLOD's
+/// default, `CreateEmptyBTT=0`). Worldspaces the load order has no tree LOD for are left alone.
+pub fn write_empty_lists(p: &Profile, a: &Args) -> Result<()> {
+    let worlds = scan_worldspaces(&p.load_order)?;
+    let Some(world) = worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(&a.world)) else { bail!("worldspace {} not found", a.world) };
+    let empty = TreeLod { world: world.editor_id.clone(), ..Default::default() };
+    let mut seasons: Vec<Option<&str>> = vec![None];
+    seasons.extend(a.seasons.iter().map(|s| Some(s.as_str())));
+    let mut n = 0;
+    for season in seasons {
+        let rel = season_path(empty.list_path(), season.map(str::to_ascii_uppercase).as_deref());
+        let path = a.out.join(&rel);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(&path, empty.list_bytes()).with_context(|| format!("writing {}", path.display()))?;
+        n += 1;
+    }
+    println!("{}: ultra tree LOD, {n} empty tree LOD lists (trees are in object LOD)", world.editor_id);
+    Ok(())
+}
+
 pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     let t0 = Instant::now();
     let lo = &p.load_order;

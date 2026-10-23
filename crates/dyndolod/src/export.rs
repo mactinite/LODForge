@@ -144,6 +144,10 @@ pub struct ExportInput<'a> {
     pub tree_object_bounds: &'a [(i32, i32, i32, i32)],
     /// `Windows`: glow LOD windows (`<model>glow_lod_N.nif`) in object LOD.
     pub windows: bool,
+    /// Ultra tree LOD: trees stay in object LOD instead of the game's tree LOD, and a tree level
+    /// whose rule wants a LOD model that is not installed uses the billboard
+    /// (`TreeFullFallBack=1`).
+    pub ultra: bool,
     /// Winning REFR/ACHR states across the load order, including interior enable markers.
     pub reference_states: &'a HashMap<u32, ReferenceState>,
 }
@@ -299,7 +303,7 @@ pub fn build_lines(inp: &ExportInput<'_>) -> (Vec<RefLine>, HashMap<u32, Skip>) 
             }
             // Trees with billboard rules go to classic tree LOD, except tilted ones and those in
             // child worldspace bounds (tree LOD does not work there).
-            if crate::assign::is_tree(b) && lod.billboard.is_some() && std::env::var_os("LODFORGE_TREE_OLD").is_none() || (crate::assign::is_tree(b) && inp.rules[ri].levels.iter().any(|l| matches!(l, crate::rules::Level::Billboard(_)))) {
+            if !inp.ultra && (crate::assign::is_tree(b) && lod.billboard.is_some() && std::env::var_os("LODFORGE_TREE_OLD").is_none() || crate::assign::is_tree(b) && inp.rules[ri].levels.iter().any(|l| matches!(l, crate::rules::Level::Billboard(_)))) {
                 let cell = ((p.position[0] / 4096.0).floor() as i32, (p.position[1] / 4096.0).floor() as i32);
                 let in_bounds = inp.tree_object_bounds.iter().any(|&(x0, y0, x1, y1)| (x0..=x1).contains(&cell.0) && (y0..=y1).contains(&cell.1));
                 // Large references stay in object LOD (golden Solstheim: 94 Dragonborn.esm trees).
@@ -309,7 +313,15 @@ pub fn build_lines(inp: &ExportInput<'_>) -> (Vec<RefLine>, HashMap<u32, Skip>) 
                     continue;
                 }
             }
-            (lod.columns.clone(), inp.rules[ri].flags, &inp.rules[ri])
+            let mut cols = lod.columns.clone();
+            if inp.ultra && crate::assign::is_tree(b) && let Some(bb) = &lod.billboard {
+                for (col, level) in cols.iter_mut().zip(inp.rules[ri].levels.iter()) {
+                    if col.is_empty() && matches!(level, crate::rules::Level::Model(_)) {
+                        col.clone_from(bb);
+                    }
+                }
+            }
+            (cols, inp.rules[ri].flags, &inp.rules[ri])
         };
         let (columns, rule_flags, rule) = columns;
         let mut material = String::new();
@@ -718,15 +730,16 @@ mod parent_tests {
         let owners = HashMap::from([(0, 0)]);
         let plugins = ["Test.esm".into()];
         let parallax = Default::default();
+        let mesh_crc = crate::lodmodels::MeshCrcTable::default();
         let resolver = Resolver {
             rules: &rules, index: &index, parallax: &parallax, materials: &materials,
-            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| present, level32: false,
+            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| present, level32: false, mesh_crc: &mesh_crc,
         };
         build_dynamic(&ExportInput {
             world: &world, bases: &bases, materials: &materials, resolver: &resolver,
             rules: &rules, plugins: &plugins, owners: &owners, ignore_base_edid: &[],
             large_refs: &HashSet::new(), swaps: &HashMap::new(), xesp_lod: &HashSet::new(),
-            tree_max_tilt: 30.0, tree_object_bounds: &[], windows: false, reference_states: &HashMap::new(),
+            tree_max_tilt: 30.0, tree_object_bounds: &[], windows: false, ultra: false, reference_states: &HashMap::new(),
         })
     }
 
@@ -741,6 +754,53 @@ mod parent_tests {
         assert_eq!(refs[0].model, "meshes\\object_lod_0.nif");
         let refs = full_model_fixture("Unchanged", true, &["meshes\\object_dyndolod_lod.nif", "meshes\\object_lod_0.nif"], 0).unwrap();
         assert_eq!(refs[0].model, "meshes\\object_dyndolod_lod.nif");
+    }
+
+    /// One TREE reference under DynDOLOD's High tree rule (3D model at LOD4, billboards beyond),
+    /// with a billboard and the given LOD models installed.
+    fn tree_lines(ultra: bool, lod_paths: &[&str]) -> (Vec<RefLine>, HashMap<u32, Skip>) {
+        let mut world = Worldspace::default();
+        world.refs.insert(0x801, lodforge_esp::Placement {
+            base: 0x800, flags: 0, position: [100.0, 100.0, 0.0], rotation: [0.0; 3], scale: 1.0,
+            has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0,
+            cell: Some((0, 0)), offset: 0, plugin: 0,
+        });
+        let bases = HashMap::from([(0x800, Base { form_id: 0x800, signature: *b"TREE", model: "landscape\\trees\\testtree.nif".into(), ..Default::default() })]);
+        let rules = vec![crate::rules::Rule::parse("tree,Level0,Billboard1,Billboard1,Far LOD,Unchanged,0", "test").unwrap()];
+        let index = crate::lodmodels::LodIndex::scan(lod_paths.iter().copied(), &["meshes".into()], &[], &HashSet::new());
+        let materials = HashMap::new();
+        let owners = HashMap::from([(0, 0)]);
+        let plugins = ["Test.esm".into()];
+        let parallax = Default::default();
+        let mesh_crc = crate::lodmodels::MeshCrcTable::default();
+        let resolver = Resolver {
+            rules: &rules, index: &index, parallax: &parallax, materials: &materials,
+            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| true, level32: false, mesh_crc: &mesh_crc,
+        };
+        build_lines(&ExportInput {
+            world: &world, bases: &bases, materials: &materials, resolver: &resolver,
+            rules: &rules, plugins: &plugins, owners: &owners, ignore_base_edid: &[],
+            large_refs: &HashSet::new(), swaps: &HashMap::new(), xesp_lod: &HashSet::new(),
+            tree_max_tilt: 30.0, tree_object_bounds: &[], windows: false, ultra, reference_states: &HashMap::new(),
+        })
+    }
+
+    #[test]
+    fn ultra_keeps_trees_in_object_lod_with_billboard_fallback() {
+        // Classic: the tree goes to the game's tree LOD.
+        let (lines, skipped) = tree_lines(false, &[]);
+        assert!(lines.is_empty());
+        assert!(matches!(skipped.get(&0x801), Some(Skip::TreeLod)));
+        // Ultra without a 3D model: the billboard at every level (TreeFullFallBack=1).
+        let (lines, _) = tree_lines(true, &[]);
+        assert_eq!(lines.len(), 1);
+        let c = &lines[0].columns;
+        assert!(!c[0].is_empty() && c[0] == c[1] && c[1] == c[2], "{c:?}");
+        // Ultra with a 3D passthru model: the model at LOD4, billboards beyond.
+        let (lines, _) = tree_lines(true, &["meshes\\dyndolod\\lod\\trees\\testtreepassthru_lod.nif"]);
+        let c = &lines[0].columns;
+        assert!(c[0].ends_with("testtreepassthru_lod.nif"), "{c:?}");
+        assert_ne!(c[0], c[1]);
     }
 
     #[test]

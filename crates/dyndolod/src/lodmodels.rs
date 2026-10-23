@@ -10,7 +10,7 @@
 //!   ([`ParallaxGenDiff`]);
 //! - `_lod_<N>h` / `_lod_<N>l` snow variants for heavy / light snow bases.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Bare file name (lower-case) -> Data-relative path (lower-case).
 #[derive(Debug, Default, Clone)]
@@ -57,6 +57,42 @@ impl LodIndex {
 }
 
 /// Snow variant of a base (from its directional material).
+/// `Configs\DynDOLOD_<GAME>_mesh_crc32.txt`: the CRC32s a vanilla full mesh path can have.
+/// A winning mesh at such a path with another CRC was replaced by a mod, so LOD models found
+/// by its plain name (made for the vanilla mesh) do not fit it; only `<stem>_<crc>` models do
+/// (DynDOLOD 3 Ultra golden, skyrim-cs-base: Ulvenwald's replaced vanilla pines got billboards,
+/// not DynDOLOD Resources' `treepineforest03passthru_lod.nif`).
+#[derive(Debug, Clone, Default)]
+pub struct MeshCrcTable(pub HashMap<String, HashSet<u32>>);
+
+impl MeshCrcTable {
+    /// `path;CRC` lines (hex), `//` comments.
+    pub fn parse(text: &str) -> MeshCrcTable {
+        let mut m: HashMap<String, HashSet<u32>> = HashMap::new();
+        for line in text.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with("//") {
+                continue;
+            }
+            if let Some((p, c)) = l.rsplit_once(';')
+                && let Ok(c) = u32::from_str_radix(c.trim(), 16)
+            {
+                m.entry(p.trim().to_ascii_lowercase()).or_default().insert(c);
+            }
+        }
+        MeshCrcTable(m)
+    }
+
+    /// True when `model` (a `meshes\...` path) is a known vanilla mesh whose CRC is not one of
+    /// its vanilla CRCs.
+    pub fn replaced(&self, model: &str, crc: Option<u32>) -> bool {
+        match (self.0.get(&model.to_ascii_lowercase()), crc) {
+            (Some(set), Some(c)) => !set.contains(&c),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Snow {
     None,
@@ -67,13 +103,21 @@ pub enum Snow {
 /// Model levels 0..3 for a full model file stem (`farmhouse02`), lower-case paths.
 /// `snow` gives the `h` / `l` variant per model level (from the base's MNAM).
 pub fn lod_set(index: &LodIndex, stem: &str, crc: Option<u32>, snow: [Snow; 4], passthru_first: bool) -> [Option<String>; 4] {
+    lod_set_with(index, stem, crc, snow, passthru_first, true)
+}
+
+/// [`lod_set`]; `allow_plain = false` only accepts `<stem>_<crc>` models (a full model that a
+/// replacer mod changed, see [`MeshCrcTable`]).
+pub fn lod_set_with(index: &LodIndex, stem: &str, crc: Option<u32>, snow: [Snow; 4], passthru_first: bool, allow_plain: bool) -> [Option<String>; 4] {
     let stem = stem.to_ascii_lowercase();
     let variants: Vec<String> = {
         let mut v = Vec::new();
         if let Some(c) = crc {
             v.push(format!("{stem}_{c:08x}"));
         }
-        v.push(stem.clone());
+        if allow_plain {
+            v.push(stem.clone());
+        }
         v
     };
     let lookup = |name: &str| -> Option<String> { index.get(name).map(str::to_string) };
@@ -215,6 +259,20 @@ mod tests {
         assert_eq!(n(&lod_set(&i, "farm", None, [Snow::None; 4], false)), ["farm_lod.nif", "farm_lod.nif", "farm_lod.nif", ""]);
         assert_eq!(n(&lod_set(&i, "mc", None, [Snow::Light; 4], false)), ["mc_lod_0l.nif", "mc_lod_1.nif", "mc_lod_2.nif", ""]);
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn replaced_meshes_only_take_crc_named_lod_models() {
+        let t = MeshCrcTable::parse("// crc32 of meshes\nmeshes\\landscape\\trees\\treepineforest03.nif;9DD6760A\nmeshes\\landscape\\trees\\treepineforest03.nif;9C85B0A8\n");
+        let model = "meshes\\landscape\\trees\\treepineforest03.nif";
+        assert!(!t.replaced(model, Some(0x9DD6_760A)), "a vanilla CRC is not a replacement");
+        assert!(t.replaced(model, Some(0x0B77_42F0)), "another CRC is");
+        assert!(!t.replaced("meshes\\mod\\newtree.nif", Some(1)), "meshes the table does not know are never replaced");
+        let i = index(&["treepineforest03passthru_lod.nif", "treepineforest03_0b7742f0passthru_lod.nif"]);
+        let name = |s: &[Option<String>; 4]| s[0].as_deref().map(|p| p.rsplit('\\').next().unwrap().to_string());
+        assert_eq!(name(&lod_set_with(&i, "treepineforest03", Some(0x0B77_42F0), [Snow::None; 4], true, false)).as_deref(), Some("treepineforest03_0b7742f0passthru_lod.nif"));
+        assert_eq!(name(&lod_set_with(&i, "treepineforest03", Some(0x1234_5678), [Snow::None; 4], true, false)), None);
+        assert_eq!(name(&lod_set_with(&i, "treepineforest03", Some(0x1234_5678), [Snow::None; 4], true, true)).as_deref(), Some("treepineforest03passthru_lod.nif"));
     }
 
     #[test]

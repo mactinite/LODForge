@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::bases::{Base, model_path};
-use crate::lodmodels::{LodIndex, ParallaxGenDiff, Snow, crc32, lod_set};
+use crate::lodmodels::{LodIndex, ParallaxGenDiff, Snow, crc32};
 use crate::rules::{Level, Rule, select_mask_rule};
 
 /// STAT record flag "Has Tree LOD".
@@ -37,6 +37,8 @@ pub struct Resolver<'a> {
     pub read: &'a (dyn Fn(&str) -> Option<Vec<u8>> + Sync),
     pub exists: &'a (dyn Fn(&str) -> bool + Sync),
     pub level32: bool,
+    /// DynDOLOD's vanilla mesh CRCs (replaced meshes only take `<stem>_<crc>` LOD models).
+    pub mesh_crc: &'a crate::lodmodels::MeshCrcTable,
 }
 
 /// The `h` / `l` LOD model variant per level: what the base's MNAM assigns (`..._LOD_0H.nif`),
@@ -83,7 +85,7 @@ mod tests {
             let materials = HashMap::new();
             let owners = HashMap::new();
             Resolver { rules: &[], index: &index, parallax: &parallax, materials: &materials,
-                plugins: &[], owners: &owners, read: &|_| None, exists: &|p| exists && paths.contains(&p), level32: false }.resolve(base)
+                plugins: &[], owners: &owners, read: &|_| None, exists: &|p| exists && paths.contains(&p), level32: false, mesh_crc: &crate::lodmodels::MeshCrcTable::default() }.resolve(base)
         };
         assert_eq!(resolve(&base, false, true).levels[0].as_deref(), Some("meshes\\other_lod.nif"));
         assert_eq!(resolve(&base, true, true).levels[0].as_deref(), Some("meshes\\hall_lod_0.nif"));
@@ -114,7 +116,7 @@ impl Resolver<'_> {
         let stem = model.rsplit('\\').next().unwrap_or(&model).trim_end_matches(".nif").to_string();
         let tree = is_tree(b);
         let crc = self.model_crc(&model);
-        let mut levels = lod_set(self.index, &stem, crc, snow_of(b, self.materials), true);
+        let mut levels = crate::lodmodels::lod_set_with(self.index, &stem, crc, snow_of(b, self.materials), true, !self.mesh_crc.replaced(&model, crc));
         // A full model that is itself named `_lod` is its own LOD model (the bare name may
         // resolve to a copy in a later LOD folder).
         if levels.iter().all(Option::is_none) && stem.contains("_lod")

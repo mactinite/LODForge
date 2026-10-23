@@ -332,6 +332,7 @@ pub fn run(a: &Args) -> Result<()> {
         match crate::dyndolod_build::Config::load(&p, &dir, &a.dyn_opts.preset, a.dyn_opts.static_lod) {
             Ok(mut c) => {
                 c.windows = a.dyn_opts.windows;
+                c.ultra = a.dyn_opts.tree_lod == crate::dyndolod_build::TreeLodMode::Ultra;
                 c.pbr = a.materials.pbr();
                 for (key, v) in [("ObjectLODMaxTileSize", a.dyn_opts.atlas_max_tile), ("FullTextureMaxTileSize", a.dyn_opts.atlas_full_max_tile)] {
                     if let Some(v) = v {
@@ -607,7 +608,12 @@ pub fn run(a: &Args) -> Result<()> {
             let dyndolod = dyn_cfg.as_ref().filter(|_| dyn_mode).map(|c| c.dir.clone());
             let exclude = tree_exclude.remove(world).unwrap_or_default();
             let args = crate::tree_lod::Args { profile: a.profile.clone(), world: world.clone(), seasons: a.seasons.clone(), out: out.clone(), placeholder_billboards: None, golden: None, list_missing: false, dyndolod, exclude };
-            step("trees", None, &mut || crate::tree_lod::run_with(&p, &args));
+            if dyn_cfg.as_ref().is_some_and(|c| c.ultra && dyn_mode) {
+                // Ultra: the trees are in object LOD; empty lists switch the game's tree LOD off.
+                step("trees", None, &mut || crate::tree_lod::write_empty_lists(&p, &args));
+            } else {
+                step("trees", None, &mut || crate::tree_lod::run_with(&p, &args));
+            }
         }
         if dyn_mode
             && !a.no_objects
