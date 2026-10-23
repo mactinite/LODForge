@@ -20,6 +20,7 @@ mod info;
 mod lod_models;
 mod lod_sources;
 mod tree_report;
+mod tree_models;
 mod inspect;
 mod glow_atlas;
 mod object_atlas;
@@ -190,6 +191,8 @@ enum Command {
     LodSources(lod_sources::Args),
     /// What LOD every tree base gets in a DynDOLOD-mode export (3D model, billboard, none) and why
     TreeReport(tree_report::Args),
+    /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
+    TreeModels(tree_models::Args),
     /// LOD models generated from full models where DynDOLOD's rules want LOD and none is installed.
     LodModels(lod_models::Args),
     /// Large references per cell and a DynDOLOD output's large-reference workarounds.
@@ -256,6 +259,7 @@ fn main() -> Result<()> {
         Command::Info(a) => info::run(&a),
         Command::LodSources(a) => lod_sources::run(&a),
         Command::TreeReport(a) => tree_report::run(&a),
+        Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),
         Command::PluginDump(a) => plugin_dump::run(&a),
         Command::LargeRefs(a) => large_refs::run(&a),

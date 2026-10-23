@@ -2588,6 +2588,7 @@ dependencies = [
  "lodforge-terrain",
  "lodforge-texgen",
  "lodforge-treelod",
+ "lodforge-treemodel",
  "lodforge-viewer",
  "mimalloc",
  "png 0.17.16",
@@ -2746,6 +2747,13 @@ dependencies = [
  "lodforge-archive",
  "lodforge-esp",
  "lodforge-objlod",
+]
+
+[[package]]
+name = "lodforge-treemodel"
+version = "0.1.0"
+dependencies = [
+ "lodforge-nif",
 ]
 
 [[package]]

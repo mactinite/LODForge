@@ -10,6 +10,7 @@ lodforge-archive.workspace = true
 lodforge-dds.workspace = true
 lodforge-nif.workspace = true
 lodforge-lodmodel.workspace = true
+lodforge-treemodel.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rayon.workspace = true

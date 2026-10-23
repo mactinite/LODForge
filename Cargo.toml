@@ -23,6 +23,7 @@ lodforge-grass = { path = "crates/grass" }
 lodforge-dyndolod = { path = "crates/dyndolod" }
 lodforge-texgen = { path = "crates/texgen" }
 lodforge-lodmodel = { path = "crates/lodmodel" }
+lodforge-treemodel = { path = "crates/treemodel" }
 lodforge-viewer = { path = "crates/viewer" }
 anyhow = "1"
 half = "2"
