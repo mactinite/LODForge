@@ -255,8 +255,10 @@ pub fn render_all(p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, renderer
             ];
             let mut imgs = renderer.render_many(gpu, &jobs).into_iter();
             let (mut rgba, mut normal) = (imgs.next().unwrap_or_default(), imgs.next().unwrap_or_default());
-            lodforge_texgen::finish_alpha(&mut rgba, w, 128);
-            lodforge_texgen::finish_alpha(&mut normal, w, 128);
+            // Supersampled renders keep their soft coverage alpha (as tree billboards do).
+            let finish = |img: &mut Vec<u8>| if lodforge_texgen::render::supersample() > 1 { lodforge_texgen::finish_alpha_soft(img, w) } else { lodforge_texgen::finish_alpha(img, w, 128) };
+            finish(&mut rgba);
+            finish(&mut normal);
             if !o.keep_alpha {
                 rgba.chunks_exact_mut(4).for_each(|px| px[3] = 255);
             }

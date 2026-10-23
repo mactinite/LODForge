@@ -148,8 +148,35 @@ pub const MAX_SAMPLES: u32 = 16;
 /// test discards whole pixels, so MSAA alone leaves foliage edges inside a texture hard and
 /// stair-stepped (thin needles turn into pixel noise); averaging SUPERSAMPLE^2 samples gives every
 /// edge texel its real coverage. MSAA is off in this mode (the supersampling covers triangle edges
-/// too).
-pub const SUPERSAMPLE: u32 = 4;
+/// too). This is the default; [set_supersample] changes it (1 = TexGen's MSAA render with a hard
+/// alpha cut).
+pub const DEFAULT_SUPERSAMPLE: u32 = 4;
+
+/// Largest supersampling factor; the render target is also capped at [MAX_RENDER_DIM].
+pub const MAX_SUPERSAMPLE: u32 = 8;
+
+/// Largest render target side (wgpu's default `max_texture_dimension_2d`).
+pub const MAX_RENDER_DIM: u32 = 8192;
+
+static SUPERSAMPLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(DEFAULT_SUPERSAMPLE);
+
+/// Sets the billboard supersampling factor (per axis, clamped to 1..[MAX_SUPERSAMPLE]) for every
+/// [Renderer] made afterwards.
+pub fn set_supersample(factor: u32) {
+    SUPERSAMPLE.store(factor.clamp(1, MAX_SUPERSAMPLE), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The billboard supersampling factor (see [set_supersample]).
+pub fn supersample() -> u32 {
+    SUPERSAMPLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The factor used for a billboard of `w` x `h` pixels: [supersample], reduced so the render
+/// target stays within [MAX_RENDER_DIM].
+pub fn supersample_for(w: u32, h: u32) -> u32 {
+    let side = w.max(h).max(1);
+    supersample().min((MAX_RENDER_DIM / side).max(1))
+}
 
 pub struct Renderer {
     /// MSAA sample count of the render target.
@@ -262,7 +289,7 @@ fn material(m: &Mesh, textures: &HashMap<String, TexData>) -> ([f32; 4], [f32; 4
 impl Renderer {
     pub fn new(gpu: &lodforge_gpu::Gpu) -> Renderer {
         let d = &gpu.device;
-        let samples = if SUPERSAMPLE > 1 { 1 } else { gpu.max_msaa.min(MAX_SAMPLES) };
+        let samples = if supersample() > 1 { 1 } else { gpu.max_msaa.min(MAX_SAMPLES) };
         // `LODFORGE_BILLBOARD_WGSL=<file>` replaces the built-in shader at run time (tuning the
         // shading against golden billboards without a rebuild).
         let source = std::env::var_os("LODFORGE_BILLBOARD_WGSL").and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| include_str!("billboard.wgsl").to_string());
@@ -378,7 +405,7 @@ impl Renderer {
         let mut readbacks = Vec::with_capacity(jobs.len());
         for job in jobs {
             let (scene, view, light, kind) = (job.scene, job.view, job.light, job.pass);
-            let ss = SUPERSAMPLE.max(1);
+            let ss = supersample_for(view.width.max(1), view.height.max(1));
             let (w, h) = (view.width.max(1) * ss, view.height.max(1) * ss);
             let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
             let msaa = (self.samples > 1).then(|| d.create_texture(&wgpu::TextureDescriptor { label: Some("msaa"), size, mip_level_count: 1, sample_count: self.samples, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] }));
@@ -478,7 +505,7 @@ impl Renderer {
                 wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
                 size,
             );
-            readbacks.push((readback, row, w, h));
+            readbacks.push((readback, row, w, h, ss));
         }
         q.submit([enc.finish()]);
         let (tx, rx_) = std::sync::mpsc::channel();
@@ -494,14 +521,14 @@ impl Renderer {
         }
         readbacks
             .iter()
-            .map(|(buf, row, w, h)| {
+            .map(|(buf, row, w, h, ss)| {
                 let data = buf.slice(..).get_mapped_range();
                 let mut out = vec![0u8; (w * h * 4) as usize];
                 for y in 0..*h as usize {
                     // Row 0 of the texture is the top of the image (clip y = +1).
                     out[y * *w as usize * 4..(y + 1) * *w as usize * 4].copy_from_slice(&data[y * *row as usize..y * *row as usize + *w as usize * 4]);
                 }
-                downsample(&out, *w, *h, SUPERSAMPLE.max(1))
+                downsample(&out, *w, *h, *ss)
             })
             .collect()
     }
@@ -551,4 +578,24 @@ pub struct Job<'a> {
     pub view: View,
     pub light: Light,
     pub pass: Pass,
+}
+
+#[cfg(test)]
+mod supersample_tests {
+    use super::*;
+
+    #[test]
+    fn factor_is_clamped_and_capped_by_the_render_target() {
+        assert_eq!(supersample(), DEFAULT_SUPERSAMPLE);
+        assert_eq!(supersample_for(256, 512), 4);
+        // 4 x 4096 would exceed 8192: the factor drops to what fits.
+        assert_eq!(supersample_for(1024, 4096), 2);
+        assert_eq!(supersample_for(8192, 100), 1);
+        set_supersample(20);
+        assert_eq!(supersample(), MAX_SUPERSAMPLE);
+        assert_eq!(supersample_for(512, 1024), 8);
+        set_supersample(0);
+        assert_eq!(supersample(), 1);
+        set_supersample(DEFAULT_SUPERSAMPLE);
+    }
 }

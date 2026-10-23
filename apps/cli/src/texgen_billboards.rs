@@ -69,6 +69,9 @@ pub struct Candidate {
     pub forced: Option<bool>,
     /// `Scale=` from an override file.
     pub scale: Option<f32>,
+    /// Pixel height of a mod-installed billboard this render replaces: the render is at least
+    /// this tall, so re-rendering (`--installed-billboards render`) never loses resolution.
+    pub min_px: Option<u32>,
 }
 
 impl Candidate {
@@ -78,6 +81,17 @@ impl Candidate {
         let base = m.rsplit('\\').next().unwrap_or("").trim_end_matches(".nif").to_string();
         format!("{base}_{:08x}", self.local)
     }
+}
+
+static RENDER_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether bases with a mod-installed billboard are rendered too (`--installed-billboards`).
+pub fn set_render_installed(on: bool) {
+    RENDER_INSTALLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn render_installed() -> bool {
+    RENDER_INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// `_ResourcePack.esl` -> `_resourcepackesl`: the plugin part of DynDOLOD's config file names.
@@ -155,7 +169,18 @@ pub fn discover_trees(p: &crate::profile::Profile, bases: &HashMap<u32, lodforge
         if b.model.is_empty() {
             continue;
         }
-        out.push(Candidate { base: b.form_id, plugin: plugin.to_ascii_lowercase(), local, editor_id: b.editor_id.clone(), model: b.model.clone(), accepted: forced.unwrap_or(rule), forced: listed_forced, scale });
+        let mut c = Candidate { base: b.form_id, plugin: plugin.to_ascii_lowercase(), local, editor_id: b.editor_id.clone(), model: b.model.clone(), accepted: false, forced: listed_forced, scale, min_px: None };
+        // Bases with a ready-made billboard from a mod (HD LODs Textures and similar) are
+        // rendered too unless `--installed-billboards keep`: same supersampled quality and soft
+        // alpha for every tree and shrub, and the same set of bases in tree LOD.
+        let installed_px = if render_installed() && !rule {
+            p.vfs.read(&format!("textures\\terrain\\lodgen\\{}\\{}.dds", c.plugin, c.stem())).ok().flatten().and_then(|d| lodforge_dds::parse(&d).ok()).map(|i| i.height)
+        } else {
+            None
+        };
+        c.min_px = installed_px;
+        c.accepted = forced.unwrap_or(rule || installed_px.is_some());
+        out.push(c);
     }
     out.sort_by(|a, b| (&a.plugin, a.local).cmp(&(&b.plugin, b.local)));
     out
@@ -218,7 +243,14 @@ pub fn tree_billboards(p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, ren
             lodforge_texgen::resolve_textures(&mut scene, |t| p.vfs.exists(t));
             let tex = lodforge_texgen::load_textures(&scene, |path| load_texture(gpu, &p.vfs, path));
             let source = source_cached(&p.vfs, &scene, &model_value, &bytes, &mut crc_cache);
-            let scale = c.scale.or_else(|| max_scale.get(&c.base).copied()).filter(|s| *s > 0.0).unwrap_or(1.7);
+            let mut scale = c.scale.or_else(|| max_scale.get(&c.base).copied()).filter(|s| *s > 0.0).unwrap_or(1.7);
+            // Re-rendering a mod-installed billboard: at least its pixel height.
+            if let Some(px) = c.min_px {
+                let (lo, hi) = scene.meshes.iter().flat_map(|m| m.positions.iter()).fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
+                if hi > lo {
+                    scale = scale.max(px as f32 * settings.units_per_pixel / (hi - lo));
+                }
+            }
             prepared.push((c, scene, tex, source, scale));
         }
         let items: Vec<lodforge_texgen::Item> = prepared.iter().map(|(_, scene, tex, _, scale)| lodforge_texgen::Item { scene, textures: tex, scale: *scale }).collect();

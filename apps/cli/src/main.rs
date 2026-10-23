@@ -59,8 +59,26 @@ struct Cli {
     /// per side, 2 = double. 1 is TexGen's default (11 units per pixel, at most 1024 px).
     #[arg(long, global = true, default_value_t = 1.0)]
     billboard_scale: f32,
+    /// Billboard supersampling per axis (tree, shrub, trunk and grass billboards): each billboard
+    /// is rendered this many times larger and averaged down, and keeps its soft edge coverage as
+    /// alpha (smooth silhouettes, thin foliage that fades instead of breaking into pixel noise).
+    /// 1 = TexGen's MSAA render with a hard alpha cut; 2..8 (default 4).
+    #[arg(long, global = true, default_value_t = lodforge_texgen::render::DEFAULT_SUPERSAMPLE)]
+    billboard_supersample: u32,
+    /// Billboards that a mod installs ready-made (e.g. HD LODs Textures) for bases TexGen's rule
+    /// would not render: `render` (default; render them too, so every tree and shrub gets the
+    /// same supersampled quality) or `keep` (use the installed ones, as TexGen).
+    #[arg(long, global = true, value_enum, default_value = "render")]
+    installed_billboards: InstalledBillboards,
     #[command(subcommand)]
     command: Command,
+}
+
+/// See `Cli::installed_billboards`.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum InstalledBillboards {
+    Render,
+    Keep,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -190,6 +208,8 @@ fn main() -> Result<()> {
         Bc7Arg::Best => lodforge_gpu::Bc7Quality::Best,
     });
     lodforge_texgen::set_billboard_scale(cli.billboard_scale);
+    lodforge_texgen::render::set_supersample(cli.billboard_supersample);
+    texgen_billboards::set_render_installed(cli.installed_billboards == InstalledBillboards::Render);
     match cli.command {
         Command::Inspect { profile, json } => inspect::run(&profile, json),
         Command::BsaScan { profile } => scan::bsa_scan(&profile.open()?.vfs),

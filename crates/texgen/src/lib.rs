@@ -147,7 +147,7 @@ fn final_images(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, views: &[(Item, Vi
         .map(|(_, v)| {
             let mut img = imgs.next().unwrap_or_default();
             // Supersampled renders carry real edge coverage: keep it (see finish_alpha_soft).
-            let finish = |img: &mut Vec<u8>| if render::SUPERSAMPLE > 1 { finish_alpha_soft(img, v.width) } else { finish_alpha(img, v.width, s.coverage_threshold) };
+            let finish = |img: &mut Vec<u8>| if render::supersample() > 1 { finish_alpha_soft(img, v.width) } else { finish_alpha(img, v.width, s.coverage_threshold) };
             finish(&mut img);
             let normal = normals.then(|| {
                 let mut n = imgs.next().unwrap_or_default();
