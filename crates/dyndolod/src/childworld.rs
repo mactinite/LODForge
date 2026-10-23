@@ -23,6 +23,50 @@ pub struct ChildSettings {
     pub scan_child: bool,
     /// `IgnoreChildEDID<Preset>`, lower-case substrings of base EditorIDs.
     pub ignore_edid: Vec<String>,
+    /// Plugins whose references `mod_world_ignore.txt` ignores in this child (lower-case).
+    pub ignore_plugins: HashSet<String>,
+}
+
+/// `Configs\DynDOLOD_SSE_mod_world_ignore.txt` ("ignore all references added by mod to
+/// worldspace"): `plugin=World,World` lines, `//` comments. A reference in a listed worldspace is
+/// ignored when the listed plugin defines it or holds its winning record (golden Ultra run,
+/// skyrim-cs-base 2026-10-22: `JKs Skyrim.esp=MarkarthWorld,SolitudeWorld,WindhelmWorld` skipped
+/// 1329 references JK's Skyrim adds there, 24 Skyrim.esm ones it overrides and 6 of its own
+/// that a patch overrides; its Whiterun and Riften references were copied).
+#[derive(Debug, Clone, Default)]
+pub struct ModWorldIgnore(pub HashMap<String, HashSet<String>>);
+
+impl ModWorldIgnore {
+    pub fn parse(text: &str) -> ModWorldIgnore {
+        let mut m: HashMap<String, HashSet<String>> = HashMap::new();
+        for line in text.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with("//") || l.starts_with(';') {
+                continue;
+            }
+            if let Some((plugin, worlds)) = l.split_once('=') {
+                let set = m.entry(plugin.trim().to_ascii_lowercase()).or_default();
+                set.extend(worlds.split(',').map(|w| w.trim().to_ascii_lowercase()).filter(|w| !w.is_empty()));
+            }
+        }
+        ModWorldIgnore(m)
+    }
+
+    pub fn read(dir: &Path) -> ModWorldIgnore {
+        std::fs::read(dir.join("Configs").join("DynDOLOD_SSE_mod_world_ignore.txt")).map(|b| ModWorldIgnore::parse(&decode(&b))).unwrap_or_default()
+    }
+
+    /// The plugins (lower-case) whose references are ignored in worldspace `world` (EditorID).
+    pub fn plugins_for(&self, world: &str) -> HashSet<String> {
+        let w = world.to_ascii_lowercase();
+        self.0.iter().filter(|(_, ws)| ws.contains(&w)).map(|(p, _)| p.clone()).collect()
+    }
+}
+
+/// Whether a reference defined by `owner` whose winning record is in `winner` (both lower-case)
+/// is ignored by a [`ModWorldIgnore::plugins_for`] set.
+pub fn mod_world_ignored(ignore: &HashSet<String>, owner: &str, winner: &str) -> bool {
+    !ignore.is_empty() && (ignore.contains(owner) || ignore.contains(winner))
 }
 
 /// One reference to copy into the parent worldspace.
@@ -79,7 +123,7 @@ pub fn settings(dir: &Path, child: &str, parent: &str, preset: &str, plugins: &[
         }
     }
     let list = |k: &str| -> Vec<String> { get(k).unwrap_or("").split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect() };
-    Some(ChildSettings { scan_child: get("ScanChild") == Some("1"), ignore_edid: list(&format!("IgnoreChildEDID{preset}")) })
+    Some(ChildSettings { scan_child: get("ScanChild") == Some("1"), ignore_edid: list(&format!("IgnoreChildEDID{preset}")), ignore_plugins: ModWorldIgnore::read(dir).plugins_for(child) })
 }
 
 /// Known child/parent pairs of `Configs\DynDOLOD_SSE_ChildworldMatches.txt`: child side
@@ -145,6 +189,10 @@ pub fn copies(
             }
             let edid = b.editor_id.to_ascii_lowercase();
             if s.ignore_edid.iter().any(|i| edid.contains(i.as_str())) {
+                continue;
+            }
+            let winner = lo.plugins.get(usize::from(p.plugin)).map(|lp| lp.plugin.name.to_ascii_lowercase()).unwrap_or_default();
+            if mod_world_ignored(&s.ignore_plugins, &plugin_of(id), &winner) {
                 continue;
             }
             let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
@@ -240,4 +288,22 @@ fn initially_enabled<'a>(p: &'a Placement, lookup: &dyn Fn(u32) -> Option<&'a Pl
         cur = next;
     }
     (cur.flags & FLAG_INITIALLY_DISABLED == 0) != opposite
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mod_world_ignore_lists_plugins_per_worldspace() {
+        let m = ModWorldIgnore::parse("// ignore all references added by mod to worldspace\n// mod file name=worldspace name,worldspace name,...\nJKs Skyrim.esp=MarkarthWorld,SolitudeWorld,WindhelmWorld\nELFX - Exteriors.esp=WhiterunWorld, WindhelmWorld\n");
+        let windhelm = m.plugins_for("WindhelmWorld");
+        assert!(windhelm.contains("jks skyrim.esp") && windhelm.contains("elfx - exteriors.esp"));
+        assert!(!m.plugins_for("RiftenWorld").contains("jks skyrim.esp"));
+        // Defined by the listed plugin (its patch wins), or a master's reference it overrides.
+        assert!(mod_world_ignored(&windhelm, "jks skyrim.esp", "jks candlehearth hall - jks skyrim patch.esp"));
+        assert!(mod_world_ignored(&windhelm, "skyrim.esm", "jks skyrim.esp"));
+        assert!(!mod_world_ignored(&windhelm, "skyrim.esm", "jk's candlehearth hall.esp"));
+        assert!(!mod_world_ignored(&HashSet::new(), "jks skyrim.esp", "jks skyrim.esp"));
+    }
 }

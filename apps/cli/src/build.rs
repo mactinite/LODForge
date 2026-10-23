@@ -415,7 +415,7 @@ pub fn run(a: &Args) -> Result<()> {
                 let path_output = format!("{}\\", out.join("meshes").join("terrain").join(world).join("Objects").display()).replace('/', "\\");
                 let h = crate::dyndolod_build::header(&p, c, ws, &export_text, &a.profile.game_dir().join("Data"), &path_output);
                 let mut we = crate::dyndolod_build::with_resolver(&p, c, |r| {
-                    let copies = crate::child_copies::for_world(&p, c, r, &dyn_worlds, ws, &a.dyn_opts.preset);
+                    let copies = crate::child_copies::for_world(&p, c, r, &dyn_worlds, ws, &a.dyn_opts.child_parent);
                     crate::dyndolod_build::export_world(&p, c, r, ws, &seasons, &h, &copies)
                 })?;
                 if !a.json && !we.child_copies.is_empty() {

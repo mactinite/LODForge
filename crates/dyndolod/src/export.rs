@@ -121,6 +121,8 @@ pub enum Skip {
     NoColumns,
     IgnoredEdid,
     TreeLod,
+    /// `mod_world_ignore.txt` lists the defining or winning plugin for this worldspace.
+    ModWorldIgnore,
 }
 
 pub struct ExportInput<'a> {
@@ -144,6 +146,9 @@ pub struct ExportInput<'a> {
     pub tree_object_bounds: &'a [(i32, i32, i32, i32)],
     /// `Windows`: glow LOD windows (`<model>glow_lod_N.nif`) in object LOD.
     pub windows: bool,
+    /// Plugins whose references `mod_world_ignore.txt` ignores in this worldspace (lower-case,
+    /// [`crate::childworld::ModWorldIgnore::plugins_for`]).
+    pub ignore_plugins: &'a HashSet<String>,
     /// Ultra tree LOD: trees stay in object LOD instead of the game's tree LOD, and a tree level
     /// whose rule wants a LOD model that is not installed uses the billboard
     /// (`TreeFullFallBack=1`).
@@ -282,6 +287,11 @@ pub fn build_lines(inp: &ExportInput<'_>) -> (Vec<RefLine>, HashMap<u32, Skip>) 
             continue;
         }
         let owner = inp.owners.get(&crate::bases::owner_key(id)).and_then(|&i| inp.plugins.get(i)).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let winner = inp.plugins.get(usize::from(p.plugin)).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        if crate::childworld::mod_world_ignored(inp.ignore_plugins, &owner, &winner) {
+            skipped.insert(id, Skip::ModWorldIgnore);
+            continue;
+        }
         let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
         let lod = cache.entry(base_id).or_insert_with(|| inp.resolver.resolve(b));
         let columns = if let Some(r) = select_reference_rule(inp.rules, &owner, local) {
@@ -625,6 +635,10 @@ pub fn build_dynamic(inp: &ExportInput<'_>) -> Result<Vec<DynamicRef>, String> {
             continue;
         }
         let owner = inp.owners.get(&crate::bases::owner_key(id)).and_then(|&i| inp.plugins.get(i)).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let winner = inp.plugins.get(usize::from(p.plugin)).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        if crate::childworld::mod_world_ignored(inp.ignore_plugins, &owner, &winner) {
+            continue;
+        }
         let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
         let lod = cache.entry(base_id).or_insert_with(|| inp.resolver.resolve(b));
         let rule = match select_reference_rule(inp.rules, &owner, local) {
@@ -739,7 +753,7 @@ mod parent_tests {
             world: &world, bases: &bases, materials: &materials, resolver: &resolver,
             rules: &rules, plugins: &plugins, owners: &owners, ignore_base_edid: &[],
             large_refs: &HashSet::new(), swaps: &HashMap::new(), xesp_lod: &HashSet::new(),
-            tree_max_tilt: 30.0, tree_object_bounds: &[], windows: false, ultra: false, reference_states: &HashMap::new(),
+            tree_max_tilt: 30.0, tree_object_bounds: &[], windows: false, ignore_plugins: &HashSet::new(), ultra: false, reference_states: &HashMap::new(),
         })
     }
 
@@ -781,7 +795,7 @@ mod parent_tests {
             world: &world, bases: &bases, materials: &materials, resolver: &resolver,
             rules: &rules, plugins: &plugins, owners: &owners, ignore_base_edid: &[],
             large_refs: &HashSet::new(), swaps: &HashMap::new(), xesp_lod: &HashSet::new(),
-            tree_max_tilt: 30.0, tree_object_bounds: &[], windows: false, ultra, reference_states: &HashMap::new(),
+            tree_max_tilt: 30.0, tree_object_bounds: &[], windows: false, ignore_plugins: &HashSet::new(), ultra, reference_states: &HashMap::new(),
         })
     }
 

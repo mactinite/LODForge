@@ -43,6 +43,12 @@ pub struct Opts {
     /// DynDOLOD rule preset: Low, Medium or High.
     #[arg(long, default_value = "Medium")]
     pub preset: String,
+    /// DynDOLOD's "Child > parent" setting: which `IgnoreChildEDID<Low|Medium|High>` list of the
+    /// child worldspace configs filters the references copied from cities into their parent
+    /// (default Low, DynDOLOD's default; independent of the rule preset: the High golden run
+    /// still ignored `stonewall` / `treepine` bases, which only the Low list names).
+    #[arg(long, default_value = "Low")]
+    pub child_parent: String,
     /// DynDOLOD's `Edit Scripts\DynDOLOD` folder (configuration only; default:
     /// `<instance>\tools\DynDOLOD\Edit Scripts\DynDOLOD`).
     #[arg(long)]
@@ -460,12 +466,13 @@ pub fn export_world(p: &Profile, c: &Config, r: &Resolver<'_>, world: &Worldspac
     let sw = header.south_west;
     let mut default_lines: HashMap<u32, String> = HashMap::new();
     let mut out = WorldExport { seasons: Vec::new(), dynamic: Vec::new(), seasonal_dynamic: Vec::new(), child_copies: Vec::new(), lod_refs: Vec::new(), lod_bases: HashSet::new() };
+    let ignore_plugins = lodforge_dyndolod::childworld::ModWorldIgnore::read(&c.dir).plugins_for(&world.editor_id);
     for season in std::iter::once(None).chain(seasons.iter().copied().map(Some)) {
         let season_swaps: HashMap<u32, u32> = match season {
             Some(s) => c.swaps.swaps.get(&s).map(|secs| secs.values().flat_map(|m| m.iter().map(|(a, b)| (*a, *b))).collect()).unwrap_or_default(),
             None => HashMap::new(),
         };
-        let inp = ExportInput { swaps: &season_swaps, world, bases: &c.bases, materials: &c.materials, resolver: r, rules: &c.rules, plugins: &p.plugin_names, owners: &c.owners, ignore_base_edid: &c.ignore_edid, large_refs: &large, xesp_lod: &c.xesp_lod, tree_max_tilt: tilt, tree_object_bounds: &bounds, windows: c.windows, ultra: c.ultra, reference_states: &c.reference_states };
+        let inp = ExportInput { swaps: &season_swaps, world, bases: &c.bases, materials: &c.materials, resolver: r, rules: &c.rules, plugins: &p.plugin_names, owners: &c.owners, ignore_base_edid: &c.ignore_edid, large_refs: &large, xesp_lod: &c.xesp_lod, tree_max_tilt: tilt, tree_object_bounds: &bounds, windows: c.windows, ignore_plugins: &ignore_plugins, ultra: c.ultra, reference_states: &c.reference_states };
         let (lines, skipped) = lodforge_dyndolod::export::build_lines(&inp);
         out.lod_bases.extend(lodforge_dyndolod::export::large_object_bases(&lines, &large));
         let mut h = header.clone();
