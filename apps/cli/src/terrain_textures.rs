@@ -65,7 +65,16 @@ pub struct Args {
     /// golden xLODGen run: 512 px, gamma 1.0).
     #[arg(long, value_enum, default_value = "step")]
     pub lod32: Lod32,
+    /// Colour scale for PBR landscape albedo (`textures\pbr\...` diffuse), applied before the
+    /// bake. In game Community Shaders lights PBR terrain darker than the vanilla LOD shader shows
+    /// the raw albedo; 0.65 is DynDOLOD's PBR scale for object LOD (StitchPBRScale), so terrain
+    /// and object LOD match. 1 = the albedo unchanged (xLODGen).
+    #[arg(long, default_value_t = DEFAULT_PBR_SCALE)]
+    pub pbr_scale: f32,
 }
+
+/// Default [Args::pbr_scale].
+pub const DEFAULT_PBR_SCALE: f32 = 0.65;
 
 /// How terrain LOD textures are resampled (see [Args::filter]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
@@ -302,7 +311,22 @@ pub struct TerrainContext<'a> {
     cache: TextureCache<'a>,
     lands: Mutex<HashMap<u32, Arc<HashMap<(i32, i32), lodforge_esp::Land>>>>,
     cell_textures: Mutex<HashMap<u32, Arc<HashMap<(i32, i32), HashSet<u32>>>>>,
-    shrunk: Mutex<HashMap<(String, u32, Kind), Option<Arc<Vec<u8>>>>>,
+    shrunk: Mutex<HashMap<(String, u32, Kind, u32), Option<Arc<Vec<u8>>>>>,
+}
+
+/// Whether a landscape texture path is a PBR albedo (`textures\pbr\...`).
+fn is_pbr_texture(path: &str) -> bool {
+    let p = path.to_ascii_lowercase().replace('/', "\\");
+    p.starts_with("textures\\pbr\\") || p.starts_with("pbr\\")
+}
+
+/// Scales the RGB of a shrunk RGBA8 diffuse by `scale` (alpha untouched).
+fn scale_rgb(rgba: &mut [u8], scale: f32) {
+    for px in rgba.chunks_exact_mut(4) {
+        for c in &mut px[..3] {
+            *c = (f32::from(*c) * scale).round().clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 impl<'a> TerrainContext<'a> {
@@ -342,13 +366,22 @@ impl<'a> TerrainContext<'a> {
         Ok(cells)
     }
 
-    /// A landscape texture shrunk for the GPU bake, from the cache or the VFS.
-    fn shrunk(&self, path: &str, tex_px: u32, kind: Kind) -> Option<Vec<u8>> {
-        let key = (path.to_string(), tex_px, kind);
+    /// A landscape texture shrunk for the GPU bake, from the cache or the VFS. PBR albedo gets
+    /// `pbr_scale` (see [Args::pbr_scale]).
+    fn shrunk(&self, path: &str, tex_px: u32, kind: Kind, pbr_scale: f32) -> Option<Vec<u8>> {
+        let scale = if kind == Kind::Diffuse && is_pbr_texture(path) { pbr_scale } else { 1.0 };
+        let key = (path.to_string(), tex_px, kind, scale.to_bits());
         if let Some(v) = self.shrunk.lock().unwrap().get(&key) {
             return v.as_ref().map(|v| v.as_ref().clone());
         }
-        let v = lodforge_terrain::gpu_spec::shrink_texture(&self.p.vfs, path, tex_px, kind).map(Arc::new);
+        let v = lodforge_terrain::gpu_spec::shrink_texture(&self.p.vfs, path, tex_px, kind)
+            .map(|mut img| {
+                if scale != 1.0 {
+                    scale_rgb(&mut img, scale);
+                }
+                img
+            })
+            .map(Arc::new);
         self.shrunk.lock().unwrap().insert(key, v.clone());
         v.map(|v| v.as_ref().clone())
     }
@@ -457,7 +490,7 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
         let set = (!all_reused).then(|| {
             let ids: HashSet<u32> = lands.values().flat_map(|l| l.textures()).collect();
             let paths = ids.iter().filter_map(|id| ltex.get(id)).map(|t| if kind == Kind::Normal { &t.normal } else { &t.diffuse }).filter(|p| !p.is_empty()).map(|p| texture_path(p));
-            SpecTextureSet::build_from(paths, &params.default_path(kind), tex_px, kind, |p| ctx.shrunk(p, tex_px, kind))
+            SpecTextureSet::build_from(paths, &params.default_path(kind), tex_px, kind, |p| ctx.shrunk(p, tex_px, kind, a.pbr_scale))
         });
         let gtex = set.as_ref().map(|set| gpu.upload_spec_textures(tex_px, &set.images));
 
@@ -622,6 +655,19 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pbr_albedo_is_scaled_and_vanilla_is_not() {
+        assert!(is_pbr_texture(r"textures\pbr\landscape\fieldgrass02.dds"));
+        assert!(is_pbr_texture(r"PBR\Landscape\FieldGrass02.dds"));
+        assert!(is_pbr_texture("Textures/PBR/Landscape/x.dds"));
+        assert!(!is_pbr_texture(r"textures\landscape\fieldgrass02.dds"));
+        assert!(!is_pbr_texture(r"textures\landscape\pbrish.dds"));
+        let mut px = vec![200, 100, 0, 77, 255, 255, 255, 255];
+        scale_rgb(&mut px, 0.65);
+        assert_eq!(px, vec![130, 65, 0, 77, 166, 166, 166, 255]);
+        assert_eq!(DEFAULT_PBR_SCALE, 0.65);
+    }
 
     #[test]
     fn mip_settings_per_mode() {

@@ -27,6 +27,8 @@ pub struct LaneArgs {
     pub filter: crate::terrain_textures::TerrainFilter,
     pub lod32: crate::terrain_textures::Lod32,
     pub json: bool,
+    /// Colour scale for PBR landscape albedo (`terrain_textures::Args::pbr_scale`).
+    pub pbr_scale: f32,
     /// Fill cells without LAND from the shipped terrain LOD meshes (`--no-lod-fill` clears it).
     pub lod_fill: bool,
 }
@@ -136,6 +138,7 @@ fn run(a: &LaneArgs, shared: &Shared) {
                         mips: a.mips,
                         filter: a.filter,
                         lod32: a.lod32,
+                        pbr_scale: a.pbr_scale,
                     };
                     step(world, "terrain-textures", season.as_deref(), &mut || crate::terrain_textures::run_in(&ctx, &args));
                 }
