@@ -414,10 +414,21 @@ pub fn run(a: &Args) -> Result<()> {
                 let export_text = format!("{}\\", export_dir.display()).replace('/', "\\");
                 let path_output = format!("{}\\", out.join("meshes").join("terrain").join(world).join("Objects").display()).replace('/', "\\");
                 let h = crate::dyndolod_build::header(&p, c, ws, &export_text, &a.profile.game_dir().join("Data"), &path_output);
-                let mut we = crate::dyndolod_build::with_resolver(&p, c, |r| {
+                let (mut we, tree_rows) = crate::dyndolod_build::with_resolver(&p, c, |r| -> Result<_> {
                     let copies = crate::child_copies::for_world(&p, c, r, &dyn_worlds, ws, &a.dyn_opts.child_parent);
-                    crate::dyndolod_build::export_world(&p, c, r, ws, &seasons, &h, &copies)
+                    let we = crate::dyndolod_build::export_world(&p, c, r, ws, &seasons, &h, &copies)?;
+                    // What every tree got (docs: tree_report.rs), from the default season.
+                    let with = lodforge_dyndolod::childworld::with_copies(ws, &copies);
+                    let s = &we.seasons[0];
+                    let rows = crate::tree_report::rows(&p, c, r, &with, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "DynDOLOD Resources SE 3");
+                    Ok((we, rows))
                 })?;
+                if !tree_rows.is_empty() {
+                    std::fs::write(out.join(format!("LODForge_TreeReport_{world}.csv")), crate::tree_report::csv(&tree_rows))?;
+                    if !a.json {
+                        print!("{}", crate::tree_report::summary(world, &tree_rows));
+                    }
+                }
                 if !a.json && !we.child_copies.is_empty() {
                     println!("  {} child worldspace references copied in", we.child_copies.len());
                 }
