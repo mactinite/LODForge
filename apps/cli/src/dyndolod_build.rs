@@ -772,7 +772,9 @@ pub fn base_lod_data(p: &Profile, c: &Config, ids: impl IntoIterator<Item = u32>
 /// `out` already holds plugins of an earlier LODForge build they are updated in place: same form
 /// ids for the same records, new ids after theirs, same run token (unless `opts` says otherwise).
 /// Returns (dynamic references, worldspaces).
-pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, margin: i32, out: &Path) -> Result<(usize, usize)> {
+/// Returns (dynamic references, worldspaces, the `...linear.dds` copies the base copies' texture
+/// sets point at, lower-case).
+pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, margin: i32, out: &Path) -> Result<(usize, usize, std::collections::BTreeSet<String>)> {
     let (prev_esm, prev_esp) = if opts.renumber { (None, None) } else { previous_plugins(out) };
     for (name, prev) in [("DynDOLOD.esm", &prev_esm), ("DynDOLOD.esp", &prev_esp)] {
         if let Some(pr) = prev {
@@ -819,7 +821,16 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
     let read = |path: &str| p.vfs.read(path).ok().flatten();
     let exists = |path: &str| p.vfs.exists(path);
     let src = lodforge_dyndolod::sidefiles::Sources { bases: &c.bases, texture_sets: &c.texture_sets, read: &read, exists: &exists, pbr: c.pbr };
-    let swaps = |b: &Base, model: &str| lodforge_dyndolod::sidefiles::lod_model_swaps(b, model, &cache, &src);
+    // Every linear copy a texture set points at; the build writes the ones the object LOD did not
+    // need (child copies and dynamic LOD bases), or those TXSTs show a missing texture in game.
+    let linear = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let swaps = |b: &Base, model: &str| {
+        let v = lodforge_dyndolod::sidefiles::lod_model_swaps(b, model, &cache, &src);
+        for s in v.iter().filter(|s| s.diffuse.to_ascii_lowercase().ends_with("linear.dds")) {
+            linear.lock().unwrap().insert(s.diffuse.to_ascii_lowercase());
+        }
+        v
+    };
     let base_data = base_lod_data(p, c, worlds.iter().flat_map(|w| w.lod_bases.iter().copied()))?;
     let mut m = lodforge_dyndolod::dynplugins::build_worlds(&p.load_order, &inputs, &c.bases, c.num("NearGrid", 11), c.num("FarGrid", 21), &token, &rolling, workarounds, Some(&swaps)).map_err(anyhow::Error::msg)?;
     m.worlds_txt.push_str(&base_data);
@@ -837,7 +848,7 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
     for (code, text) in &m.seasons {
         std::fs::write(out.join("Seasons").join(format!("DynDOLOD_{code}.ini")), text)?;
     }
-    Ok((inputs.iter().map(|w| w.dynamic.len()).sum(), inputs.len()))
+    Ok((inputs.iter().map(|w| w.dynamic.len()).sum(), inputs.len(), linear.into_inner().unwrap()))
 }
 
 /// Occlusion stage: Occlusion.esp in `out` for every main worldspace in `worlds` (with their

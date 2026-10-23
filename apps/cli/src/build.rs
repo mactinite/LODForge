@@ -674,9 +674,29 @@ pub fn run(a: &Args) -> Result<()> {
                 .filter_map(|(w, dynamic, seasonal, child_copies, lod_refs, lod_bases)| dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(&w)).map(|world| crate::dyndolod_build::PluginWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases }))
                 .collect();
             match crate::dyndolod_build::write_plugins(&p, c, &a.dyn_opts, &refs, &dyn_worlds, &undersides, crate::dyndolod_build::large_ref_margin(&a.profile), &out) {
-                Ok((n, w)) => {
+                Ok((n, w, mut used)) => {
                     if !a.json {
                         println!("  DynDOLOD.esm/.esp: {n} dynamic LOD references in {w} worldspace(s)");
+                    }
+                    // Linear copies only the plugins' texture sets use (child copies, dynamic LOD).
+                    used.retain(|n| !linear_done.contains(n));
+                    if a.materials.pbr() && !used.is_empty() {
+                        let written = (|| -> Result<usize> {
+                            let gpu = lodforge_gpu::Gpu::new()?;
+                            crate::pbr_linear::write(&p.vfs, &gpu, &used, &out)
+                        })();
+                        match written {
+                            Ok(k) => {
+                                if !a.json {
+                                    println!("  {k} of {} PBR linear textures written for the plugins' texture sets", used.len());
+                                }
+                                linear_done.append(&mut used);
+                            }
+                            Err(e) => {
+                                eprintln!("plugins: linear textures: {e:#}");
+                                failed.push(format!("plugins: linear textures: {e}"));
+                            }
+                        }
                     }
                     event(a.json, "all", "plugins", None, t.elapsed().as_millis());
                 }
