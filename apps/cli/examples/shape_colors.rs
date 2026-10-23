@@ -118,6 +118,16 @@ fn main() -> Result<()> {
             uv_sum.entry((tex.clone(), name.clone())).and_modify(|e| { e.0 += m[3]; e.1 += m[4]; e.2 += 1.0; }).or_insert((m[3], m[4], 1.0));
             let vc = l.flags2 & (1 << 5) != 0 && !s.colors.is_empty();
             let vcl = if vc { s.colors.iter().map(|c| luma([f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])).sum::<f64>() / s.colors.len() as f64 } else { 0.0 };
+            if vc && std::env::var_os("VC_HIST").is_some() {
+                // Vertex colour histogram (red channel, 0..255 in buckets of 8).
+                let mut h = [0usize; 32];
+                for c in &s.colors {
+                    h[(f64::from(c[0]) * if f64::from(c[0]) <= 1.0 { 255.0 } else { 1.0 }).round().clamp(0.0, 255.0) as usize / 8] += 1;
+                }
+                let lo = s.colors.iter().map(|c| f64::from(c[0])).fold(f64::MAX, f64::min);
+                let hi = s.colors.iter().map(|c| f64::from(c[0])).fold(f64::MIN, f64::max);
+                println!("  vc {name}: min {lo:.3} max {hi:.3} buckets(/8) {:?}", h.iter().enumerate().filter(|(_, n)| **n > 0).map(|(i, n)| (i * 8, *n)).collect::<Vec<_>>());
+            }
             let e = groups.entry((tex.clone(), name)).or_insert((0, 0.0, 0.0, 0.0, 0, [0.0; 3]));
             e.0 += 1;
             e.1 += luma(c0);
