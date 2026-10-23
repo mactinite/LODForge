@@ -288,7 +288,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         if let (None, Some(g)) = (season, &a.golden) {
             compare_golden(g, &tl, atlas.as_deref())?;
         }
-        println!("{} [{name}]: {} tree types, {refs} references in {} blocks, atlas {}x{}, {} missing billboards, {} duplicate ids; {n} files in {} ms", world.editor_id, tl.types.len(), tl.blocks.len(), tl.atlas.0, tl.atlas.1, tl.missing_billboards.len(), tl.duplicates, t.elapsed().as_millis());
+        println!("{} [{name}]: {} tree types, {refs} references in {} blocks, atlas {}x{}, {} missing billboards, {} duplicate ids, {} never-enabled references left out; {n} files in {} ms", world.editor_id, tl.types.len(), tl.blocks.len(), tl.atlas.0, tl.atlas.1, tl.missing_billboards.len(), tl.duplicates, tl.never_enabled, t.elapsed().as_millis());
     }
     println!("total {} ms", t0.elapsed().as_millis());
     Ok(())

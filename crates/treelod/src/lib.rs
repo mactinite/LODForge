@@ -34,6 +34,8 @@ pub struct TreeBase {
 
 pub const STAT_HAS_TREE_LOD: u32 = 0x40;
 pub const REFR_IS_FULL_LOD: u32 = 0x10000;
+/// The player reference (`PlayerRef`, Skyrim.esm 0x14).
+pub const PLAYER_REF: u32 = 0x14;
 
 /// The plugin a global form ID belongs to.
 pub fn defining_plugin(lo: &LoadOrder, id: u32) -> Option<&str> {
@@ -170,6 +172,9 @@ pub struct TreeLod {
     pub slots: Vec<AtlasSlot>,
     pub duplicates: usize,
     pub missing_billboards: Vec<String>,
+    /// References left out because their enable parent is the player with the opposite flag:
+    /// never enabled in game (how tree and road mods switch off vanilla trees they replace).
+    pub never_enabled: usize,
 }
 
 /// Source of game files (VFS).
@@ -263,6 +268,14 @@ pub fn build_with(world: &Worldspace, bases: &HashMap<u32, TreeBase>, south_west
             continue;
         }
         if p.flags & (FLAG_INITIALLY_DISABLED | FLAG_DELETED) != 0 || (p.enable_parent && !rules.dyndolod) {
+            continue;
+        }
+        // Enable parent = the player with the opposite flag: the reference is never enabled.
+        // Mods switch off the vanilla trees they replace this way; keeping them in tree LOD shows
+        // the old tree in the distance where the game shows the new one (DynDOLOD's dynamic LOD
+        // export skips them for the same reason).
+        if p.enable_parent && p.enable_parent_id == PLAYER_REF && p.enable_parent_flags & 1 != 0 {
+            out.never_enabled += 1;
             continue;
         }
         if rules.exclude.contains(&id) {
@@ -508,6 +521,37 @@ mod tests {
         assert!(p.is_none());
         let p = pack(&[(1, 256, 512), (2, 128, 128)], 512, 512, 2).unwrap();
         assert_eq!((p[1].x, p[1].y), (258, 0));
+    }
+
+    struct OneBillboard;
+    impl Files for OneBillboard {
+        fn read(&self, _: &str) -> Option<Vec<u8>> {
+            Some(vec![1, 2, 3])
+        }
+        fn dds_size(&self, _: &[u8]) -> Option<(u32, u32)> {
+            Some((64, 128))
+        }
+    }
+
+    #[test]
+    fn trees_switched_off_through_the_player_are_left_out() {
+        // A mod replaces a vanilla tree: the original gets XESP = player with the opposite flag
+        // (never enabled). DynDOLOD rules keep other enable-parent trees.
+        let mut world = Worldspace::default();
+        let tree = |x: f32, parent: Option<(u32, u8)>| lodforge_esp::Placement {
+            base: 0x100, flags: 0, position: [x, 0.0, 0.0], rotation: [0.0; 3], scale: 1.0, has_scale: false,
+            enable_parent: parent.is_some(), enable_parent_id: parent.map_or(0, |p| p.0), enable_parent_flags: parent.map_or(0, |p| p.1),
+            cell: Some(((x / 4096.0).floor() as i32, 0)), offset: 0, plugin: 0,
+        };
+        world.refs.insert(0x200, tree(100.0, None));
+        world.refs.insert(0x201, tree(200.0, Some((PLAYER_REF, 1))));
+        world.refs.insert(0x202, tree(300.0, Some((0x5000, 0))));
+        let bases = HashMap::from([(0x100, TreeBase { signature: *b"TREE", flags: 0, model: "tree.nif".into(), bounds: Some([0, 0, 0, 100, 100, 500]), file: "Test.esm".into() })]);
+        let rules = Rules::dyndolod(30.0, Vec::new(), Vec::new());
+        let t = build_with(&world, &bases, (-96, -96), &HashMap::new(), &OneBillboard, 4096, &rules);
+        assert_eq!(t.never_enabled, 1);
+        let placed: usize = t.blocks.iter().flat_map(|b| b.types.iter()).map(|(_, refs)| refs.len()).sum();
+        assert_eq!(placed, 2);
     }
 
     #[test]
