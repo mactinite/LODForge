@@ -195,6 +195,102 @@ pub fn keep_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)], tiles: &[(u32, u3
     }
 }
 
+/// Opaque share of tree billboards in LOD, relative to their rendered coverage
+/// (`--billboard-density`; 1 = as rendered). Billboards are two crossed planes, so from most
+/// angles both silhouettes overlap, and the small mips distant LOD samples merge the gaps between
+/// leaves: the billboard reads denser than the full tree, which lets light through, and the switch
+/// to the full tree shows (skyrim-cs-base 2026-10-23). Below 1, the alpha of every level of a
+/// billboard tile is scaled until only that share of its texels passes the alpha test.
+static BILLBOARD_DENSITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+pub fn set_billboard_density(d: f32) {
+    BILLBOARD_DENSITY.store(d.clamp(0.1, 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn billboard_density() -> f32 {
+    f32::from_bits(BILLBOARD_DENSITY.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Opaque share of conifer billboards (`--conifer-density`, see [is_conifer_billboard]). In game
+/// (skyrim-cs-base 2026-10-23) a broadleaf billboard such as `oaktall03` matched its full tree at
+/// the switch distance, while pines turned from a dark solid cone into a lighter, see-through
+/// tree, so conifers get their own value.
+static CONIFER_DENSITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f40_0000); // 0.75
+
+pub fn set_conifer_density(d: f32) {
+    CONIFER_DENSITY.store(d.clamp(0.1, 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn conifer_density() -> f32 {
+    f32::from_bits(CONIFER_DENSITY.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Name parts of conifer billboards (vanilla `treepineforest*`, Ulvenwald `*spruce`, `*juniper`,
+/// ...). The billboard's shape does not separate them: pines range from 0.22 to 2.16 width per
+/// height, and aspens and slim oaks fall inside that range.
+const CONIFER_NAMES: [&str; 8] = ["pine", "spruce", "juniper", "conifer", "cedar", "hemlock", "larch", "cypress"];
+
+/// Whether a tree billboard's file name (not its plugin folder) names a conifer.
+pub fn is_conifer_billboard(texture: &str) -> bool {
+    let t = texture.to_ascii_lowercase().replace('/', "\\");
+    let name = t.rsplit('\\').next().unwrap_or(&t);
+    CONIFER_NAMES.iter().any(|k| name.contains(k))
+}
+
+/// Density for an atlas texture: 1 for anything but tree billboards, [conifer_density] for
+/// conifers, [billboard_density] for the rest.
+pub fn density_for(texture: &str) -> f32 {
+    if !is_tree_billboard(texture) {
+        1.0
+    } else if is_conifer_billboard(texture) {
+        conifer_density()
+    } else {
+        billboard_density()
+    }
+}
+
+/// Whether an atlas texture key is a TexGen tree billboard (`textures\terrain\lodgen\...`).
+pub fn is_tree_billboard(texture: &str) -> bool {
+    texture.to_ascii_lowercase().replace('/', "\\").contains("\\terrain\\lodgen\\")
+}
+
+/// [keep_alpha_coverage], then for tiles with a `density` below 1 the alpha of every level (the
+/// top one too) is scaled down until only `density` times the top mip's coverage passes the
+/// test.
+pub fn keep_alpha_coverage_with(levels: &mut [(u32, u32, Vec<u8>)], tiles: &[(u32, u32, u32, u32)], density: &[f32]) {
+    let targets: Vec<f32> = match levels.first() {
+        Some((tw, _, top)) => tiles.iter().map(|&r| coverage(top, *tw, r, 1.0)).collect(),
+        None => return,
+    };
+    keep_alpha_coverage(levels, tiles);
+    for ((&(x, y, w, h), &d), &top_cov) in tiles.iter().zip(density).zip(&targets) {
+        if d >= 1.0 || top_cov <= 0.0 {
+            continue;
+        }
+        let target = top_cov * d;
+        for (k, (lw, _, px)) in levels.iter_mut().enumerate() {
+            let sh = k as u32;
+            let rect = (x >> sh, y >> sh, (w >> sh).max(1), (h >> sh).max(1));
+            if rect.0 + rect.2 > *lw {
+                continue;
+            }
+            // Largest scale (at most 1) whose coverage is still at least the target.
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..16 {
+                let mid = (lo + hi) / 2.0;
+                if coverage(px, *lw, rect, mid) < target { lo = mid } else { hi = mid }
+            }
+            let scale = hi;
+            for yy in rect.1..rect.1 + rect.3 {
+                for xx in rect.0..rect.0 + rect.2 {
+                    let i = ((yy * *lw + xx) * 4 + 3) as usize;
+                    px[i] = (f32::from(px[i]) * scale).round().min(255.0) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// One atlas tile with its own mip chain: level k is `max(w >> k, 1)` x `max(h >> k, 1)`.
 pub struct TileChain {
     pub x: u32,
@@ -374,8 +470,10 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
         let alpha_page = is_alpha_page(&p.name);
         let glow_page = g_levels.is_some();
         if alpha_page && formats.alpha_fill {
-            let tiles: Vec<(u32, u32, u32, u32)> = layout.entries.iter().filter(|e| e.page == pi).map(|e| (e.x, e.y, e.width, e.height)).collect();
-            keep_alpha_coverage(&mut d_levels, &tiles);
+            let page_entries: Vec<_> = layout.entries.iter().filter(|e| e.page == pi).collect();
+            let tiles: Vec<(u32, u32, u32, u32)> = page_entries.iter().map(|e| (e.x, e.y, e.width, e.height)).collect();
+            let density: Vec<f32> = page_entries.iter().map(|e| density_for(&e.texture)).collect();
+            keep_alpha_coverage_with(&mut d_levels, &tiles, &density);
         }
         let d_enc = if glow_page { Encoding::Bc7 } else if alpha_page { formats.alpha_diffuse } else { formats.diffuse };
         let d_dds = encode_as(gpu, d_enc, &d_levels)?;
@@ -535,6 +633,45 @@ mod tests {
         assert!(before < 0.25, "{before}");
         assert!(after >= 0.25, "{after}");
         assert_eq!(levels.len(), 3);
+    }
+
+    #[test]
+    fn billboard_density_thins_every_level() {
+        // A 16x16 billboard tile with graded alpha (half its texels pass the test) next to a
+        // non-billboard tile: density 0.6 leaves 60% of the billboard's coverage on every level.
+        let (w, h) = (32u32, 16u32);
+        let mut top = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                top[((y * w + x) * 4 + 3) as usize] = ((x % 16) * 16 + y) as u8;
+            }
+        }
+        let mut levels = mip_chain_n(w, h, top, 3);
+        let before: Vec<f32> = (0..2u32).map(|k| coverage(&levels[k as usize].2, levels[k as usize].0, (0, 0, 16 >> k, 16 >> k), 1.0)).collect();
+        let other = coverage(&levels[0].2, w, (16, 0, 16, 16), 1.0);
+        keep_alpha_coverage_with(&mut levels, &[(0, 0, 16, 16), (16, 0, 16, 16)], &[0.6, 1.0]);
+        for k in 0..2u32 {
+            let after = coverage(&levels[k as usize].2, levels[k as usize].0, (0, 0, 16 >> k, 16 >> k), 1.0);
+            assert!((after - before[0] * 0.6).abs() < 0.08, "level {k}: {after} vs {}", before[0] * 0.6);
+        }
+        assert_eq!(coverage(&levels[0].2, w, (16, 0, 16, 16), 1.0), other, "non-billboard tile untouched");
+        assert!(is_tree_billboard(r"textures\terrain\lodgen\ulvenwald.esp\oaktall03_000a3263.dds"));
+        assert!(!is_tree_billboard(r"textures\landscape\trees\pinebranch.dds"));
+    }
+
+    #[test]
+    fn conifers_are_named() {
+        assert!(is_conifer_billboard(r"textures\terrain\lodgen\skyrim.esm\treepineforest01_0006f7dc.dds"));
+        assert!(is_conifer_billboard(r"textures\terrain\lodgen\ulvenwald.esp\ancientspruce01_00012345.dds"));
+        assert!(is_conifer_billboard(r"textures\terrain\lodgen\ulvenwald.esp\kmediumjuniper_00012345.dds"));
+        assert!(!is_conifer_billboard(r"textures\terrain\lodgen\ulvenwald.esp\oaktall03_000a3263.dds"));
+        assert!(!is_conifer_billboard(r"textures\terrain\lodgen\seasonal landscapes.esp\treeaspen01_00012345.dds"));
+        // The plugin folder does not count.
+        assert!(!is_conifer_billboard(r"textures\terrain\lodgen\pinemod.esp\oak01_00012345.dds"));
+        set_conifer_density(0.7);
+        assert_eq!(density_for(r"textures\terrain\lodgen\skyrim.esm\treepineforest01_0006f7dc.dds"), 0.7);
+        assert_eq!(density_for(r"textures\lod\pinebranch_lod.dds"), 1.0);
+        set_conifer_density(0.75);
     }
 
     #[test]

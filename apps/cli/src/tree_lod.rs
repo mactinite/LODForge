@@ -160,6 +160,7 @@ pub fn atlas_dds(p: &Profile, t: &TreeLod, gpu: &Gpu) -> Result<Option<Vec<u8>>>
     let drop = atlas_drop_levels(w, h);
     let mips = TREE_ATLAS_MIPS + drop;
     let mut tiles = Vec::new();
+    let mut density = Vec::new();
     let mut chains = Vec::new();
     for s in &t.slots {
         let Some(tree) = t.trees.iter().find(|tr| tr.crc == s.crc && tr.index != -1) else { continue };
@@ -177,9 +178,11 @@ pub fn atlas_dds(p: &Profile, t: &TreeLod, gpu: &Gpu) -> Result<Option<Vec<u8>>>
         // padding or a neighbouring billboard.
         chains.push(crate::object_atlas::TileChain::new(s.x, s.y, tw, th, &px, mips, lodforge_dds::mips::MipKind::Color, lodforge_dds::mips::Edge::Clamp));
         tiles.push((s.x, s.y, tw, th));
+        // Every tree LOD billboard is a tree; the name decides conifer or not.
+        density.push(if crate::object_atlas::is_conifer_billboard(&tree.billboard) { crate::object_atlas::conifer_density() } else { crate::object_atlas::billboard_density() });
     }
     let mut levels = crate::object_atlas::assemble(w, h, mips, [0, 0, 0, 0], &chains);
-    crate::object_atlas::keep_alpha_coverage(&mut levels, &tiles);
+    crate::object_atlas::keep_alpha_coverage_with(&mut levels, &tiles, &density);
     levels.drain(..drop as usize);
     let (w, h) = (levels[0].0, levels[0].1);
     let images: Vec<RgbaImage<'_>> = levels.iter().map(|(w, h, p)| RgbaImage { width: *w, height: *h, rgba: p }).collect();
