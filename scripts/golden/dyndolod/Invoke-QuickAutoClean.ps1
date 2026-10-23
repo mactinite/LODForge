@@ -1,9 +1,9 @@
-param([string[]]$Plugins)
-$inst = 'D:\Modlists\skyrim-cs'
+param([string[]]$Plugins, [string]$Instance = 'D:\Modlists\skyrim-cs', [string]$Mo2Profile = 'LODForge-DynDOLOD')
+$inst = $Instance
 $inv = Join-Path $PSScriptRoot 'Click-Button.ps1'
 foreach ($Plugin in $Plugins) {
     $a = "-sse -qac -autoexit -autoload \`"$Plugin\`" -d:\`"$inst\Stock Game\Data\`""
-    Start-Process "$inst\ModOrganizer.exe" -ArgumentList "-p `"LODForge-DynDOLOD`" run -e -a `"$a`" `"SSEEditQuickAutoClean`""
+    Start-Process "$inst\ModOrganizer.exe" -ArgumentList "-p `"$Mo2Profile`" run -e -a `"$a`" `"SSEEditQuickAutoClean`""
     $t0 = Get-Date; $closed = $false
     Start-Sleep 5
     while ((Get-Process SSEEditQuickAutoClean, ModOrganizer -ErrorAction SilentlyContinue)) {

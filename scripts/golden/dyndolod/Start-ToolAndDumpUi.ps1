@@ -1,8 +1,8 @@
-param([string]$Exe = 'TexGen x64', [string]$ProcName = 'TexGenx64', [string]$OutDir = 'D:\Modlists\LODForge-golden\probe', [string]$Dump = (Join-Path $env:TEMP 'lodforge-ui-dump.txt'), [int]$Wait = 600, [string]$Mo2Profile = 'LODForge-DynDOLOD')
+param([string]$Exe = 'TexGen x64', [string]$ProcName = 'TexGenx64', [string]$OutDir = 'D:\Modlists\LODForge-golden\probe', [string]$Dump = (Join-Path $env:TEMP 'lodforge-ui-dump.txt'), [int]$Wait = 600, [string]$Mo2Profile = 'LODForge-DynDOLOD', [string]$Instance = 'D:Modlistsskyrim-cs')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $UIA = [Windows.Automation.AutomationElement]; $Tree = [Windows.Automation.TreeScope]
-$inst = 'D:\Modlists\skyrim-cs'
+$inst = $Instance
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $toolArgs = "-sse -d:\`"$inst\Stock Game\Data\`" -o:\`"$($OutDir.TrimEnd('\'))\`""   # quoted: mod folders have spaces
 Start-Process "$inst\ModOrganizer.exe" -ArgumentList "-p `"$Mo2Profile`" run -e -a `"$toolArgs`" `"$Exe`""
