@@ -69,6 +69,12 @@ pub fn run(a: &Args) -> Result<()> {
         }
         let sum = |k: Kind| parts.iter().filter(|pt| pt.kind == k).map(|pt| pt.triangles).sum::<usize>();
         println!("  crown {} tris, trunk {} tris{}", sum(Kind::Crown), sum(Kind::Trunk), if notes.0.is_empty() { String::new() } else { format!("; notes: {}", notes.0.join(", ")) });
+        let t = std::time::Instant::now();
+        let levels = lodforge_treemodel::levels::build(&nif, &shapes, &parts, &lodforge_treemodel::levels::DEFAULT_LEVELS);
+        for (i, l) in levels.iter().enumerate() {
+            println!("  LOD{}: crown {} tris (keep {:.2}), trunk {} tris", [4, 8, 16][i.min(2)], l.triangles(Kind::Crown), l.keep, l.triangles(Kind::Trunk));
+        }
+        println!("  levels built in {} ms", t.elapsed().as_millis());
     }
     Ok(())
 }

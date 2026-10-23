@@ -89,6 +89,10 @@ PART 1. SOURCE-LEVEL COMPONENTS INCORPORATED INTO LODFORGE
      crates/treemodel/src/lib.rs      (summary of the ports in this crate)
      crates/treemodel/src/collect.rs  (Split.cs SourceShapes, NifUtil.cs GlobalTransform)
      crates/treemodel/src/islands.rs  (Islands.cs, WoodSplit.cs islands)
+     crates/treemodel/src/levels.rs   (Split.cs levels and budgets)
+     crates/treemodel/src/mesh.rs     (nifly DeleteVertsForShape semantics)
+     crates/treemodel/src/prune.rs    (Prune.cs, Split.cs ClampSmallUvOvershoot)
+     crates/treemodel/src/simplify.rs (Simplify.cs)
      crates/treemodel/src/split.rs    (Split.cs classification, WoodSplit.cs)
      crates/treemodel/src/texture.rs  (Textures.cs)
 

@@ -64,8 +64,12 @@ floors 2500 / 1000 / 400.
 2. **Read and split** - `crates/treemodel` collects shapes, classifies bark/foliage and finds
    leaf pieces; `tree-models --inspect` prints it for real trees (vanilla pine, Ulvenwald pine,
    `srg_oak`). Unit tests on synthetic meshes.
-3. **Prune and simplify** - crown pruning and the bark QEM, with triangle counts per level
-   checked against the spec's defaults.
+3. **Prune and simplify** - done 2026-10-23 (`prune.rs`, `simplify.rs`, `levels.rs`). Bark lands
+   on budget (398 / 148 / 61 of 400 / 150 / 60); Ulvenwald and vanilla spruces (12.5k leaf
+   triangles) keep 5.1k / 2.0k / 0.8-0.9k crown triangles, `srg_oak5` (4.5k) holds the floors
+   (2,515 / 998 / 399); 15-32 ms per tree for all three levels. The spruces are about three times
+   TreeLODGen's "typical pine" (1,740 crown triangles at LOD4), so object LOD size needs watching
+   in milestone 5; a lighter preset (TreeLODGen's Light: keep 0.3 / 0.1 / 0.04) is the first knob.
 4. **Write and integrate** - NIF writer clone semantics (shader, texture set, alpha, vertex
    format), file naming, build integration, tree report source.
 5. **Verify** - `lodforge view` on generated models; in game: the Whiterun oak and pine spots at
