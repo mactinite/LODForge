@@ -132,14 +132,33 @@ impl Files for Vfs<'_> {
 /// Mip levels of the tree LOD atlas (DynDOLOD's `TreeLODMinMipMaps`; `TamrielTreeLOD.dds` has 8).
 pub const TREE_ATLAS_MIPS: u32 = 8;
 
+/// Largest tree LOD atlas side the game loads. A bigger `<World>TreeLOD.dds` is silently replaced
+/// by the vanilla atlas from the BSA, sampled with this list's UVs: in game every tree LOD shows
+/// a random vanilla billboard (summer oaks as snowy pines; skyrim-cs-base 2026-10-22, an
+/// 8192x4096 atlas, fixed by dropping its top mip). DynDOLOD's atlases stay at or below 4096 too.
+pub const TREE_ATLAS_MAX_DIM: u32 = 4096;
+
+/// Top mips to drop so the atlas fits [TREE_ATLAS_MAX_DIM]. The list's UVs are relative, so the
+/// smaller atlas needs no other change.
+pub fn atlas_drop_levels(w: u32, h: u32) -> u32 {
+    let mut n = 0;
+    while (w.max(h) >> n) > TREE_ATLAS_MAX_DIM {
+        n += 1;
+    }
+    n
+}
+
 /// Composes the billboard atlas: billboards with their see-through background set to their
 /// average colour (`TreeLODCreateAverageColor`), Lanczos mips that keep each billboard's alpha
-/// coverage, [TREE_ATLAS_MIPS] levels, BC7.
+/// coverage, [TREE_ATLAS_MIPS] levels, BC7. A packing larger than [TREE_ATLAS_MAX_DIM] is
+/// composed at full size and written from the first mip that fits.
 pub fn atlas_dds(p: &Profile, t: &TreeLod, gpu: &Gpu) -> Result<Option<Vec<u8>>> {
     let (w, h) = t.atlas;
     if w == 0 {
         return Ok(None);
     }
+    let drop = atlas_drop_levels(w, h);
+    let mips = TREE_ATLAS_MIPS + drop;
     let mut tiles = Vec::new();
     let mut chains = Vec::new();
     for s in &t.slots {
@@ -156,11 +175,13 @@ pub fn atlas_dds(p: &Profile, t: &TreeLod, gpu: &Gpu) -> Result<Option<Vec<u8>>>
         }
         // Each billboard is filtered on its own, so lower mips never pull in the transparent
         // padding or a neighbouring billboard.
-        chains.push(crate::object_atlas::TileChain::new(s.x, s.y, tw, th, &px, TREE_ATLAS_MIPS, lodforge_dds::mips::MipKind::Color, lodforge_dds::mips::Edge::Clamp));
+        chains.push(crate::object_atlas::TileChain::new(s.x, s.y, tw, th, &px, mips, lodforge_dds::mips::MipKind::Color, lodforge_dds::mips::Edge::Clamp));
         tiles.push((s.x, s.y, tw, th));
     }
-    let mut levels = crate::object_atlas::assemble(w, h, TREE_ATLAS_MIPS, [0, 0, 0, 0], &chains);
+    let mut levels = crate::object_atlas::assemble(w, h, mips, [0, 0, 0, 0], &chains);
     crate::object_atlas::keep_alpha_coverage(&mut levels, &tiles);
+    levels.drain(..drop as usize);
+    let (w, h) = (levels[0].0, levels[0].1);
     let images: Vec<RgbaImage<'_>> = levels.iter().map(|(w, h, p)| RgbaImage { width: *w, height: *h, rgba: p }).collect();
     let blocks = gpu.encode_bc7(&images)?;
     Ok(Some(lodforge_dds::write_bc7(w, h, &blocks)))
@@ -250,7 +271,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     for season in seasons {
         let t = Instant::now();
         let swaps: HashMap<u32, u32> = season.map(|s| crate::object_export::base_swaps(&inputs, s)).unwrap_or_default();
-        let tl = build_with(world, &bases, sw, &swaps, &Vfs(&p.vfs), 8192, &rules);
+        let tl = build_with(world, &bases, sw, &swaps, &Vfs(&p.vfs), 16384, &rules);
         if let Some(dir) = &a.placeholder_billboards {
             let n = write_placeholders(dir, &tl)?;
             println!("wrote {n} placeholder billboards under {}", dir.display());
@@ -288,7 +309,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         if let (None, Some(g)) = (season, &a.golden) {
             compare_golden(g, &tl, atlas.as_deref())?;
         }
-        println!("{} [{name}]: {} tree types, {refs} references in {} blocks, atlas {}x{}, {} missing billboards, {} duplicate ids, {} never-enabled references left out; {n} files in {} ms", world.editor_id, tl.types.len(), tl.blocks.len(), tl.atlas.0, tl.atlas.1, tl.missing_billboards.len(), tl.duplicates, tl.never_enabled, t.elapsed().as_millis());
+        println!("{} [{name}]: {} tree types, {refs} references in {} blocks, atlas {}x{}, {} missing billboards, {} duplicate ids, {} never-enabled references left out, {} types ({} references) over the {}-type limit left out; {n} files in {} ms", world.editor_id, tl.types.len(), tl.blocks.len(), tl.atlas.0 >> atlas_drop_levels(tl.atlas.0, tl.atlas.1), tl.atlas.1 >> atlas_drop_levels(tl.atlas.0, tl.atlas.1), tl.missing_billboards.len(), tl.duplicates, tl.never_enabled, tl.over_limit.0, tl.over_limit.1, lodforge_treelod::MAX_TREE_TYPES, t.elapsed().as_millis());
     }
     println!("total {} ms", t0.elapsed().as_millis());
     Ok(())
@@ -383,4 +404,18 @@ fn compare_golden(golden: &Path, t: &TreeLod, atlas: Option<&[u8]>) -> Result<()
         .unwrap_or(0);
     println!("  golden BTT (rotation ignored): {same} identical, {differ} differ, {missing} missing in golden, {extra} only in golden");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_is_halved_until_the_game_loads_it() {
+        assert_eq!(atlas_drop_levels(4096, 4096), 0);
+        assert_eq!(atlas_drop_levels(2048, 1024), 0);
+        assert_eq!(atlas_drop_levels(8192, 4096), 1);
+        assert_eq!(atlas_drop_levels(8192, 8192), 1);
+        assert_eq!(atlas_drop_levels(16384, 8192), 2);
+    }
 }

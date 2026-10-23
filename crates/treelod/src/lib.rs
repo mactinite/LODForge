@@ -175,7 +175,14 @@ pub struct TreeLod {
     /// References left out because their enable parent is the player with the opposite flag:
     /// never enabled in game (how tree and road mods switch off vanilla trees they replace).
     pub never_enabled: usize,
+    /// Tree types left out to stay within [MAX_TREE_TYPES], and their references.
+    pub over_limit: (usize, usize),
 }
+
+/// Tree types one `<World>.lst` can hold: the game reads a BTT type index through its low byte
+/// (skyrim-cs-base 2026-10-22: with 331 summer types an Ulvenwald oak, type 315, drew as type 59,
+/// a snowy fir; a debug atlas with the index painted on every slot showed 59 in game).
+pub const MAX_TREE_TYPES: usize = 256;
 
 /// Source of game files (VFS).
 pub trait Files {
@@ -351,8 +358,53 @@ pub fn build_with(world: &Worldspace, bases: &HashMap<u32, TreeBase>, south_west
             None => bl.types.push((index, vec![r])),
         }
     }
+    limit_types(&mut out, MAX_TREE_TYPES);
     pack_atlas(&mut out, max_atlas);
     out
+}
+
+/// Keeps the `max` tallest tree types (as placed: billboard height times its scale; ties by
+/// reference count) and drops the rest from tree LOD: small plants matter least in the distance.
+/// Kept types are renumbered in their original order, so lists within the limit are unchanged.
+fn limit_types(out: &mut TreeLod, max: usize) {
+    let valid: Vec<usize> = (0..out.trees.len()).filter(|&i| out.trees[i].index != -1).collect();
+    if valid.len() <= max {
+        return;
+    }
+    let mut uses: HashMap<i32, usize> = HashMap::new();
+    for b in &out.blocks {
+        for (i, r) in &b.types {
+            *uses.entry(*i).or_default() += r.len();
+        }
+    }
+    let mut ranked = valid.clone();
+    ranked.sort_by(|&a, &b| {
+        let (ta, tb) = (&out.trees[a], &out.trees[b]);
+        (tb.height * tb.scale).total_cmp(&(ta.height * ta.scale)).then(uses.get(&tb.index).cmp(&uses.get(&ta.index))).then(ta.index.cmp(&tb.index))
+    });
+    let keep: HashSet<i32> = ranked[..max].iter().map(|&i| out.trees[i].index).collect();
+    let mut kept: Vec<i32> = keep.iter().copied().collect();
+    kept.sort_unstable();
+    let remap: HashMap<i32, i32> = kept.iter().enumerate().map(|(n, &old)| (old, n as i32)).collect();
+    let mut dropped_refs = 0;
+    for b in &mut out.blocks {
+        b.types.retain(|(i, r)| {
+            let k = keep.contains(i);
+            if !k {
+                dropped_refs += r.len();
+            }
+            k
+        });
+        for (i, _) in &mut b.types {
+            *i = remap[i];
+        }
+    }
+    for tr in &mut out.trees {
+        if tr.index != -1 {
+            tr.index = remap.get(&tr.index).copied().unwrap_or(-1);
+        }
+    }
+    out.over_limit = (valid.len() - max, dropped_refs);
 }
 
 /// `TwbLodTES5TreeList.BuildAtlas`: unique billboards (by CRC) packed with 16-pixel padding (xLODGen
@@ -512,6 +564,26 @@ impl TreeLod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn types_over_the_limit_drop_the_smallest_and_renumber() {
+        let tree = |index: i32, height: f32| Tree { index, form_id: 0x800 + index as u32, billboard: String::new(), crc: index as u32, width: 100.0, height, shift: [0.0; 3], scale: 1.0, image: (64, 64) };
+        let r = TreeRef { pos: [0.0; 3], rotation: 0.0, scale: 1.0, form_id: 1 };
+        let mut out = TreeLod {
+            trees: vec![tree(0, 900.0), tree(1, 50.0), tree(2, 1200.0), tree(-1, 2000.0)],
+            blocks: vec![Block { cell: (0, 0), types: vec![(1, vec![r, r]), (2, vec![r]), (0, vec![r])] }],
+            ..Default::default()
+        };
+        limit_types(&mut out, 2);
+        // The 50-unit shrub (type 1) goes; types 0 and 2 become 0 and 1, block order kept.
+        assert_eq!(out.over_limit, (1, 2));
+        assert_eq!(out.blocks[0].types.iter().map(|(i, v)| (*i, v.len())).collect::<Vec<_>>(), vec![(1, 1), (0, 1)]);
+        assert_eq!(out.trees.iter().map(|t| t.index).collect::<Vec<_>>(), vec![0, -1, 1, -1]);
+        // Within the limit nothing changes.
+        let before = out.blocks[0].types.clone();
+        limit_types(&mut out, MAX_TREE_TYPES);
+        assert_eq!(out.blocks[0].types, before);
+    }
 
     #[test]
     fn names_and_crc() {
