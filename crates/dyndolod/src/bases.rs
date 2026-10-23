@@ -25,6 +25,9 @@ pub struct Base {
     pub dnam: Vec<u8>,
     /// Type data a copy of the base keeps: TREE CNAM, MSTT DATA.
     pub type_data: Vec<u8>,
+    /// ACTI WNAM water type (global form id), 0 for none. Water activators need it on their
+    /// dynamic LOD copy, or the engine draws the water mesh black.
+    pub water_type: u32,
     /// OBND (x1, y1, z1, x2, y2, z2).
     pub bounds: [i16; 6],
     /// MODS alternate textures of the model.
@@ -87,6 +90,10 @@ pub fn read_bases(lo: &LoadOrder) -> lodforge_esp::Result<HashMap<u32, Base>> {
                     }
                     b"CNAM" if sig == b"TREE" => b.type_data = f.data.to_vec(),
                     b"DATA" if sig == b"MSTT" => b.type_data = f.data.to_vec(),
+                    b"WNAM" if sig == b"ACTI" && f.data.len() >= 4 => {
+                        let w = u32::from_le_bytes([f.data[0], f.data[1], f.data[2], f.data[3]]);
+                        b.water_type = if w == 0 { 0 } else { lp.global_form_id(w).unwrap_or(0) };
+                    }
                     b"MNAM" if sig == b"STAT" => {
                         let mut l: [String; 4] = Default::default();
                         for (k, s) in l.iter_mut().enumerate() {

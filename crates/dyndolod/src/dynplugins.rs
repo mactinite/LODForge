@@ -444,6 +444,14 @@ fn base_copy(esm: &mut PluginBuilder, copies: &mut HashMap<(u32, String), u32>, 
         b"STAT" => rec.field(b"DNAM", vec![0u8; 12]),
         b"TREE" if !b.type_data.is_empty() => rec.field(b"CNAM", b.type_data.clone()),
         b"MSTT" => rec.field(b"DATA", if b.type_data.is_empty() { vec![0] } else { b.type_data.clone() }),
+        // As in the reference DynDOLOD.esm: marker colour and flags zeroed, and the water type of
+        // water activators kept (Water1024Creek_DynDOLOD_BASERECORD). Without WNAM the engine
+        // draws the water LOD mesh black.
+        b"ACTI" => {
+            let rec = rec.field(b"PNAM", vec![0u8; 4]);
+            let rec = if b.water_type != 0 { rec.field(b"WNAM", b.water_type.to_le_bytes().to_vec()) } else { rec };
+            rec.field(b"FNAM", vec![0u8; 2])
+        }
         _ => rec,
     };
     esm.add(rec);
@@ -873,6 +881,63 @@ mod tests {
         LoadOrder::open(&["Test.esm".to_string()], |n| Some(dir.join(n))).unwrap()
     }
 
+    /// Subrecords of the first `sig` record in an uncompressed plugin, as (type, data).
+    fn first_record_fields(bytes: &[u8], sig: &[u8; 4], edid: &str) -> Vec<([u8; 4], Vec<u8>)> {
+        let mut i = 0;
+        while i + 24 <= bytes.len() {
+            let size = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
+            if &bytes[i..i + 4] == b"GRUP" {
+                i += 24;
+                continue;
+            }
+            let body = &bytes[i + 24..i + 24 + size];
+            let mut fields = Vec::new();
+            let mut k = 0;
+            while k + 6 <= body.len() {
+                let len = u16::from_le_bytes([body[k + 4], body[k + 5]]) as usize;
+                fields.push((body[k..k + 4].try_into().unwrap(), body[k + 6..k + 6 + len].to_vec()));
+                k += 6 + len;
+            }
+            if &bytes[i..i + 4] == sig && fields.iter().any(|(s, d)| s == b"EDID" && d.starts_with(edid.as_bytes())) {
+                return fields;
+            }
+            i += 24 + size;
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn water_activator_copies_keep_their_water_type() {
+        // As in the reference DynDOLOD.esm (Water1024CreekFlowSE_DynDOLOD_BASERECORD): EDID, OBND,
+        // MODL, PNAM 0, WNAM = the original's water type, FNAM 0. Without WNAM the water is black.
+        let dir = std::env::temp_dir().join(format!("lodforge-water-acti-{}", std::process::id()));
+        let lo = test_load_order(&dir, 0);
+        let mut esm = PluginBuilder::new(0x800);
+        esm.esm = true;
+        let mut copies = HashMap::new();
+        let mut tex = TexSets { swaps: None, ids: HashMap::new() };
+        // Any record of Test.esm stands in for the water type: global 0x00000800.
+        let water = Base { signature: *b"ACTI", form_id: 0x900, editor_id: "Water1024Creek".into(), model: "Water\\Water1024.nif".into(), water_type: 0x800, ..Default::default() };
+        let plain = Base { signature: *b"ACTI", form_id: 0x901, editor_id: "DragonMound".into(), model: "dragonmound.nif".into(), ..Default::default() };
+        base_copy(&mut esm, &mut copies, &mut tex, &water, "dyndolod\\lod\\water\\water1024_dyndolod_lod.nif");
+        base_copy(&mut esm, &mut copies, &mut tex, &plain, "lod\\dragonmound_lod_0.nif");
+        let bytes = esm.write(&lo);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let f = first_record_fields(&bytes, b"ACTI", "Water1024Creek_DynDOLOD_BASERECORD");
+        let sigs: Vec<&[u8; 4]> = f.iter().map(|(s, _)| s).collect();
+        assert_eq!(sigs, [b"EDID", b"OBND", b"MODL", b"PNAM", b"WNAM", b"FNAM"]);
+        let get = |s: &[u8; 4]| f.iter().find(|(k, _)| k == s).unwrap().1.clone();
+        assert_eq!(get(b"PNAM"), vec![0; 4]);
+        assert_eq!(get(b"FNAM"), vec![0; 2]);
+        // Test.esm is master 0 of the written plugin.
+        assert_eq!(get(b"WNAM"), 0x0000_0800u32.to_le_bytes().to_vec());
+
+        let f = first_record_fields(&bytes, b"ACTI", "DragonMound_DynDOLOD_BASERECORD");
+        let sigs: Vec<&[u8; 4]> = f.iter().map(|(s, _)| s).collect();
+        assert_eq!(sigs, [b"EDID", b"OBND", b"MODL", b"PNAM", b"FNAM"]);
+    }
+
     fn dynamic(id: u32, model: &str) -> DynamicRef {
         DynamicRef { ref_id: id, base: 0x800, grid: crate::rules::Grid::NearLod, initially_enabled: true, enable_parent: 0, opposite_parent: false, large: false, persistent: false, replace: false, model: model.into() }
     }
@@ -1035,7 +1100,7 @@ mod tests {
         let worlds = lodforge_esp::scan_worldspaces(lo).unwrap();
         let world = worlds.iter().find(|w| w.editor_id == "TestWorld").unwrap();
         let mut bases = HashMap::new();
-        bases.insert(0x800, Base { signature: *b"STAT", form_id: 0x800, editor_id: "Rock".into(), flags: 0, model: "rock.nif".into(), mnam: None, material: 0, winning_plugin: 0, dnam: Vec::new(), bounds: [0; 6], type_data: Vec::new(), alt_textures: Vec::new() });
+        bases.insert(0x800, Base { signature: *b"STAT", form_id: 0x800, editor_id: "Rock".into(), flags: 0, model: "rock.nif".into(), mnam: None, material: 0, winning_plugin: 0, dnam: Vec::new(), bounds: [0; 6], type_data: Vec::new(), water_type: 0, alt_textures: Vec::new() });
         build_worlds(lo, &[WorldDynamic { world, dynamic, south_west: (0, 0), lod_refs: &[], children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new() }], &bases, 11, 21, token, rolling, Some(Workarounds { margin: 3 }), None).unwrap()
     }
 

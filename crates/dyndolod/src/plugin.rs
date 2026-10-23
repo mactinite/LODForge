@@ -33,6 +33,7 @@ fn schema(record: &[u8; 4], field: &[u8; 4]) -> Option<Ids> {
         (b"REFR", b"XLKR" | b"XLRT" | b"XPOD" | b"XLRM") => Some(Ids::List),
         (b"FLST", b"LNAM") => Some(Ids::One),
         (b"STAT", b"DNAM") => Some(Ids::At(4)),
+        (b"ACTI", b"WNAM") => Some(Ids::One),
         _ => None,
     }
 }
