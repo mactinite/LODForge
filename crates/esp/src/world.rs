@@ -24,7 +24,7 @@ use crate::Result;
 pub const CELL_SHORT_DATA: u16 = 0x8000;
 
 /// A placed reference (REFR) as the winning plugin defines it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Placement {
     /// Global form id of the base object (NAME).
     pub base: u32,

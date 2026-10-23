@@ -177,8 +177,16 @@ impl Rule {
 /// `available(level)` says whether the resource a level choice needs exists (a model level, the
 /// billboard); a VWD rule applies only if one of its level choices is available. A no-level/
 /// no-grid rule blocks full-model fallback, but does not suppress discovered LOD resources.
+///
+/// A grid-only rule (dynamic LOD, no levels, `Unchanged`) passes a base that has LOD models on to
+/// the next matching rule for its levels (golden Ultra report, skyrim-cs-base 2026-10-22:
+/// `SovngardeStatue01` matches `sovngardestatue0,,,,Far LOD,Unchanged` and then the catch-all
+/// `\,Static LOD4,Static LOD8,Static LOD16,Far LOD`, and its references are static object LOD
+/// with `sovngardestatue01_lod.nif`; `ShipCaptainsBroken01`, without LOD models, stays on its
+/// grid-only rule as dynamic LOD with the full model).
 pub fn select_mask_rule<'a>(rules: &'a [Rule], model_below_meshes: &str, is_tree: bool, available: &dyn Fn(Level) -> bool) -> Option<&'a Rule> {
-    rules.iter().find(|r| {
+    let has_models = [Level::Model(0), Level::Model(1), Level::Model(2), Level::Model(3)].into_iter().any(available);
+    let applies = |r: &Rule| -> bool {
         if r.reference.is_some() {
             return false;
         }
@@ -190,7 +198,15 @@ pub fn select_mask_rule<'a>(rules: &'a [Rule], model_below_meshes: &str, is_tree
         }
         r.has_levels() || r.grid != Grid::None
             || ![Level::Model(0), Level::Model(1), Level::Model(2), Level::Model(3), Level::Billboard(1)].into_iter().any(available)
-    })
+    };
+    let first = rules.iter().position(applies)?;
+    let r = &rules[first];
+    if !r.has_levels() && r.grid != Grid::None && has_models && r.flags & FLAG_VWD == 0 && r.reference_action.eq_ignore_ascii_case("Unchanged")
+        && let Some(next) = rules[first + 1..].iter().find(|n| applies(n) && n.has_levels())
+    {
+        return Some(next);
+    }
+    Some(r)
 }
 
 /// The reference rule for a reference (plugin that defines it, lower-case, and local form id).

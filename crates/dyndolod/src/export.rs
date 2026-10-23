@@ -865,6 +865,24 @@ mod parent_tests {
     }
 
     #[test]
+    fn grid_only_rule_passes_bases_with_lod_models_on() {
+        let rules = [
+            crate::rules::Rule::parse("sovngardestatue0,,,,Far LOD,Unchanged,0", "test").unwrap(),
+            crate::rules::Rule::parse(r"\,Static LOD4,Static LOD8,Static LOD16,Far LOD,Unchanged,1", "test").unwrap(),
+        ];
+        let model = r"architecture\sovengarde\sovngardestatue01.nif";
+        // With LOD models: the catch-all's levels (static object LOD).
+        let r = crate::rules::select_mask_rule(&rules, model, false, &|_| true).unwrap();
+        assert!(r.has_levels());
+        // Without: the grid-only rule (dynamic LOD with the full model).
+        let r = crate::rules::select_mask_rule(&rules, model, false, &|_| false).unwrap();
+        assert!(!r.has_levels());
+        // Alone, the grid-only rule stays even with LOD models.
+        let r = crate::rules::select_mask_rule(&rules[..1], model, false, &|_| true).unwrap();
+        assert!(!r.has_levels());
+    }
+
+    #[test]
     fn base_updates_require_emitted_large_object_lod() {
         let line = |ref_id, base, columns| RefLine { ref_id, base, columns, ref_flags: 0, position: [0.0; 3], rotation: [0.0; 3], scale: 1.0, editor_id: String::new(), base_flags: 0, material: String::new(), full_model: String::new() };
         let model = || ["rock_lod.nif".into(), String::new(), String::new(), String::new()];

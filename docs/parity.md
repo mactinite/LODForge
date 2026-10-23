@@ -149,25 +149,32 @@ tail inventory, and record new evidence here before promoting an item to a block
 ### Child world copies vs the Ultra golden (skyrim-cs-base, 2026-10-23)
 
 Golden: `LODForge-golden\dyndolod-ultra-csbase-20261022` (DynDOLOD 3 Alpha-215, High rules,
-Ultra, "Child > parent" Low, Tamriel only). After `mod_world_ignore.txt`, the plugins' linear
-textures and `--child-parent Low`, Tamriel gets 365 `_DynDOLOD_CHILD` copies, golden 364, 361
-in both. Rules here come from DynDOLOD's output, logs and shipped configs only (no reverse
-engineering of its executables). Open:
+Ultra, "Child > parent" Low, Tamriel only). Rules here come from DynDOLOD's output, logs and
+shipped configs only (no reverse engineering of its executables). `lodforge child-copies
+--preset High --child-parent Low` now gives the golden's 363 copies exactly (was 365 with 4 extra
+and 2 missing). What closed the gap:
 
-- **Duplicate key (ours only, 4).** DynDOLOD's debug log keys references as
-  `<model>_<round(x/100)>_<round(y/100)>_<round(z/100)>_<scale%>` and treats a child reference
-  whose key matches a parent reference as already present; LODForge matches base + position to 1
-  unit, so near-twins get copied twice: `jksthepawnedprawnesp&000800` (RTPawnedPrawn01, Tamriel
-  twin `00080A` 9 units away), `&00081C` (RTChimney01, twin `000819`), `jksskyrimesp&0147D2`
-  (WRScafGuardTower01 in Whiterun, Tamriel twin `014D59`, same key `195_-47_-28_160`). Within a
-  child world DynDOLOD also drops exact duplicates ("Duplicate reference ignored for LOD ... adds
-  same model at same position, rotation and scale"): `jkshaelgasbunkhouseesp&000817` duplicates
-  `JKs Skyrim.esp 13000EAA`. Fix: use that key for both checks (whether rotation is part of it is
-  unconfirmed).
-- **Golden only (3).** `jksskyrimesp&0024C1` (SovngardeStatue01, scale 0.3, Whiterun),
-  `jkstempleofthedivinesesp&0008F8` (SCastleWall06 at exactly the position of Skyrim.esm
-  `0F4FEE`; probably our base+position check), `skyrimesm&0391FE` (a Tamriel pine copied into
-  Solitude: the parent -> child direction, `ScanParent`).
+- **Reference key.** The debug log keys references as
+  `<model>_<round(x/100)>_<round(y/100)>_<round(z/100)>_<scale%>`
+  (`childworld::ref_key`; rounding half to even is assumed, as Delphi's `Round`).
+- **Duplicates inside a child.** A later reference with the key and rotation of an earlier one
+  is dropped ("Duplicate reference ignored for LOD ... adds same model at same position,
+  rotation and scale"): Haelga's Bunkhouse `FE063817` duplicates JKs Skyrim `13000EAA`.
+- **Parent twins, one to one.** A child reference whose key equals a parent reference's is not
+  copied (Pawned Prawn `FE07E800`/`FE07E81C`, JKs Skyrim `130147D2`, whose Tamriel twins are up
+  to 9 units away), but a parent reference takes at most one twin, and one already paired
+  through `ChildworldMatches.txt` takes none: JK's Temple of the Divines `FE0798F8` has the key
+  of Tamriel `000F4FEE`, which the match list pairs with Solitude's `000E73A4`, so it is copied.
+- **Grid-only rules fall through.** `SovngardeStatue01` (copy of JKs Skyrim `130024C1`) matched
+  `sovngardestatue0,,,,Far LOD,Unchanged` and got no LOD. DynDOLOD's object report lists that
+  rule and then the catch-all `\,Static LOD4,...` for the base: a grid-only `Unchanged` rule
+  passes a base that has LOD models on to the next matching rule with levels
+  (`rules::select_mask_rule`). Bases without LOD models (`ShipCaptainsBroken01`) stay dynamic.
+  Tamriel export: the three JKs Skyrim statues are now static object LOD as in the golden, and
+  nothing else changed (52,835 -> 52,838 identical lines, dynamic overlap unchanged).
+
+Still open: `skyrimesm&0391FE` is a Tamriel pine copied into Solitude's own LOD (parent ->
+child, `ScanParent`); child worldspace LOD is not built yet.
 
 ## Exit criteria
 

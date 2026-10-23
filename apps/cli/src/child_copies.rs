@@ -19,6 +19,10 @@ pub struct Args {
     pub world: String,
     #[arg(long, default_value = "Medium")]
     pub preset: String,
+    /// DynDOLOD's "Child > parent" setting (`IgnoreChildEDID<value>`; default: the preset), as
+    /// `build --child-parent`.
+    #[arg(long)]
+    pub child_parent: Option<String>,
     /// DynDOLOD `Edit Scripts\DynDOLOD` folder (default: `<instance>\tools\DynDOLOD\Edit Scripts\DynDOLOD`).
     #[arg(long)]
     pub dyndolod: Option<PathBuf>,
@@ -43,7 +47,13 @@ pub fn for_world(p: &Profile, c: &crate::dyndolod_build::Config, r: &lodforge_dy
     let rules = &c.rules;
     let lod_of = |id: u32, pl: &lodforge_esp::Placement, b: &lodforge_dyndolod::bases::Base| {
         let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
-        childworld::has_lod(r, rules, &plugin_of(id), local, pl, b)
+        let ok = childworld::has_lod(r, rules, &plugin_of(id), local, pl, b);
+        if std::env::var("LODFORGE_CHILD_TRACE").ok().and_then(|s| u32::from_str_radix(s.trim(), 16).ok()) == Some(id) {
+            let lod = r.resolve(b);
+            let rr = lodforge_dyndolod::rules::select_reference_rule(rules, &plugin_of(id), local);
+            eprintln!("child copy {id:08X}: model {} flags {:X} reference rule {:?} base rule {:?} columns {:?}", b.model, pl.flags, rr.map(|x| &x.reference_action), lod.rule.map(|i| (&rules[i].mask, &rules[i].levels, &rules[i].source)), lod.columns);
+        }
+        ok
     };
     childworld::copies(&p.load_order, parent, &children, bases, &childworld::known_matches(dir), &childworld::full_model_refs(dir), &lod_of, &|pl, id| childworld::removed_by_rule(rules, pl, id))
 }
@@ -54,7 +64,7 @@ pub fn run(a: &Args) -> Result<()> {
     let worlds = scan_worldspaces(&p.load_order)?;
     let parent = worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(&a.world)).context("worldspace not found")?;
     let c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
-    let copies = crate::dyndolod_build::with_resolver(&p, &c, |r| for_world(&p, &c, r, &worlds, parent, &a.preset));
+    let copies = crate::dyndolod_build::with_resolver(&p, &c, |r| for_world(&p, &c, r, &worlds, parent, a.child_parent.as_deref().unwrap_or(&a.preset)));
     let bases = &c.bases;
     let name = |id: u32| worlds.iter().find(|w| w.form_id == id).map(|w| w.editor_id.clone()).unwrap_or_default();
     let mut by_world = std::collections::BTreeMap::new();
