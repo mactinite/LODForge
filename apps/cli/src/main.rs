@@ -17,6 +17,8 @@ mod grass_types;
 mod occlusion;
 mod build;
 mod info;
+mod instances;
+mod grass_far;
 mod lod_models;
 mod lod_sources;
 mod tree_report;
@@ -189,6 +191,10 @@ enum Command {
     LodSources(lod_sources::Args),
     /// What LOD every tree base gets in a DynDOLOD-mode export (3D model, billboard, none) and why
     TreeReport(tree_report::Args),
+    /// Far grass for the LODForge Runtime (`.lfg`) from an NGIO grass cache, with sizes per density level.
+    RuntimeGrass(grass_far::Args),
+    /// Shapes (draws) and triangles of a worldspace's object LOD files per level.
+    BtoStats(instances::StatsArgs),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
     TreeModels(tree_models::Args),
     /// LOD models generated from full models where DynDOLOD's rules want LOD and none is installed.
@@ -257,6 +263,8 @@ fn main() -> Result<()> {
         Command::Info(a) => info::run(&a),
         Command::LodSources(a) => lod_sources::run(&a),
         Command::TreeReport(a) => tree_report::run(&a),
+        Command::RuntimeGrass(a) => grass_far::run(&a),
+        Command::BtoStats(a) => instances::bto_stats(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),
         Command::PluginDump(a) => plugin_dump::run(&a),

@@ -28,6 +28,9 @@ lodforge-texgen.workspace = true
 png.workspace = true
 lodforge-treelod.workspace = true
 lodforge-viewer.workspace = true
+lodforge-instances.workspace = true
+crc32fast = "1"
+zstd = { version = "0.13", default-features = false }
 mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]

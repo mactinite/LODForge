@@ -330,8 +330,9 @@ kinds, raw and zstd.
 
 ## 9. Sizes and limits
 
-- Tamriel trees: about 100k references -> 2.4 MB per season uncompressed.
-- Grass at 10 bytes per instance: numbers measured on a full Tamriel cache are in
-  `docs/runtime/grass-lfg-sizes.md`.
+- Tamriel on skyrim-cs-base (measured, zstd 3): 93,544 trees -> 2.31 MB; 46,006 3D tree LOD
+  instances -> 1.21 MB; 29.7 M grass instances -> 236 MB (297 MB raw). Details in
+  [exporters-results-20261024.md](exporters-results-20261024.md) and
+  [grass-lfg-sizes.md](grass-lfg-sizes.md).
 - Limits: 65,535 tree types / meshes / grass types per file, 255 grass types per cell, 2^32 - 1
   records per section, cell coordinates in i16.

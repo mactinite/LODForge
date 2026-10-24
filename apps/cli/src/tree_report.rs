@@ -87,6 +87,8 @@ pub struct Row {
     pub note: String,
     /// Big enough for a generated 3D model ([generator_candidate]).
     pub candidate: bool,
+    /// References drawn by the LODForge Runtime (`build --runtime lodforge`; out of `.bto`).
+    pub runtime_refs: usize,
 }
 
 /// TreeLODGen's test for trees worth a 3D model (docs/re/treelodgen-algorithm.md): the model
@@ -100,7 +102,7 @@ pub fn generator_candidate(model: &str, bounds: [i16; 6]) -> bool {
 
 /// Rows for the tree references of one export (the default season's lines and skips).
 #[allow(clippy::too_many_arguments)]
-pub fn rows(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>, world: &Worldspace, lines: &[RefLine], skipped: &HashMap<u32, Skip>, mods_dir: &std::path::Path, resources_mod: &str) -> Vec<Row> {
+pub fn rows(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>, world: &Worldspace, lines: &[RefLine], skipped: &HashMap<u32, Skip>, mods_dir: &std::path::Path, resources_mod: &str, runtime: &HashMap<u32, usize>) -> Vec<Row> {
     // (base) -> (references, columns of the first line)
     let mut per_base: HashMap<u32, (usize, Option<[String; 4]>)> = HashMap::new();
     for l in lines {
@@ -149,7 +151,7 @@ pub fn rows(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>, wo
         let owner = c.owners.get(&lodforge_dyndolod::bases::owner_key(base)).and_then(|&i| p.plugin_names.get(i)).cloned().unwrap_or_default();
         let local = if base >> 24 == 0xFE { base & 0xFFF } else { base & 0x00FF_FFFF };
         let candidate = generator_candidate(&model, b.bounds);
-        out.push(Row { plugin: owner, form_id: local, editor_id: b.editor_id.clone(), model: full, crc, refs, kinds, lod4, source, note, candidate });
+        out.push(Row { plugin: owner, form_id: local, editor_id: b.editor_id.clone(), model: full, crc, refs, kinds, lod4, source, note, candidate, runtime_refs: runtime.get(&base).copied().unwrap_or(0) });
     }
     out.sort_by(|a, b| b.refs.cmp(&a.refs).then_with(|| a.editor_id.cmp(&b.editor_id)));
     out
@@ -160,7 +162,7 @@ fn csv_field(s: &str) -> String {
 }
 
 pub fn csv(rows: &[Row]) -> String {
-    let mut s = String::from("plugin,form_id,editor_id,model,model_crc32,references,lod4,lod8,lod16,lod4_model,lod4_source,note,generator_candidate\r\n");
+    let mut s = String::from("plugin,form_id,editor_id,model,model_crc32,references,lod4,lod8,lod16,lod4_model,lod4_source,note,generator_candidate,runtime_refs\r\n");
     for r in rows {
         let f = [
             csv_field(&r.plugin),
@@ -176,6 +178,7 @@ pub fn csv(rows: &[Row]) -> String {
             csv_field(&r.source),
             csv_field(&r.note),
             if r.candidate { "yes".into() } else { "no".into() },
+            r.runtime_refs.to_string(),
         ];
         s.push_str(&f.join(","));
         s.push_str("\r\n");
@@ -197,6 +200,10 @@ pub fn summary(world: &str, rows: &[Row]) -> String {
         s.push_str(&format!(" {} {refs} refs ({:.0}%) / {bases} bases;", k.label(), 100.0 * *refs as f64 / total.max(1) as f64));
     }
     s.push('\n');
+    let runtime: usize = rows.iter().map(|r| r.runtime_refs).sum();
+    if runtime > 0 {
+        s.push_str(&format!("  LODForge Runtime draws {runtime} of them ({:.0}%; out of .bto)\n", 100.0 * runtime as f64 / total.max(1) as f64));
+    }
     let cand: Vec<&Row> = rows.iter().filter(|r| r.kinds[0] != Kind::Model3d && r.candidate).collect();
     s.push_str(&format!("  generator candidates without a 3D LOD4 model: {} bases, {} references\n", cand.len(), cand.iter().map(|r| r.refs).sum::<usize>()));
     let top: Vec<&Row> = cand.into_iter().take(8).collect();
@@ -222,7 +229,7 @@ pub fn run(a: &Args) -> Result<()> {
         let we = crate::dyndolod_build::export_world(&p, &c, r, ws, &[], &h, &copies)?;
         let s = &we.seasons[0];
         let world = lodforge_dyndolod::childworld::with_copies(ws, &copies);
-        Ok(rows(&p, &c, r, &world, &s.lines, &s.skipped, &a.profile.instance.join("mods"), &a.resources_mod))
+        Ok(rows(&p, &c, r, &world, &s.lines, &s.skipped, &a.profile.instance.join("mods"), &a.resources_mod, &HashMap::new()))
     })?;
     print!("{}", summary(&ws.editor_id, &rows));
     if let Some(o) = &a.out {

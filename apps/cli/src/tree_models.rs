@@ -686,7 +686,7 @@ pub fn run(a: &Args) -> Result<()> {
             let h = crate::dyndolod_build::header(&p, &c, ws, "", &a.profile.game_dir().join("Data"), "");
             let we = crate::dyndolod_build::export_world(&p, &c, r, ws, &[], &h, &[])?;
             let s = &we.seasons[0];
-            let rows = crate::tree_report::rows(&p, &c, r, ws, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "");
+            let rows = crate::tree_report::rows(&p, &c, r, ws, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "", &std::collections::HashMap::new());
             let mut m = HashMap::new();
             for row in rows {
                 *m.entry(lodforge_dyndolod::bases::model_path(&row.model).to_ascii_lowercase()).or_default() += row.refs;

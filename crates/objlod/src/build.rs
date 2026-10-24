@@ -85,6 +85,9 @@ pub struct Options<'a> {
     /// re-cut at the tile edges first, so every piece samples its own tile instead of reaching
     /// into the neighbouring tiles on the page. LODGen remaps such shapes as they are.
     pub recut_overshoot: bool,
+    /// Instanced object LOD for the LODForge Runtime (`crate::instancing`); `None` merges every
+    /// reference as before.
+    pub instancing: Option<crate::instancing::Instancing>,
 }
 
 /// UV slack a shape may have past its atlas tile without being re-cut (half a texel of a
@@ -111,6 +114,7 @@ impl Default for Options<'_> {
             recut_overshoot: true,
             grass: None,
             height_map: false,
+            instancing: None,
         }
     }
 }
@@ -177,6 +181,9 @@ pub struct BuiltQuad {
     pub vertices: usize,
     /// The object height map cells this LOD4 quad's shapes raise (`Options::height_map`).
     pub heights: Option<crate::heightmap::Cells>,
+    /// Placements left out of the merged shapes for the runtime to draw instanced
+    /// ([`Options::instancing`]).
+    pub instances: Vec<crate::instancing::Instance>,
 }
 
 /// The builder of one worldspace / season.
@@ -297,9 +304,37 @@ impl<'a> ObjectLod<'a> {
         let (mut atlased, mut reuv_parts, mut vc_white, mut overshoot_parts) = (0usize, 0usize, 0usize, 0usize);
         let view = if self.opts.remove_unseen_faces { self.opts.terrain.as_deref().map(|t| t.view(q)) } else { None };
         let rule = self.opts.hidden_rule;
-        for &ri in refs {
+        // Runtime instancing: references the runtime draws leave the merged shapes.
+        let routes: Option<Vec<crate::instancing::Route>> = self.opts.instancing.as_ref().map(|inst| {
+            let list: Vec<&StaticRef> = refs.iter().map(|&ri| &self.export.statics[ri]).collect();
+            inst.plan(&list, k, |r, m| {
+                self.opts.alt_textures.has_ref(&r.ref_id) || self.mesh(m).is_some_and(|mesh| mesh.parts.iter().any(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White))
+            })
+        });
+        let mut instances: Vec<crate::instancing::Instance> = Vec::new();
+        for (n, &ri) in refs.iter().enumerate() {
             let r: &StaticRef = &self.export.statics[ri];
             let Some(model) = r.model(k) else { continue };
+            match routes.as_ref().map(|v| v[n]) {
+                Some(crate::instancing::Route::Drop) => {
+                    Stats::add(&self.stats.runtime_dropped, 1);
+                    continue;
+                }
+                Some(crate::instancing::Route::Instance) => {
+                    let model_l = model.to_ascii_lowercase().replace('/', "\\");
+                    // A model that is missing or has no geometry draws nothing either way.
+                    if self.mesh(&model_l).is_some_and(|m| !m.parts.is_empty()) {
+                        Stats::add(&self.stats.instanced, 1);
+                        let runtime_ref = self.opts.instancing.as_ref().is_some_and(|i| i.is_runtime_ref(r));
+                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref });
+                        placed += 1;
+                    } else {
+                        missing += 1;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             let model_l = model.to_ascii_lowercase().replace('/', "\\");
             if model_l.ends_with(".dds") {
                 // A tree billboard (spec 6.1, `billboard`): one shape of two crossed quads.
@@ -538,12 +573,12 @@ impl<'a> ObjectLod<'a> {
             && let Some(g) = &self.opts.grass
         {
             let mut grass_chunks: Vec<Chunk> = Vec::new();
-            let (mut instances, mut unmapped) = (0usize, 0usize);
+            let (mut grass_count, mut unmapped) = (0usize, 0usize);
             for cy in q.y..q.y + 4 {
                 for cx in q.x..q.x + 4 {
                     let Some(cell) = crate::grass::read_cell(g, (cx, cy)) else { continue };
                     for (gt, insts) in &cell {
-                        instances += insts.len();
+                        grass_count += insts.len();
                         if gt.billboard_1.is_empty() {
                             unmapped += insts.len();
                             continue;
@@ -558,7 +593,7 @@ impl<'a> ObjectLod<'a> {
                     }
                 }
             }
-            Stats::add(&self.stats.grass_instances, instances);
+            Stats::add(&self.stats.grass_instances, grass_count);
             Stats::add(&self.stats.grass_unmapped, unmapped);
             if !grass_chunks.is_empty() {
                 chunks.entry(format!("~grass|{}", crate::grass::NAME)).or_default().extend(grass_chunks);
@@ -604,7 +639,7 @@ impl<'a> ObjectLod<'a> {
             crate::heightmap::rasterize(&shapes, q.level, origin, &mut cells);
             cells
         });
-        Some(BuiltQuad { quad: *q, nif, shapes: shapes.len(), triangles, vertices, heights })
+        Some(BuiltQuad { quad: *q, nif, shapes: shapes.len(), triangles, vertices, heights, instances })
     }
 }
 

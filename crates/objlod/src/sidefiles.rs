@@ -52,6 +52,11 @@ impl AltTextures {
         self.refs.is_empty()
     }
 
+    /// Whether the file names this reference (upper-case hex form id) at all.
+    pub fn has_ref(&self, ref_id: &str) -> bool {
+        self.refs.contains_key(&ref_id.to_ascii_uppercase())
+    }
+
     /// The texture set for shape `index` (named `shape`) of a reference's LOD model: an entry
     /// whose index and name both match, else one whose name matches (the index then refers to
     /// the full model's shapes, spec 7.3); `None` keeps the model's own textures.

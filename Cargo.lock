@@ -2573,6 +2573,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crc32fast",
  "half",
  "lodforge-archive",
  "lodforge-btr",
@@ -2581,6 +2582,7 @@ dependencies = [
  "lodforge-esp",
  "lodforge-gpu",
  "lodforge-grass",
+ "lodforge-instances",
  "lodforge-lodmodel",
  "lodforge-nif",
  "lodforge-objlod",
@@ -2596,6 +2598,7 @@ dependencies = [
  "serde",
  "serde_json",
  "windows-sys 0.61.2",
+ "zstd",
 ]
 
 [[package]]

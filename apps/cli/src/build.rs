@@ -116,6 +116,8 @@ pub struct Args {
     /// shader either way.
     #[arg(long, value_enum, default_value = "pbr")]
     pub materials: Materials,
+    #[command(flatten)]
+    pub rt: crate::instances::Opts,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
@@ -240,6 +242,12 @@ pub fn run(a: &Args) -> Result<()> {
     if a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Bto && a.mode != Mode::Dyndolod {
         bail!("--grass bto puts grass into DynDOLOD's object LOD; use it with --mode dyndolod (or --grass go)");
     }
+    if a.rt.on() && a.mode != Mode::Dyndolod {
+        bail!("--runtime lodforge needs --mode dyndolod (the trees and repeated statics come from its export)");
+    }
+    if a.rt.on() && a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Bto {
+        bail!("--runtime lodforge draws far grass from .lfg files; leave --grass bto off");
+    }
     let mut p = prof.open()?;
     // What the output folder holds before this build writes into it (an earlier build's output,
     // or anything else). The stages see their own files through the VFS (`own_output` below),
@@ -332,7 +340,9 @@ pub fn run(a: &Args) -> Result<()> {
         match crate::dyndolod_build::Config::load(&p, &dir, &a.dyn_opts.preset, a.dyn_opts.static_lod) {
             Ok(mut c) => {
                 c.windows = a.dyn_opts.windows;
-                c.ultra = a.dyn_opts.tree_lod == crate::dyndolod_build::TreeLodMode::Ultra;
+                // Runtime mode keeps every tree in the export (as Ultra does); the object LOD stage then
+                // leaves the runtime trees out of the merged shapes.
+                c.ultra = a.dyn_opts.tree_lod == crate::dyndolod_build::TreeLodMode::Ultra || a.rt.on();
                 c.pbr = a.materials.pbr();
                 for (key, v) in [("ObjectLODMaxTileSize", a.dyn_opts.atlas_max_tile), ("FullTextureMaxTileSize", a.dyn_opts.atlas_full_max_tile)] {
                     if let Some(v) = v {
@@ -401,6 +411,8 @@ pub fn run(a: &Args) -> Result<()> {
             }
         }
     }
+    // `--runtime lodforge`: load-order form ids -> plugin names for the instance files.
+    let form_names = a.rt.on().then(|| std::sync::Arc::new(crate::instances::FormNames::new(&p)));
     for world in &worlds {
         let mut step = |stage: &str, season: Option<&str>, f: &mut dyn FnMut() -> Result<()>| {
             let t = Instant::now();
@@ -426,6 +438,7 @@ pub fn run(a: &Args) -> Result<()> {
             // added to the VFS before the atlas reads them.
             let mut world_mini = mini_rows.clone();
             let mut mini_written: Vec<String> = Vec::new();
+            let mut rt_refs: std::collections::HashMap<String, std::sync::Arc<std::collections::HashSet<String>>> = std::collections::HashMap::new();
             step("dyndolod-export", None, &mut || {
                 // LODGen's input files are all written below; nothing of an earlier run stays.
                 if export_dir.is_dir() {
@@ -439,8 +452,24 @@ pub fn run(a: &Args) -> Result<()> {
                     let we = crate::dyndolod_build::export_world(&p, c, r, ws, &seasons, &h, &copies)?;
                     // What every tree got (docs: tree_report.rs), from the default season.
                     let with = lodforge_dyndolod::childworld::with_copies(ws, &copies);
+                    // Runtime mode: the trees the LODForge Runtime draws, per season.
+                    let mut runtime_counts = std::collections::HashMap::new();
+                    if let Some(names) = &form_names {
+                        let mut crc = std::collections::HashMap::new();
+                        for (k, s) in we.seasons.iter().enumerate() {
+                            let t = crate::instances::select_trees(&p, c, &with, s, names, &mut crc);
+                            let (path, size) = crate::instances::write_trees(&out, &t, a.rt.write_options())?;
+                            if !a.json {
+                                println!("  runtime trees: {} references, {} types in {} cells; {} ({:.2} MB); kept in object LOD: {} tilted, {} large, {} child copies, {} in child-world bounds, {} without a plugin", t.file.records(), t.file.types.len(), t.file.cells.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6, t.kept.tilted, t.kept.large, t.kept.copies, t.kept.bounds, t.kept.no_plugin);
+                            }
+                            if k == 0 {
+                                runtime_counts = crate::instances::count_by_base(&s.lines, &t.refs);
+                            }
+                            rt_refs.insert(t.file.common.season.clone(), std::sync::Arc::new(t.ref_columns()));
+                        }
+                    }
                     let s = &we.seasons[0];
-                    let rows = crate::tree_report::rows(&p, c, r, &with, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "DynDOLOD Resources SE 3");
+                    let rows = crate::tree_report::rows(&p, c, r, &with, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "DynDOLOD Resources SE 3", &runtime_counts);
                     Ok((we, rows))
                 })?;
                 if !tree_rows.is_empty() {
@@ -597,7 +626,20 @@ pub fn run(a: &Args) -> Result<()> {
             if let Some(l) = &lane {
                 l.wait_meshes(world);
             }
+            if let Some(names) = &form_names {
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: !a.rt.runtime_no_tree_models, min_copies: a.rt.runtime_min_copies, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
+            }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
+            if a.rt.on() && !a.rt.runtime_no_grass {
+                step("runtime-grass", None, &mut || {
+                    for r in crate::grass_far::build(&p, world, &a.seasons, a.rt.runtime_grass_cache.as_deref(), &out, a.rt.write_options())? {
+                        if !a.json {
+                            print!("{}", r.summary());
+                        }
+                    }
+                    Ok(())
+                });
+            }
         } else if !a.no_objects {
             let args = crate::object_lod::Args {
                 profile: a.profile.clone(),
@@ -629,6 +671,7 @@ pub fn run(a: &Args) -> Result<()> {
                 grass_map: None,
                 grass_flat: None,
                 grass_density: None,
+                runtime: None,
             };
             if let Some(l) = &lane {
                 l.wait_meshes(world);
@@ -835,5 +878,6 @@ fn object_lod_args(a: &Args, world: &str, out: &std::path::Path, export: Vec<Pat
         grass_map: None,
         grass_flat: None,
         grass_density: None,
+        runtime: None,
     }
 }

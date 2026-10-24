@@ -22,7 +22,7 @@ fn le_f32(b: &[u8], o: usize) -> f32 {
 type LtexGrass = HashMap<u32, Vec<usize>>;
 
 /// Every GRAS (winning record) and every LTEX grass list (GNAM order).
-fn grass_tables(p: &Profile) -> Result<(Vec<Gras>, LtexGrass)> {
+pub fn grass_tables(p: &Profile) -> Result<(Vec<Gras>, LtexGrass)> {
     let lo = &p.load_order;
     let mut gras = Vec::new();
     let mut index = HashMap::new();

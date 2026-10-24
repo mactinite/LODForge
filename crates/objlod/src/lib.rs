@@ -33,6 +33,7 @@ pub mod export;
 pub mod flat;
 pub mod grid;
 pub mod hidden;
+pub mod instancing;
 pub mod material;
 pub mod mesh;
 pub mod refs;
