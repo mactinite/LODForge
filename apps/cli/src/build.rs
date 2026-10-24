@@ -785,9 +785,9 @@ pub fn run(a: &Args) -> Result<()> {
             // Far grass: the grass types of the `.lfg` files this build wrote.
             let has_lfg = std::fs::read_dir(crate::instances::out_dir(&out)).map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".lfg"))).unwrap_or(false);
             if has_lfg {
-                let g = crate::grass_pack::build(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options())?;
+                let g = crate::grass_pack::build(&mut p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options())?;
                 if !a.json {
-                    println!("  grass {}", g.summary());
+                    println!("  grass {} ({} cards rendered as billboards)", g.summary(), g.rendered_cards);
                 }
             }
             Ok((t, s))

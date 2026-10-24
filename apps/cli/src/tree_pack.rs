@@ -55,6 +55,8 @@ pub struct Report {
     pub opaque_parts: usize,
     pub trees_files: usize,
     pub ms: u128,
+    /// Grass cards rendered as billboards.
+    pub rendered_cards: usize,
     /// A sample of parts dropped for want of a texture.
     pub unresolved: Vec<String>,
 }

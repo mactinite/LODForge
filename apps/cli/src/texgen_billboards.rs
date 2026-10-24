@@ -639,7 +639,7 @@ pub fn texgen_grass_billboard(g: &Grass, model_bounds: Option<([f32; 3], [f32; 3
 }
 
 /// A one-mip BC7 DDS of an RGBA8 image (TexGen: Texconv `-m 1 -f BC7_UNORM`).
-fn bc7_dds(gpu: &lodforge_gpu::Gpu, w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn bc7_dds(gpu: &lodforge_gpu::Gpu, w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     let blocks = gpu.encode_bc7(&[lodforge_gpu::RgbaImage { width: w, height: h, rgba }])?;
     Ok(lodforge_dds::write_bc7(w, h, &blocks))
 }

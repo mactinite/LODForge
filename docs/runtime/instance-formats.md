@@ -215,11 +215,13 @@ reference flag share a pack mesh.
 
 Tiers: **full** is the grass model as the game draws it (vertex colours and alpha test kept,
 the threshold remapped onto the page's 128). **Simplified**: LODForge's mesh simplifier with
-a 3-unit error limit, at least a third of the triangles kept. **Card**: two crossed, double-sided
-quads over the model's bounds (one in the XZ plane, one in YZ, through the bounds centre) showing
-the model's first textured shape's whole diffuse (UV 0..1) with its alpha test, upward normals
-(lit like the ground) and the shape's mean vertex colour. For "complex grass" models whose
-diffuse is a sheet of many blades the card shows the whole sheet.
+a 3-unit error limit, at least a third of the triangles kept. **Card**: the model rendered by the
+billboard renderer from two directions (yaw 0 and 90; unlit albedo with the model's vertex
+colours, alpha-tested coverage, normal map; 0.5 units per pixel, 32..256 px), placed on two
+crossed, double-sided quads sized to each view's silhouette (quad 0 in the XZ plane, quad 1 in
+YZ), alpha test 128, upward vertex normals; each view is its own tile (`texturesodforge\ngrasscards...`, a build-time name only). A model the renderer cannot draw falls back to the
+first textured shape's whole diffuse on quads over its bounds. `GMPK` albedo is measured on
+the rendered view 0 when there is one.
 
 ### 3.3 Section index
 
