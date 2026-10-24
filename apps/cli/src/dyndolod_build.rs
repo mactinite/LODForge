@@ -108,6 +108,10 @@ pub struct Opts {
     /// LOD4,LOD8,LOD16 (see `lodforge tree-models --levels`).
     #[arg(long)]
     pub tree_model_levels: Option<String>,
+    /// Crown of generated tree models: `cloud` (default, billboard cloud over a 3D trunk) or
+    /// `prune` (TreeLODGen's pruned leaf cards).
+    #[arg(long, value_enum, default_value = "cloud")]
+    pub tree_model_crown: crate::tree_models::CrownMode,
     /// Grass placements for `--grass bto`: always the NGIO grass cache (precache in game with NGIO).
     /// Cells without a cache file get no grass (one warning per worldspace); nothing is generated
     /// from the load order any more. Kept so existing command lines keep working.

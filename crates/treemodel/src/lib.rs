@@ -9,8 +9,10 @@
 //! without the root's), [split] them into bark ("trunk") and foliage ("crown") parts, then per LOD
 //! level prune the crown and simplify the bark ([levels]) and write the LOD model ([write]); [generate]
 //! does it all for one tree.
+//! [cloud] replaces the pruned crown with a billboard cloud (LODForge's own method, not TreeLODGen's).
 //! Nothing here reads files: textures come in through a lookup closure.
 
+pub mod cloud;
 pub mod collect;
 pub mod islands;
 pub mod levels;

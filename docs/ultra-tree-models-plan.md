@@ -112,3 +112,20 @@ larger cards with new textures that show many leaves each:
 3. **Clustered cards** - merge neighbouring leaf cards into larger quads textured with the
    merged cards (local billboard clouds per cluster). Closest to the source look; more triangles
    and texture space than 1.
+
+### Chosen: billboard-cloud crown over a 3D trunk (prototype 2026-10-23)
+
+`crates/treemodel/src/cloud.rs` + `tree_models.rs` (`--crown cloud`, the default;
+`build --tree-model-crown`). Leaves (untouched) go to the orientation their card faces most (four
+vertical directions 45 degrees apart and the horizontal one) and to one of three parallel slices
+per orientation; each slice is one double-sided quad whose texture is the slice's leaves rendered
+by lodforge-texgen's billboard camera: albedo only (the game lights it), and a normal map with
+the leaves' own normals (`Light::normal_pull` 0, new; billboards keep 1). One crown texture and
+`_n` per tree (`textures\dyndolod\lod	rees\<stem>_<crc>crown[_n].dds`), tiles at 4 units per
+pixel, at most 256 pixels. The trunk is the reduced bark of the levels.
+
+cs-base: 514 trees in 105 s; 15 planes = 30 crown triangles; 429 triangles per placed tree at
+LOD4 with TreeLODGen's 400-triangle bark budget (prune: 3,725), LOD4 object meshes about 0.7 GB
+estimated (prune 6.2 GB); crown textures 565 MB before the object LOD atlas. Sheets: outline and
+density kept; crowns slightly darker than the full trees (no soft-light fill) and softer (256 px
+tiles). Next: a real Ultra build (atlas capacity, BTO sizes), then in game at the switch distance.

@@ -78,6 +78,9 @@ pub struct LevelPart {
     pub xf: Xf,
     pub mesh: PartMesh,
     pub source_triangles: usize,
+    /// Shader, textures, alpha and name of a part that is not a source shape's (the
+    /// billboard-cloud crown); `None` = the source shape's.
+    pub material: Option<crate::write::Material>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,7 +111,7 @@ pub fn build(nif: &Nif, shapes: &[SourceShape], parts: &[Part], levels: &[LevelP
                     let Some(Block::TriShape(s)) = nif.blocks.get(shapes[p.shape].block) else { return None };
                     let mesh = PartMesh::from_shape(s, p.vertices.as_deref());
                     let source_triangles = mesh.triangle_count();
-                    Some(LevelPart { kind: p.kind, shape: p.shape, xf: shapes[p.shape].xf, mesh, source_triangles })
+                    Some(LevelPart { kind: p.kind, shape: p.shape, xf: shapes[p.shape].xf, mesh, source_triangles, material: None })
                 })
                 .collect();
             let bark_total: usize = out.iter().filter(|p| p.kind == Kind::Trunk).map(|p| p.mesh.triangle_count()).sum();

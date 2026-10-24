@@ -500,9 +500,9 @@ pub fn run_grass(a: &GrassArgs) -> Result<()> {
     let grasses = read_grasses(lo)?;
     let gpu = lodforge_gpu::Gpu::new()?;
     let renderer = Renderer::new(&gpu);
-    let settings = Settings { light: lodforge_texgen::Light { direct: 1.5, ambient: 0.25, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7 }, coverage_threshold: 112, ..Settings::default() };
+    let settings = Settings { light: lodforge_texgen::Light { direct: 1.5, ambient: 0.25, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7, normal_pull: 1.0 }, coverage_threshold: 112, ..Settings::default() };
     // TexGen's `GrassHDBillboards*` lighting (as `--hd-grass`).
-    let hd_settings = Settings { light: lodforge_texgen::Light { direct: 0.0, ambient: 1.0, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7 }, coverage_threshold: 112, ..Settings::default() };
+    let hd_settings = Settings { light: lodforge_texgen::Light { direct: 0.0, ambient: 1.0, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7, normal_pull: 1.0 }, coverage_threshold: 112, ..Settings::default() };
     let (mut map, mut flat) = (String::new(), String::new());
     let (mut made, mut skipped, mut kept_placements) = (0, 0, 0usize);
     for ((model, raw), (local, count)) in &types {
@@ -880,7 +880,7 @@ fn trunk_nifs(vfs: &lodforge_archive::Vfs, dyndolod: &std::path::Path, filter: O
 pub fn trunk_billboards(p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, dyndolod: &std::path::Path, filter: Option<&str>, mut sink: impl FnMut(TrunkBillboard) -> Result<()>) -> Result<usize> {
     let nifs = trunk_nifs(&p.vfs, dyndolod, filter)?;
     // TexGen's `RenderBillboards*` lighting and `RenderModelHeightMultiplier`.
-    let settings = Settings { light: lodforge_texgen::Light { direct: 0.5, ambient: 1.5, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7 }, ..Settings::default() };
+    let settings = Settings { light: lodforge_texgen::Light { direct: 0.5, ambient: 1.5, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7, normal_pull: 1.0 }, ..Settings::default() };
     let mut crc_cache = HashMap::new();
     let mut made = 0;
     for chunk in nifs.chunks(BATCH) {
@@ -947,7 +947,7 @@ fn run_hd_grass(a: &Args, p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, 
     let lo = &p.load_order;
     let grasses = read_grass_models(lo)?;
     // TexGen's `GrassHDBillboards*` lighting, `GrassMSAlphaThreshold`, `GrassModelHeightMultiplier`.
-    let settings = Settings { light: lodforge_texgen::Light { direct: 0.0, ambient: 1.0, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7 }, coverage_threshold: 112, ..Settings::default() };
+    let settings = Settings { light: lodforge_texgen::Light { direct: 0.0, ambient: 1.0, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7, normal_pull: 1.0 }, coverage_threshold: 112, ..Settings::default() };
     let yaws = [0.0, 90.0];
     let root = a.golden.as_ref().context("--hd-grass needs --golden (it names the grass types)")?.join(r"textures\terrain\lodgen");
     let t = Instant::now();

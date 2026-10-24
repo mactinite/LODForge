@@ -25,6 +25,16 @@ use crate::collect::SourceShape;
 use crate::levels::Level;
 use crate::split::Kind;
 
+/// The material of a generated part (billboard-cloud crown): written as is.
+#[derive(Debug, Clone)]
+pub struct Material {
+    pub name: String,
+    pub shader: lodforge_nif::LightingShader,
+    pub textures: Vec<String>,
+    /// NiAlphaProperty (flags, threshold).
+    pub alpha: Option<(u16, u8)>,
+}
+
 /// UV range beyond which bark counts as tiling (`noatlas`).
 pub const TILING_TOLERANCE: f32 = 0.05;
 
@@ -152,6 +162,33 @@ pub fn level_nif(src: &Nif, shapes: &[SourceShape], level: &Level, notes: &mut V
     for (index, part) in level.parts.iter().enumerate() {
         let m = &part.mesh;
         if m.triangles.is_empty() || m.positions.len() > 65535 {
+            continue;
+        }
+        if let Some(mat) = &part.material {
+            let n = m.positions.len();
+            let (center, radius) = bounds(&m.positions);
+            let ts = out.add_block(Block::TextureSet(mat.textures.clone()));
+            let mut shader = mat.shader.clone();
+            shader.texture_set = Some(ts);
+            let si = out.add_block(Block::LightingShader(shader));
+            let ai = mat.alpha.map(|(flags, threshold)| out.add_block(Block::Alpha { net: ObjectNet::default(), flags, threshold }));
+            let tang = m.tangents.len() == n && m.bitangents.len() == n;
+            let shape = TriShape {
+                av: AvObject { net: ObjectNet::named(&mat.name), ..Default::default() },
+                bound_center: center,
+                bound_radius: radius,
+                shader_property: Some(si),
+                alpha_property: ai,
+                vertex_desc: VertexDesc::with_attributes(true, !m.uvs.is_empty(), m.normals.len() == n, tang, false).0,
+                uvs: m.uvs.clone(),
+                normals: m.normals.clone(),
+                tangents: if tang { m.tangents.clone() } else { Vec::new() },
+                bitangents: if tang { m.bitangents.clone() } else { Vec::new() },
+                positions: m.positions.clone(),
+                triangles: m.triangles.iter().map(|t| t.map(|v| v as u16)).collect(),
+                ..Default::default()
+            };
+            children.push(Some(out.add_block(Block::TriShape(shape))));
             continue;
         }
         let Some(s) = shape_of(src, &shapes[part.shape]) else { continue };

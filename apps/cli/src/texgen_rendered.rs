@@ -179,7 +179,7 @@ pub struct Rendered {
 }
 
 /// TexGen's `RenderObjects*` lighting: direct 0, ambient 1.0 (unlit albedo), `RenderPBRScale`.
-pub const LIGHT: lodforge_texgen::Light = lodforge_texgen::Light { direct: 0.0, ambient: 1.0, dir: [0.0, -1.0, 0.0], pbr_scale: 0.65 };
+pub const LIGHT: lodforge_texgen::Light = lodforge_texgen::Light { direct: 0.0, ambient: 1.0, dir: [0.0, -1.0, 0.0], pbr_scale: 0.65, normal_pull: 1.0 };
 
 /// Renders every render NIF whose pieces' textures are all in the load order (TexGen leaves out
 /// the Enderal, SMIM and HPP ones here), plus a PBR twin when some piece has a `textures\pbr\`

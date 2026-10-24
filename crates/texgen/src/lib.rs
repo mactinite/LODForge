@@ -44,7 +44,7 @@ impl Default for Settings {
     /// light from the top), times [billboard_scale].
     fn default() -> Self {
         let k = billboard_scale();
-        Settings { units_per_pixel: 11.0 / k, min_size: 32, max_size: ((1024.0 * k) as u32).clamp(256, 4096), light: Light { direct: 1.35, ambient: 0.55, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7 }, coverage_threshold: 128 }
+        Settings { units_per_pixel: 11.0 / k, min_size: 32, max_size: ((1024.0 * k) as u32).clamp(256, 4096), light: Light { direct: 1.35, ambient: 0.55, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7, normal_pull: 1.0 }, coverage_threshold: 128 }
     }
 }
 
@@ -133,7 +133,9 @@ fn item_frame(it: &Item, s: &Settings) -> Option<(f32, f32, u32)> {
 
 /// Final renders (diffuse, then normal bake when `normals`) of `views` in one GPU round trip, with
 /// TexGen's alpha and bleed applied.
-fn final_images(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, views: &[(Item, View)], s: &Settings, normals: bool) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+/// Renders each (scene, view) as a billboard image (colour, and the normal map when `normals`),
+/// alpha finished as the billboards are (soft coverage with supersampling).
+pub fn final_images(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, views: &[(Item, View)], s: &Settings, normals: bool) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     let mut jobs = Vec::new();
     for (it, v) in views {
         jobs.push(render::Job { scene: it.scene, textures: it.textures, view: *v, light: s.light, pass: render::Pass::Diffuse });

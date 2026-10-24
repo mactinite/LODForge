@@ -27,7 +27,7 @@ struct Uniforms {
     // rgb: specular colour; w: specular strength.
     spec: vec4<f32>,
     // x: glossiness (Blinn-Phong exponent); y: lighting effect 1; z: lighting effect 2 (rim
-    // power).
+    // power); w: normal pass pull toward the viewer (NORMAL_VIEW_PULL for billboards).
     spec2: vec4<f32>,
     // rgb: own-emit colour times its multiple; black when the material does not own-emit.
     emit: vec4<f32>,
@@ -155,7 +155,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // (0.5 - 0.5 up; green = up costs 2.5 dB on trunks), blue = toward the viewer.
         let right = safe_normalize(cross(vec3<f32>(0.0, 0.0, 1.0), to_eye));
         let up = cross(to_eye, right);
-        let nv = safe_normalize(vec3<f32>(dot(n, right), dot(n, up), abs(dot(n, to_eye)) + NORMAL_VIEW_PULL));
+        let nv = safe_normalize(vec3<f32>(dot(n, right), dot(n, up), abs(dot(n, to_eye)) + u.spec2.w));
         return vec4<f32>(0.5 + 0.5 * nv.x, 0.5 - 0.5 * nv.y, 0.5 + 0.5 * nv.z, 1.0);
     }
 

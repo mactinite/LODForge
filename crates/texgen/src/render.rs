@@ -127,6 +127,9 @@ pub struct Light {
     pub dir: [f32; 3],
     /// Colour scale for PBR materials (`BillboardPBRScale`).
     pub pbr_scale: f32,
+    /// Normal pass: how far the encoded normal is pulled toward the viewer (1 for billboards,
+    /// see `NORMAL_VIEW_PULL` in billboard.wgsl; 0 = the surface normal, for 3D LOD crowns).
+    pub normal_pull: f32,
 }
 
 /// What a render produces.
@@ -461,7 +464,7 @@ impl Renderer {
                     eye,
                     params: [m.alpha_test.map(|t| f32::from(t) / 255.0).unwrap_or(-1.0), if kind == Pass::Normal { 1.0 } else { 0.0 }, light.pbr_scale, flags as f32],
                     spec,
-                    spec2,
+                    spec2: [spec2[0], spec2[1], spec2[2], light.normal_pull],
                     emit,
                 };
                 let ub = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&u), usage: wgpu::BufferUsages::UNIFORM });
