@@ -219,5 +219,37 @@ pub fn plan(a: &PlanArgs) -> Result<()> {
         }
         println!("{line}");
     }
+    // Vertex-colour overrides: references whose LOD4 model has a coloured part the VC side file
+    // whitens; the build keeps them merged (their colours would differ per full model).
+    let mut we = we;
+    crate::dyndolod_build::add_side_files(&p, &c, &mut we);
+    let s = &we.seasons[0];
+    let vc = lodforge_objlod::sidefiles::VcList::parse(&s.vc);
+    let mut parts_cache: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    let (mut n, mut t, mut nl, mut tl, mut models) = (0usize, 0usize, 0usize, 0usize, std::collections::HashSet::new());
+    let mut seen = std::collections::HashSet::new();
+    for l in &s.lines {
+        let Some(b) = c.bases.get(&l.base) else { continue };
+        if lodforge_dyndolod::assign::is_tree(b) || !seen.insert(l.ref_id) {
+            continue;
+        }
+        let m = l.columns[0].to_ascii_lowercase();
+        if m.is_empty() || m.ends_with(".dds") || m.contains("glow") {
+            continue;
+        }
+        let parts = parts_cache.entry(m.clone()).or_insert_with(|| p.vfs.read(&m).ok().flatten().and_then(|b| lodforge_objlod::mesh::import(&m, &b).ok()).map(|lm| lm.parts.iter().map(|p| (p.name.clone(), p.colors.is_some())).collect()).unwrap_or_default());
+        let whitened = parts.iter().any(|(name, colors)| *colors && vc.verdict(&l.full_model, name) == lodforge_objlod::sidefiles::VcVerdict::White);
+        if whitened {
+            let x = tris(&m);
+            n += 1;
+            t += x;
+            models.insert((m.clone(), l.full_model.to_ascii_lowercase()));
+            if l.material.ends_with("-LargeRef") {
+                nl += 1;
+                tl += x;
+            }
+        }
+    }
+    println!("  held back by VC whitening: {n} refs {:.2}M tris ({nl} large refs {:.2}M); {} (LOD model, full model) pairs", t as f64 / 1e6, tl as f64 / 1e6, models.len());
     Ok(())
 }

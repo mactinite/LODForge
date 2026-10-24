@@ -162,6 +162,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
         part: lodforge_objlod::mesh::MeshPart,
         key: String,
         class: u8,
+        whiten: bool,
     }
     let mut loaded: Vec<(String, String, Vec<Part>)> = Vec::new();
     let mut sizes: BTreeMap<(u8, String), (u32, u32)> = BTreeMap::new();
@@ -201,7 +202,8 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                     key.push_str("=o");
                 }
             }
-            let class = classes.get(i).copied().unwrap_or(0);
+            let class_flags = classes.get(i).copied().unwrap_or(0);
+            let (class, whiten) = (class_flags & 0x7F, class_flags & 0x80 != 0);
             if !sizes.contains_key(&(class, key.clone())) {
                 let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, i.height, s.tile_cap));
                 let Some(size) = size else {
@@ -216,7 +218,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
             } else {
                 part
             };
-            parts.push(Part { part, key, class });
+            parts.push(Part { part, key, class, whiten });
         }
         if !parts.is_empty() {
             loaded.push((key.clone(), model.clone(), parts));
@@ -255,7 +257,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
     let mut mesh_of: HashMap<String, u32> = HashMap::new();
     for (key, model, parts) in loaded {
         let mut input = MeshInput { model: model.clone(), vertices: Vec::new(), triangles: Vec::new() };
-        for Part { part, key, class } in &parts {
+        for Part { part, key, class, whiten } in &parts {
             let Some((page, e)) = entry.get(&(*class, key.clone())) else {
                 rep.dropped_parts += 1;
                 continue;
@@ -276,7 +278,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                     normal: pack_unit(n, 0),
                     tangent: pack_unit(t, w),
                     uv: [map(uv[0], e.x, e.width, pg.width), map(uv[1], e.y, e.height, pg.height)],
-                    color: part.colors.as_ref().and_then(|c| c.get(i).copied()).unwrap_or([255; 4]),
+                    color: part.colors.as_ref().and_then(|c| c.get(i).copied()).map(|c| if *whiten { [255, 255, 255, c[3]] } else { c }).unwrap_or([255; 4]),
                 });
             }
             for tri in &part.triangles {

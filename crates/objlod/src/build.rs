@@ -308,7 +308,7 @@ impl<'a> ObjectLod<'a> {
         let routes: Option<Vec<crate::instancing::Route>> = self.opts.instancing.as_ref().map(|inst| {
             let list: Vec<&StaticRef> = refs.iter().map(|&ri| &self.export.statics[ri]).collect();
             inst.plan(&list, k, |r, m| {
-                (!inst.alt_textures && self.opts.alt_textures.has_ref(&r.ref_id)) || self.mesh(m).is_some_and(|mesh| mesh.parts.iter().any(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White))
+                (!inst.alt_textures && self.opts.alt_textures.has_ref(&r.ref_id)) || (!inst.vc_whiten && self.mesh(m).is_some_and(|mesh| mesh.parts.iter().any(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White)))
             })
         });
         let mut instances: Vec<crate::instancing::Instance> = Vec::new();
@@ -356,6 +356,14 @@ impl<'a> ObjectLod<'a> {
                                 .collect()
                         } else {
                             Vec::new()
+                        };
+                        // VC side file: parts whose colours the `.bto` would whiten (RGB 255,
+                        // alpha kept) carry PART_WHITEN; the pack bakes the whitened colours.
+                        let whiten: Vec<bool> = mesh.parts.iter().map(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White).collect();
+                        let part_classes = if whiten.iter().any(|&w| w) {
+                            (0..mesh.parts.len()).map(|i| part_classes.get(i).copied().unwrap_or(crate::instancing::PART_PLAIN) | if whiten[i] { crate::instancing::PART_WHITEN } else { 0 }).collect()
+                        } else {
+                            part_classes
                         };
                         instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures, part_classes });
                         placed += 1;

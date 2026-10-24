@@ -287,6 +287,7 @@ impl RuntimeObjects {
             large_refs: true,
             alt_textures: true,
             snow: self.snow,
+            vc_whiten: true,
         }
     }
 }

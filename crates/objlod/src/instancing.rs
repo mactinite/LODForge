@@ -39,6 +39,9 @@ pub struct Instancing {
     /// With `plain_only`: snow and ash references may be instanced too (their parts carry a
     /// snow/ash class, see [`Instance::part_classes`]).
     pub snow: bool,
+    /// References whose parts the VC side file whitens may be instanced (whitening per part on
+    /// the instance).
+    pub vc_whiten: bool,
 }
 
 /// One instanced placement.
@@ -70,6 +73,8 @@ pub const PART_SNOW: u8 = 1;
 pub const PART_SNOW_HD: u8 = 2;
 pub const PART_ASH: u8 = 3;
 pub const PART_ASH_HD: u8 = 4;
+/// Flag on a part class: the part's vertex colours are whitened (VC side file).
+pub const PART_WHITEN: u8 = 0x80;
 
 /// What [`Instancing::plan`] decided for one reference of a quad.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

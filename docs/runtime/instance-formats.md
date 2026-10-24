@@ -185,8 +185,10 @@ parts in order, from the reference's AltTextures entries (the model's own textur
 without one); `n = 0`: the model's own textures throughout.
 
 **`MCLS`** (statics, since 1.5, present when some entry has snow/ash parts): `u32 count` (=
-`MESH` count), then per entry `u16 n` and `n` x `u8`: the LOD material class of each part (0
-plain, 1 snow, 2 snowHD, 3 ash, 4 ashHD); `n = 0`: all plain.
+`MESH` count), then per entry `u16 n` and `n` x `u8`: per part, bits 0-6 the LOD material class (0
+plain, 1 snow, 2 snowHD, 3 ash, 4 ashHD) and bit 7 set when the VC side file whitens the part's
+vertex colours for this reference (RGB 255, alpha kept; already baked into the pack mesh, so
+informational for the runtime); `n = 0`: all plain, colours as stored.
 
 **`SMPK`** (statics, since 1.4): `u32 count` (= `MESH` count), then per entry a `u32`: its mesh in
 `StaticMeshes.bin` (section 7a), `0xFFFFFFFF` for none. Entries that differ only by the large
@@ -301,7 +303,8 @@ split), so the instances swap together with the merged shapes of the same block.
     gets a LOD material class (`MCLS`: plain, snow, snowHD, ash, ashHD; HD by the same rule as
     the `.bto` shape names) and lands on pages of that class (`MPPG.class`);
   - not a glow-window model, not a billboard;
-  - no vertex-colour override for that reference in the VC side file.
+  - vertex-colour overrides from the VC side file are allowed since 1.5: such references get
+    their own entry with whitened parts (`MCLS` bit 7).
   Large references are eligible (their `MESH` entry has flag bit 3; the runtime hides such an
   instance while the reference's own 3D is loaded, as the engine does for object LOD). References
   with AltTextures entries are eligible: they get their own `MESH` entry carrying the textures
