@@ -8,6 +8,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod btr_compare;
 mod dyndolod_build;
+mod dyn_export;
 mod e2e_compare;
 mod large_refs;
 mod plugin_dump;
@@ -219,6 +220,8 @@ enum Command {
     RuntimeStripStatics(strip_statics::Args),
     /// Lists statics instances whose mesh has no pack mesh.
     RuntimeCheck(strip_statics::CheckArgs),
+    /// Summary of a `.dyn.bin` (dynamic LOD for LODForge Runtime): items by flag, models without a pack mesh, lists.
+    RuntimeDynInfo(dyn_export::InfoArgs),
     /// Rebuilds only GrassMeshes.bin (grass model, simplified, card per .lfg grass type).
     RuntimeGrassPack(grass_pack::Args),
     /// CPU preview of TreeMeshes.bin meshes through the atlas pages (PNG).
@@ -320,6 +323,7 @@ fn main() -> Result<()> {
         Command::RuntimeTrees(a) => runtime_trees::run(&a),
         Command::RuntimeStripStatics(a) => strip_statics::run(&a),
         Command::RuntimeCheck(a) => strip_statics::check(&a),
+        Command::RuntimeDynInfo(a) => dyn_export::info(&a),
         Command::RuntimeGrassPack(a) => grass_pack::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),

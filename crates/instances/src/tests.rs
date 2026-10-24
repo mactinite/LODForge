@@ -7,7 +7,7 @@ use crate::statics::{Mesh, StaticsFile};
 use crate::trees::{TreeFile, TreeType};
 
 fn common(world: &str, season: &str) -> crate::Common {
-    crate::Common { world: world.into(), season: season.into(), generator: "test".into(), plugins: Vec::new(), params: "min_copies=8".into() }
+    crate::Common { world: world.into(), season: season.into(), generator: "test".into(), plugins: Vec::new(), params: "min_copies=8".into(), token: String::new() }
 }
 
 fn trees() -> TreeFile {
@@ -60,7 +60,7 @@ fn rejects_other_major_and_kind() {
     let mut bytes = trees().to_bytes(WriteOptions::default()).unwrap();
     assert!(StaticsFile::from_bytes(&bytes).is_err());
     bytes[4] = 2;
-    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 6))));
+    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 7))));
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn cgid_conversion() {
 /// A one-record trees file, byte for byte (docs/runtime/instance-formats.md section 8).
 #[test]
 fn golden_trees_bytes() {
-    let mut f = TreeFile { common: crate::Common { world: "W".into(), season: String::new(), generator: "g".into(), plugins: Vec::new(), params: String::new() }, ..Default::default() };
+    let mut f = TreeFile { common: crate::Common { world: "W".into(), season: String::new(), generator: "g".into(), plugins: Vec::new(), params: String::new(), token: String::new() }, ..Default::default() };
     f.types.push(TreeType { tree_record: true, bases: vec![(0, 0x10)], name: "m_0".into(), model_crc32: 0x1234_5678, bounds: [-1, -2, -3, 4, 5, 6], references: 0, model: "m".into(), lod4: String::new() });
     f.common.plugin_index("Skyrim.esm");
     f.add([4096.0 + 1.0, -0.5, 10.0], std::f32::consts::PI, 1.0, 0, "Skyrim.esm", 0x0001_2345).unwrap();
@@ -230,7 +230,7 @@ fn golden_trees_bytes() {
     assert_eq!(hex, expect, "\n{hex}");
 }
 
-const GOLDEN_TREES: &str = "4c4654520100060040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
+const GOLDEN_TREES: &str = "4c4654520100070040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
 
 #[test]
 fn tree_meshes_round_trip() {
@@ -242,4 +242,44 @@ fn tree_meshes_round_trip() {
     let back = TreeFile::from_bytes(&bytes).unwrap();
     assert_eq!(back.meshes, f.meshes);
     assert_eq!(back, f);
+}
+
+#[test]
+fn dyn_round_trip() {
+    use crate::dynlod::*;
+    let mut c = common("Tamriel", "");
+    c.token = "ABC123".into();
+    let mut f = DynFile::new(c);
+    f.header = DynHeader { world: FormRef { plugin: 0, form: 0x3C }, south_west: (-96, -96), near_grid: 11, far_grid: 21, glow_multiple: 1.75, lod_world: "Tamriel".into() };
+    f.common.plugin_index("Skyrim.esm");
+    let m = f.model("a", || DynModel { flags: MODEL_FULL, pack: [3, NO_MESH, 4, NO_MESH], bounds: [-1.0, -2.0, -3.0, 1.0, 2.0, 3.0], model: r"meshes\a.nif".into(), lod: [r"meshes\lod\a_lod_0.nif".into(), String::new(), String::new()] });
+    assert_eq!(f.model("a", DynModel::default), m);
+    f.add([5000.0, -10.0, 30.0], [0.1, 0.0, 3.0], 1.5, ("Skyrim.esm", 0x15B13), Some(("Skyrim.esm", 0x7265C)), m, GRID_FAR | LARGE | INITIALLY_ENABLED, (1, -1), ("Skyrim.esm", 0xB23FC));
+    f.add([5100.0, 20.0, 30.0], [0.0; 3], 1.0, ("Dawnguard.esm", 0x12), None, m, GRID_NEVER_FADE | (GLOW_LEVEL_NONE << GLOW_LEVEL_SHIFT), (1, 0), ("Skyrim.esm", 0x10));
+    f.seasons.push(("WIN".into(), vec![(FormRef { plugin: 0, form: 0x15B13 }, m)]));
+    f.resets.push(FormRef { plugin: 0, form: 0x33DCB });
+    f.disabled.push(FormRef { plugin: 1, form: 0x12 });
+    f.child_worlds.push(ChildWorld { world: FormRef { plugin: 0, form: 0x1A26F }, flags: CHILD_USES_PARENT_LOD | CHILD_HAS_BOUNDS, bounds: [1, -4, 9, 3], editor_id: "WhiterunWorld".into() });
+    f.underside = Some(Underside { model: r"meshes\terrain\tamriel\tamriel_underside.nif".into(), height: 500.0, worlds: vec![FormRef { plugin: 0, form: 0x3C }] });
+    f.large.insert((1, -1), vec![LargeRef { reference: FormRef { plugin: 0, form: 0x15B13 }, lod: LRG_INST4 | LRG_DYN, bounds: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] }]);
+    f.finish();
+    for zstd in [None, Some(3)] {
+        let bytes = f.to_bytes(WriteOptions { zstd, crc: true }).unwrap();
+        let back = DynFile::from_bytes(&bytes).unwrap();
+        assert_eq!(back.common, f.common);
+        assert_eq!(back.header, f.header);
+        assert_eq!(back.models, f.models);
+        assert_eq!(back.seasons, f.seasons);
+        assert_eq!((&back.resets, &back.disabled, &back.bases), (&f.resets, &f.disabled, &f.bases));
+        assert_eq!(back.child_worlds, f.child_worlds);
+        assert_eq!(back.underside, f.underside);
+        assert_eq!(back.large, f.large);
+        assert_eq!(back.cells, f.cells);
+    }
+    assert_eq!(f.items(), 2);
+    let it = &f.cells[&(1, -1)][0];
+    assert_eq!(it.hash, crate::hash::ref_hash("Skyrim.esm", 0x15B13));
+    assert_eq!(it.grid(), GRID_FAR);
+    assert!(it.has_parent());
+    assert!(!f.cells[&(1, 0)][0].has_parent());
 }

@@ -172,7 +172,7 @@ pub fn build(p: &Profile, world: &str, seasons: &[String], cache: Option<&Path>,
             })
             .collect();
         let source_bytes: u64 = parsed.iter().map(|(_, b, _)| *b).sum();
-        let mut file = GrassFile { common: Common { world: world.to_string(), season: season.to_ascii_uppercase(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("source=ngio-cgid\nlevels={LEVELS}") }, ..Default::default() };
+        let mut file = GrassFile { common: Common { world: world.to_string(), season: season.to_ascii_uppercase(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("source=ngio-cgid\nlevels={LEVELS}"), token: crate::instances::build_token() }, ..Default::default() };
         let mut type_index: HashMap<(String, u32, u16), u16> = HashMap::new();
         let mut unresolved = 0usize;
         let mut cell_types: Vec<Vec<u16>> = Vec::with_capacity(parsed.len());

@@ -34,6 +34,9 @@ pub struct Instancing {
     pub plain_only: bool,
     /// Large references may be instanced (flagged on the instance).
     pub large_refs: bool,
+    /// Every eligible large reference is instanced, however few copies its model has (the
+    /// runtime then owns its LOD hand-off; docs/runtime/instance-formats.md section 7b).
+    pub large_refs_always: bool,
     /// References with AltTextures entries may be instanced (their textures go on the instance).
     pub alt_textures: bool,
     /// With `plain_only`: snow and ash references may be instanced too (their parts carry a
@@ -146,7 +149,8 @@ impl Instancing {
                     return if !m.ends_with(".dds") && self.runtime_ref_instances { Route::Instance } else { Route::Drop };
                 }
                 let n = if self.world_counts.is_empty() { counts.get(&m).copied().unwrap_or(0) } else { self.world_counts.get(&(k, m.clone())).copied().unwrap_or(0) };
-                if self.min_copies > 0 && eligible(r, &m) && n >= self.min_copies { Route::Instance } else { Route::Merge }
+                let many = self.min_copies > 0 && n >= self.min_copies;
+                if eligible(r, &m) && (many || (self.large_refs && self.large_refs_always && r.is_large_ref())) { Route::Instance } else { Route::Merge }
             })
             .collect()
     }

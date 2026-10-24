@@ -66,6 +66,63 @@ pub struct Opts {
     /// Runtime: no far grass (`.lfg`).
     #[arg(long)]
     pub runtime_no_grass: bool,
+    /// Runtime: merge large references into the `.bto` unless their model reaches
+    /// `--runtime-min-copies` (default: every eligible large reference is instanced, so the
+    /// runtime owns its LOD hand-off; docs/runtime/instance-formats.md section 7b).
+    #[arg(long)]
+    pub runtime_no_large_refs: bool,
+    /// Runtime: no DynDOLOD.esm / DynDOLOD.esp and no `DynDOLOD_Data` (Occlusion.esp is still
+    /// written). For LODForge Runtime builds whose plugin covers dynamic LOD from the
+    /// `.dyn.bin` files; off by default until the plugin confirms parity.
+    #[arg(long)]
+    pub runtime_no_dyndolod_plugins: bool,
+}
+
+/// The run token of this build's runtime files (`BTOK`, `Build.txt`): set once per process by
+/// [`init_build_token`], else a fresh one.
+static BUILD_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Keeps the token of an earlier build in `out` (its `Build.txt`), so files rewritten by later
+/// fast-path commands match the ones left in place; else a new token.
+pub fn init_build_token(out: &Path) -> String {
+    BUILD_TOKEN
+        .get_or_init(|| {
+            let txt = std::fs::read_to_string(out_dir(out).join(BUILD_TXT)).unwrap_or_default();
+            txt.lines().find_map(|l| l.strip_prefix("token=")).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(new_token)
+        })
+        .clone()
+}
+
+fn new_token() -> String {
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+    lodforge_dyndolod::dynplugins::bunch_of_numbers(seed ^ 0x4C46_5254)
+}
+
+pub fn build_token() -> String {
+    BUILD_TOKEN.get_or_init(new_token).clone()
+}
+
+pub const BUILD_TXT: &str = "Build.txt";
+
+/// `Build.txt`: the token, format version, generator and the worlds with a `.dyn.bin`.
+pub fn write_build_txt(out: &Path) -> Result<()> {
+    let dir = out_dir(out);
+    std::fs::create_dir_all(&dir)?;
+    let mut worlds: Vec<String> = std::fs::read_dir(&dir)?
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".dyn.bin").map(str::to_string)))
+        .collect();
+    worlds.sort();
+    let text = format!(
+        "token={}\nformat={}.{}\ngenerator={}\nworlds={}\n",
+        build_token(),
+        lodforge_instances::container::MAJOR,
+        lodforge_instances::container::MINOR,
+        generator(),
+        worlds.join(",")
+    );
+    std::fs::write(dir.join(BUILD_TXT), text)?;
+    Ok(())
 }
 
 impl Opts {
@@ -191,7 +248,7 @@ pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &Fo
     let bounds = crate::dyndolod_build::tree_object_bounds(c, &world.editor_id);
     let tilt: f64 = c.num("TreeLODMaxTilt", 30.0);
     let season = s.season.map(|x| x.code().to_string()).unwrap_or_default();
-    let mut file = TreeFile { common: Common { world: world.editor_id.clone(), season, generator: generator(), plugins: Vec::new(), params: format!("tree_max_tilt={tilt}") }, ..Default::default() };
+    let mut file = TreeFile { common: Common { world: world.editor_id.clone(), season, generator: generator(), plugins: Vec::new(), params: format!("tree_max_tilt={tilt}"), token: build_token() }, ..Default::default() };
     file.types = impostors.types.iter().map(|t| TreeType { name: t.name.clone(), model: t.model.clone(), model_crc32: t.model_crc32, ..Default::default() }).collect();
     let mut seen_base: HashSet<u32> = HashSet::new();
     let mut lod4_counts: Vec<HashMap<String, usize>> = vec![HashMap::new(); file.types.len()];
@@ -262,6 +319,8 @@ pub struct RuntimeObjects {
     /// Instance snow/ash references too.
     pub snow: bool,
     pub min_copies: usize,
+    /// Instance every eligible large reference (`--runtime-no-large-refs` turns it off).
+    pub large_refs_always: bool,
     pub model_masks: Vec<String>,
     pub names: Arc<FormNames>,
     pub write: WriteOptions,
@@ -285,6 +344,7 @@ impl RuntimeObjects {
             world_counts: Default::default(),
             plain_only: true,
             large_refs: true,
+            large_refs_always: self.large_refs_always,
             alt_textures: true,
             snow: self.snow,
             vc_whiten: true,
@@ -295,7 +355,7 @@ impl RuntimeObjects {
 /// Builds the statics file of one world / season from the object LOD stage's instances.
 pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lodforge_objlod::Quad, &[lodforge_objlod::instancing::Instance])], mesh: impl Fn(&str) -> Option<Arc<lodforge_objlod::mesh::LodMesh>>) -> StaticsFile {
     let params = format!("min_copies={}\nmodel_masks={}\ntree_refs={}", rt.min_copies, rt.model_masks.join(","), u8::from(rt.tree_models));
-    let mut f = StaticsFile::new(Common { world: world.to_string(), season: season.to_string(), generator: generator(), plugins: Vec::new(), params });
+    let mut f = StaticsFile::new(Common { world: world.to_string(), season: season.to_string(), generator: generator(), plugins: Vec::new(), params, token: build_token() });
     for (q, list) in quads {
         for i in *list {
             // One MESH entry per (model, large reference, AltTextures set).

@@ -424,6 +424,11 @@ pub fn run(a: &Args) -> Result<()> {
     }
     // `--runtime lodforge`: load-order form ids -> plugin names for the instance files.
     let form_names = a.rt.on().then(|| std::sync::Arc::new(crate::instances::FormNames::new(&p)));
+    if a.rt.on() {
+        crate::instances::init_build_token(&out);
+    }
+    // Runtime mode: per worldspace, the export's large references -> `.bto` levels with a column.
+    let mut large_columns: std::collections::HashMap<String, std::collections::HashMap<u32, u16>> = std::collections::HashMap::new();
     let mut tree_mesh_cache: std::collections::HashMap<String, lodforge_instances::trees::TreeMesh> = std::collections::HashMap::new();
     let mut tex_index = crate::instances::TextureIndex::default();
     for world in &worlds {
@@ -639,6 +644,15 @@ pub fn run(a: &Args) -> Result<()> {
                 }
                 let skipped = we.seasons[0].skipped.iter().filter(|(_, s)| matches!(s, lodforge_dyndolod::export::Skip::ReferenceRule)).map(|(id, _)| *id);
                 // Tree LOD leaves out what the export keeps in object or dynamic LOD (tilted, large, child-world bounds).
+                if a.rt.on() {
+                    let lc = large_columns.entry(world.clone()).or_default();
+                    for l in &we.seasons[0].lines {
+                        if ws.large_ref_cells.contains_key(&l.ref_id) {
+                            let bits = (0..3).filter(|&i| !l.columns[i].is_empty()).fold(0u16, |b, i| b | (1 << i));
+                            *lc.entry(l.ref_id).or_default() |= bits;
+                        }
+                    }
+                }
                 let in_object_lod = we.seasons[0].lines.iter().map(|l| l.ref_id);
                 tree_exclude.insert(world.clone(), we.dynamic.iter().map(|d| d.ref_id).chain(skipped).chain(in_object_lod).collect());
                 dynamic.push((world.clone(), we.dynamic, we.seasonal_dynamic, we.child_copies, we.lod_refs, we.lod_bases));
@@ -689,7 +703,7 @@ pub fn run(a: &Args) -> Result<()> {
                 l.wait_meshes(world);
             }
             if let Some(names) = &form_names {
-                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
             if a.rt.on() && !a.rt.runtime_no_grass {
@@ -772,6 +786,31 @@ pub fn run(a: &Args) -> Result<()> {
             }
         }
     }
+    if a.rt.on()
+        && let (Some(c), Some(names)) = (&dyn_cfg, &form_names)
+    {
+        // Dynamic LOD for LODForge Runtime (`.dyn.bin`), before the static pack takes its models.
+        let t = Instant::now();
+        begin(a.json, "all", "runtime-dyn", None);
+        let inputs: Vec<crate::dyn_export::DynWorld<'_>> = dynamic
+            .iter()
+            .filter_map(|(w, dynamic, seasonal, child_copies, lod_refs, lod_bases)| {
+                dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(w)).map(|world| crate::dyn_export::DynWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases, large_columns: large_columns.get(w) })
+            })
+            .collect();
+        match crate::dyn_export::write(&p, c, &inputs, &dyn_worlds, &undersides, names, &out, a.rt.write_options()) {
+            Ok(r) => {
+                if !a.json {
+                    println!("  {}", r.summary());
+                }
+                event(a.json, "all", "runtime-dyn", None, t.elapsed().as_millis());
+            }
+            Err(e) => {
+                eprintln!("runtime-dyn: {e:#}");
+                failed.push(format!("runtime-dyn: {e}"));
+            }
+        }
+    }
     if a.rt.on() {
         // The near-tier mesh pack of every worldspace's trees files (shared atlas + clusters).
         let t = Instant::now();
@@ -781,7 +820,8 @@ pub fn run(a: &Args) -> Result<()> {
             eprintln!("tree-pack: {e:#}");
         }
         let packs = crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options()).and_then(|t| {
-            let s = if a.rt.runtime_min_copies > 0 { Some(crate::tree_pack::build_statics(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options())?) } else { None };
+            // Static pack: instanced statics, large references and the dynamic LOD models.
+            let s = if a.rt.runtime_min_copies > 0 || !a.rt.runtime_no_large_refs || dyn_cfg.is_some() { Some(crate::tree_pack::build_statics(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options())?) } else { None };
             // Far grass: the grass types of the `.lfg` files this build wrote.
             let has_lfg = std::fs::read_dir(crate::instances::out_dir(&out)).map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".lfg"))).unwrap_or(false);
             if has_lfg {
@@ -838,7 +878,7 @@ pub fn run(a: &Args) -> Result<()> {
     if dyn_mode && let Some(c) = &dyn_cfg {
         // The DynDOLOD stages read the build's own terrain LOD and plugins.
         own_output(&mut p, &out, &before)?;
-        if !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod {
+        if !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod && !(a.rt.on() && a.rt.runtime_no_dyndolod_plugins) {
             let t = Instant::now();
             begin(a.json, "all", "plugins", None);
             let refs: Vec<crate::dyndolod_build::PluginWorld<'_>> = dynamic

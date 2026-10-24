@@ -1,6 +1,6 @@
-# LODForge Runtime instance formats (v1.6)
+# LODForge Runtime instance formats (v1.7)
 
-Status: **v1.6, 2026-10-24** (1.0-1.5 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
+Status: **v1.7, 2026-10-24** (1.0-1.6 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
 Runtime SKSE plugin. This document is the contract between the two; when the code and this
 document disagree, the document wins and the code is a bug. Changes follow the versioning rules in
 section 2.
@@ -67,12 +67,12 @@ round-trip tests and the test vectors in section 8 pin the byte layout.
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | u8[4] | magic | `LFTR`, `LFST`, `LFGR` or `LFMP` (ASCII) |
+| 0 | u8[4] | magic | `LFTR`, `LFST`, `LFGR`, `LFMP` or `LFDY` (ASCII) |
 | 4 | u16 | major | 1 |
-| 6 | u16 | minor | 6 |
+| 6 | u16 | minor | 7 |
 | 8 | u32 | header_size | 64 |
 | 12 | u32 | flags | bit 0: at least one section is zstd-compressed. Other bits 0. |
-| 16 | u32 | record_size | 24 (trees), 32 (statics), 10 (grass) |
+| 16 | u32 | record_size | 24 (trees), 32 (statics), 10 (grass), 28 (mesh packs), 64 (dynamic LOD) |
 | 20 | u32 | section_count | |
 | 24 | u64 | index_offset | section index, `section_count` entries of 32 bytes |
 | 32 | u64 | meta_offset | meta block (section 3.2) |
@@ -487,6 +487,129 @@ repeat is re-cut along integer UV lines (the object LOD ReUV), its texture place
 all shapes of the model merged into one mesh (one alpha mode: alpha test at 128 on every page).
 Shapes without a texture are dropped.
 
+## 7b. Dynamic LOD (`LFDY`, `<World>.dyn.bin`, since 1.7)
+
+Replaces DynDOLOD.esp's stand-in references, DynDOLOD.esm's large-reference markers and the
+`DynDOLOD_NG_<World>.txt` data for LODForge Runtime (M5, behaviour in
+`docs/runtime/dyndolod-replacement-spec.md`). One file per worldspace that has dynamic items,
+child-world copies, an underside or large references; no season files (seasonal models are a
+chunk). Written by `build --runtime lodforge` next to the other files. No plugin records: the
+runtime draws every item itself through the pack/instance path (or a NIF clone for animated and
+glow models) and reads enable states of the originals from the game.
+
+Same container, `magic = "LFDY"`, `record_size = 64`. One section per cell `(x, y)` = the
+cell of the item's position (`floor(p / 4096)`), `level = 0`, records sorted by `hash`.
+
+Record (64 bytes), one per original reference that gets dynamic LOD (or child-world copy):
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | f32[3] | position (world) |
+| 12 | u16[3] | ax, ay, az (angle encoding of the reference's `DATA` rotation) |
+| 18 | f16 | scale |
+| 20 | u16 | plugin (`PLUG` index of the original reference) |
+| 22 | u16 | parent_plugin (`PLUG` index of the enable parent; 0xFFFF = none) |
+| 24 | u32 | form (local form id of the original) |
+| 28 | u32 | parent_form (local form id of the enable parent; 0 = none). The generator resolves chains: this is the top of the original's enable-parent chain, `opposite` is the chain's combined inversion |
+| 32 | u32 | model (`DMDL` index) |
+| 36 | u32 | flags, below |
+| 40 | u32 | hash (`ref_hash` of the original) |
+| 44 | u8 | destruction_stage (0xFF = unknown / none; LODForge writes 0xFF in 1.7) |
+| 45 | u8 | destruction_type (0 when unknown) |
+| 46 | u16 | reserved, 0 |
+| 48 | i16[2] | cell of the original (its `CELL` grid; for persistent references the cell their position is in) |
+| 52 | u16 | base_plugin (`PLUG` index of the base the item shows, after season-independent swaps) |
+| 54 | u16 | reserved, 0 |
+| 56 | u32 | base_form |
+| 60 | u32 | reserved, 0 |
+
+Flags:
+
+| Bits | Meaning |
+|---|---|
+| 0-1 | grid: 0 NearGrid, 1 FarGrid, 2 NeverFade (the generator has already applied "only large refs stay on FarGrid") |
+| 2 | large: the original is a large reference |
+| 3 | opposite: shown when the parent is *disabled* |
+| 4 | initially_enabled: startup state of the original (with its parent chain) when neither is in memory |
+| 5 | replace: the original is to be disabled and the item drawn instead, also inside the loaded cells (it is listed in `DDIS` as well) |
+| 6 | persistent: the original is a persistent reference |
+| 7 | door: base is a `DOOR` (open state follows the original) |
+| 8 | full: the model is the full model, not an LOD model |
+| 9 | animated: a `_dyndolod_lod` model; draw a NIF clone with its controllers, not the pack mesh |
+| 10 | glow: the model is a glow window model (`glow_lod` in the name); NIF clone with emissive |
+| 11-12 | glow level `N` of `glow_lod_N` (0..2); 3 = not a glow level model |
+| 13 | child_copy: a child-world reference copied into this world (the original lives in a child world). Drawn while the item's cell is attached in this world (where DynDOLOD.esm placed a plain reference); beyond the loaded cells its LOD is in the `.bto`. Grid bits are 0 and no parent is set |
+| 14 | in_child_worlds: also shown while the player is in a child world that uses this world's LOD |
+| 15 | from_child_world: the item was produced for a child world's own dynamic LOD |
+| 16-31 | reserved, 0 |
+
+Meta chunks (besides `WRLD`, `PLUG`, `PARM`, `BTOK`):
+
+**`DHDR`**: `u16 world_plugin`, `u16 reserved`, `u32 world_form` (the worldspace record),
+`i16 sw_x`, `i16 sw_y` (LOD origin cell, lodsettings), `u8 near_grid`, `u8 far_grid` (defaults,
+odd diameters in cells), `u16 flags` (0), `f32 glow_multiple`, `str lod_world` (EditorID whose LOD
+this world uses; the world itself for a main world).
+
+**`DMDL`** (models): `u32 count`, then per entry: `u32 flags` (bit 0 full model, bit 1 animated,
+bit 2 glow), `u32 pack[4]` (meshes in `StaticMeshes.bin`: 0 the dynamic model itself, 1-3 the LOD4,
+LOD8, LOD16 models of the item's rule; 0xFFFFFFFF none; animated and glow models have no pack mesh
+in slot 0), `f32 bounds[6]` (model space AABB of the dynamic model; zeros when unknown),
+`str model`, `str lod4`, `str lod8`, `str lod16` (Data-relative, lower case, `""` = none).
+
+**`DSEA`** (seasonal models, present when some item changes model in a season): `u32 seasons`, per
+season `str code` (`SPR`...), `u32 n`, then `n` x (`u16 plugin`, `u16 reserved`, `u32 form`,
+`u32 model`): the `DMDL` entry the item of that original uses in that season.
+
+**`DRST`** (reset list, F6), **`DDIS`** (disabled list, F7), **`DBAS`** (bases that need Has Distant
+LOD, F8): each `u32 n`, then `n` x (`u16 plugin`, `u16 reserved`, `u32 form`).
+- `DRST`: persistent references with the Is Full LOD flag whose LOD this build provides (object,
+  tree or dynamic LOD). DynDOLOD.esp overrides them without the flag; without that plugin the
+  runtime clears the flag (`0x10000`) when the form loads, and resets them (F6).
+- `DDIS`: originals of `replace` items, to be disabled.
+- `DBAS`: bases of this worldspace's LOD references that lack Has Distant LOD (`0x8000`); the
+  runtime sets the flag at data load (F8). (DynDOLOD's `[Bases]` list holds the same set when its
+  DLL handles it.)
+
+**`DCHW`** (child worlds of this world, F17): `u32 n`, per entry: `u16 plugin`, `u16 flags` (bit 0
+uses this world's LOD (parent "use LOD data"), bit 1 has bounds), `u32 form`, `i16 bounds[4]`
+(SW x, SW y, NE x, NE y in cells; zeros without), `str editor_id`.
+
+**`DUND`** (terrain underside, F16): `str model`, `f32 height` (the mesh sits at z = -height),
+`u32 n`, `n` x (`u16 plugin`, `u16 reserved`, `u32 form`): the worlds it shows in.
+
+**`DLRG`** (large references, see below): `u32 cells`, per cell `i16 x`, `i16 y`, `u32 n`, then `n`
+x 32 bytes: `u16 plugin`, `u16 lod` (bit 0-2: merged into the `.bto` at LOD4/8/16; bit 3-5:
+instanced in `.statics.bin` at LOD4/8/16; bit 6: a dynamic item in this file; bit 7: persistent;
+bit 8: initially disabled or behind an enable parent), `u32 form`, `f32 bounds[6]` (world AABB of
+the reference's base bounds under its transform).
+
+### Large references
+
+Every large reference of the worldspace (the `RNAM` of the winning `WRLD`), grouped by its large
+reference cell, with where its LOD lives. With this the runtime owns the hand-off without
+DynDOLOD.esm markers: instanced and dynamic LOD of a large reference is hidden by the runtime
+while the reference's 3D is loaded; merged `.bto` LOD stays with the engine. In runtime mode
+every eligible large reference (plain/snow/ash material, not a glow or billboard model) is
+instanced in `.statics.bin` whatever `min_copies` says (`build --runtime-no-large-refs` turns
+this off), so bits 0-2 are rare. "Merged" means the export has a model at that level and the
+reference is not instanced there.
+
+### DynDOLOD plugins in runtime mode
+
+`build --runtime lodforge` still writes DynDOLOD.esm, DynDOLOD.esp and `DynDOLOD_Data` by
+default, next to the `.dyn.bin` files. `--runtime-no-dyndolod-plugins` leaves them out (Occlusion.esp
+is still written) for a runtime that draws everything from the `.dyn.bin` files; use it once the
+plugin covers dynamic LOD, the lists and large references.
+
+### Build token (`BTOK`, all files since 1.7) and `Build.txt`
+
+`BTOK`: `str token` (32 characters, digits and upper-case letters; one per output folder, kept
+from the `Build.txt` an earlier build left in that folder, else new; independent of the DynDOLOD plugins' token). `SKSE\Plugins\LODForgeRuntime\Build.txt` holds
+`key=value` lines: `token`, `format=1.7`, `generator`, `worlds=<EditorID>,...` (worlds with a
+`.dyn.bin`). The runtime compares every file's `BTOK` with `Build.txt` (refuse the file on a
+mismatch) and stores the token in its co-save; a different token on load means the LOD data
+changed since the save (reset lists rerun, disabled originals re-applied).
+
 ## 8. Test vectors
 
 ```
@@ -515,6 +638,11 @@ kinds, raw and zstd.
   records per section, cell coordinates in i16.
 
 ## History
+
+- **1.7** (2026-10-24): `<World>.dyn.bin` (`LFDY`, section 7b): dynamic LOD items, models with
+  pack meshes in `StaticMeshes.bin`, seasonal models, reset / disabled / base lists, child worlds,
+  underside and large references (`DLRG`); `BTOK` build token chunk in every file and
+  `Build.txt`; every eligible large reference is instanced in runtime mode. Additive.
 
 - **1.6** (2026-10-24): `GrassMeshes.bin` (three tiers per grass type) and the `GMPK` chunk in
   `.lfg` (tier meshes, mean albedo, height). Additive.

@@ -7,6 +7,7 @@
 //! `docs/runtime/instance-formats.md`; this crate is its reference writer and reader.
 
 pub mod container;
+pub mod dynlod;
 pub mod grass;
 pub mod hash;
 pub mod meshpack;

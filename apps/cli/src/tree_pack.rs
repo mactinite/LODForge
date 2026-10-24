@@ -141,12 +141,38 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
             models.entry(key_of(m)).or_insert_with(|| (m.model.clone(), m.textures.iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect(), m.classes.clone()));
         }
     }
+    // Dynamic LOD models (`.dyn.bin` `DMDL`): the dynamic model (not animated / glow ones, which
+    // the runtime clones as NIFs) and the LOD4/8/16 models, with their own textures.
+    use lodforge_instances::dynlod::{DynFile, MODEL_ANIMATED, MODEL_GLOW};
+    let mut dyn_files: Vec<PathBuf> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".dyn.bin")).collect();
+    dyn_files.sort();
+    let plain_key = |m: &str| format!("{m}||[]");
+    let dyn_slots = |m: &lodforge_instances::dynlod::DynModel| -> [String; 4] {
+        let first = if m.flags & (MODEL_ANIMATED | MODEL_GLOW) != 0 { String::new() } else { m.model.clone() };
+        [first, m.lod[0].clone(), m.lod[1].clone(), m.lod[2].clone()].map(|s| if s.ends_with(".nif") { s } else { String::new() })
+    };
+    for f in &dyn_files {
+        let d = DynFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
+        for m in &d.models {
+            for s in dyn_slots(m).into_iter().filter(|s| !s.is_empty()) {
+                models.entry(plain_key(&s)).or_insert_with(|| (s.clone(), Vec::new(), Vec::new()));
+            }
+        }
+    }
     let (mut rep, mesh_of) = make(p, out, &models, s, write, STATIC_PAGE_BASE, STATIC_FILE_NAME, &|m| vfs_mesh(p, m))?;
     rep.trees_files = files.len();
     for f in &files {
         let mut t = StaticsFile::from_bytes(&std::fs::read(f)?)?;
         t.pack_meshes = t.meshes.iter().map(|m| mesh_of.get(&key_of(m)).copied().unwrap_or(NO_MESH)).collect();
         std::fs::write(f, t.to_bytes(write)?)?;
+    }
+    for f in &dyn_files {
+        let mut d = DynFile::from_bytes(&std::fs::read(f)?)?;
+        for m in &mut d.models {
+            let slots = dyn_slots(m);
+            m.pack = std::array::from_fn(|i| if slots[i].is_empty() { NO_MESH } else { mesh_of.get(&plain_key(&slots[i])).copied().unwrap_or(NO_MESH) });
+        }
+        std::fs::write(f, d.to_bytes(write)?)?;
     }
     rep.ms = t0.elapsed().as_millis();
     Ok(rep)
@@ -230,7 +256,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
     // material class (`<stem>[_Snow|_SnowHD|_Ash|_AshHD]_Alpha[NN].dds`).
     let gpu = lodforge_gpu::Gpu::new()?;
     let formats = crate::object_atlas::Formats { diffuse: crate::object_atlas::Encoding::Bc7, alpha_diffuse: crate::object_atlas::Encoding::Bc7, normal: crate::object_atlas::Encoding::Bc7, mips: u32::MAX, alpha_fill: true };
-    let mut pack = MeshPack { common: Common { world: String::new(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("tile_cap={}\npage={}\nalpha_threshold=128", s.tile_cap, s.page) }, ..Default::default() };
+    let mut pack = MeshPack { common: Common { world: String::new(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("tile_cap={}\npage={}\nalpha_threshold=128", s.tile_cap, s.page), token: crate::instances::build_token() }, ..Default::default() };
     // (class, texture key) -> (pack page, tile).
     let mut entry: HashMap<(u8, String), (u16, lodforge_objlod::atlas_build::AtlasEntry)> = HashMap::new();
     let classes: std::collections::BTreeSet<u8> = sizes.keys().map(|(c, _)| *c).collect();

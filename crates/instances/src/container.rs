@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use crate::{Error, Result};
 
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 6;
+pub const MINOR: u16 = 7;
 pub const HEADER_SIZE: usize = 64;
 pub const INDEX_ENTRY: usize = 32;
 pub const FLAG_ZSTD: u8 = 1;
@@ -18,6 +18,7 @@ pub enum Kind {
     Statics,
     Grass,
     MeshPack,
+    Dyn,
 }
 
 impl Kind {
@@ -27,6 +28,7 @@ impl Kind {
             Kind::Statics => *b"LFST",
             Kind::Grass => *b"LFGR",
             Kind::MeshPack => *b"LFMP",
+            Kind::Dyn => *b"LFDY",
         }
     }
 
@@ -36,6 +38,7 @@ impl Kind {
             Kind::Statics => 32,
             Kind::Grass => 10,
             Kind::MeshPack => 28,
+            Kind::Dyn => 64,
         }
     }
 
@@ -45,6 +48,7 @@ impl Kind {
             b"LFST" => Some(Kind::Statics),
             b"LFGR" => Some(Kind::Grass),
             b"LFMP" => Some(Kind::MeshPack),
+            b"LFDY" => Some(Kind::Dyn),
             _ => None,
         }
     }
@@ -182,6 +186,8 @@ pub struct Common {
     pub plugins: Vec<String>,
     /// `PARM`: `key=value` lines.
     pub params: String,
+    /// `BTOK` (since 1.7): the build's run token; empty = no chunk.
+    pub token: String,
 }
 
 impl Common {
@@ -197,7 +203,13 @@ impl Common {
         }
         let mut m = Buf::default();
         m.str(&self.params);
-        vec![Chunk { tag: *b"WRLD", data: w.0 }, Chunk { tag: *b"PLUG", data: p.0 }, Chunk { tag: *b"PARM", data: m.0 }]
+        let mut v = vec![Chunk { tag: *b"WRLD", data: w.0 }, Chunk { tag: *b"PLUG", data: p.0 }, Chunk { tag: *b"PARM", data: m.0 }];
+        if !self.token.is_empty() {
+            let mut t = Buf::default();
+            t.str(&self.token);
+            v.push(Chunk { tag: *b"BTOK", data: t.0 });
+        }
+        v
     }
 
     pub fn from_chunks(chunks: &[Chunk]) -> Result<Common> {
@@ -215,6 +227,7 @@ impl Common {
                     c.plugins = (0..n).map(|_| r.str()).collect::<Result<_>>()?;
                 }
                 b"PARM" => c.params = r.str()?,
+                b"BTOK" => c.token = r.str()?,
                 _ => {}
             }
         }
