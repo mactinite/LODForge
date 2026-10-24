@@ -206,6 +206,8 @@ enum Command {
     RuntimeTrees(runtime_trees::Args),
     /// Removes from .statics.bin files the instances of references the matching .trees.bin draws.
     RuntimeStripStatics(strip_statics::Args),
+    /// Lists statics instances whose mesh has no pack mesh.
+    RuntimeCheck(strip_statics::CheckArgs),
     /// CPU preview of TreeMeshes.bin meshes through the atlas pages (PNG).
     TreePackPreview(tree_pack_preview::Args),
     /// Rebuilds only StaticMeshes.bin from the statics files of an output.
@@ -285,6 +287,7 @@ fn main() -> Result<()> {
         Command::BtoStats(a) => instances::bto_stats(&a),
         Command::RuntimeTrees(a) => runtime_trees::run(&a),
         Command::RuntimeStripStatics(a) => strip_statics::run(&a),
+        Command::RuntimeCheck(a) => strip_statics::check(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
         Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),

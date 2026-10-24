@@ -60,3 +60,38 @@ pub fn run(a: &Args) -> Result<()> {
     println!("runtime-strip-statics: {dropped_total} tree instances removed, {kept_total} kept");
     Ok(())
 }
+
+/// `lodforge runtime-check`: statics `MESH` entries without a pack mesh (`SMPK` = none), whose
+/// instances would draw nothing although they left `.bto`, with their instance counts.
+#[derive(clap::Args)]
+pub struct CheckArgs {
+    /// Folder with the `.statics.bin` files.
+    #[arg(long)]
+    pub dir: PathBuf,
+}
+
+pub fn check(a: &CheckArgs) -> Result<()> {
+    let mut names: Vec<PathBuf> = std::fs::read_dir(&a.dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".statics.bin")).collect();
+    names.sort();
+    let mut bad_total = 0usize;
+    for path in names {
+        let st = StaticsFile::from_bytes(&std::fs::read(&path)?)?;
+        let mut per: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for recs in st.blocks.values() {
+            for r in recs {
+                let m = usize::from(r.mesh);
+                let none = st.pack_meshes.get(m).is_none_or(|&p| p == lodforge_instances::meshpack::NO_MESH);
+                if none {
+                    *per.entry(st.meshes[m].model.clone()).or_default() += 1;
+                }
+            }
+        }
+        if !per.is_empty() {
+            let n: usize = per.values().sum();
+            bad_total += n;
+            println!("{}: {n} instances without a pack mesh: {}", path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), per.iter().map(|(m, c)| format!("{m} x{c}")).collect::<Vec<_>>().join(", "));
+        }
+    }
+    println!("runtime-check: {bad_total} instances without a pack mesh");
+    Ok(())
+}
