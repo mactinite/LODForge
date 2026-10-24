@@ -22,7 +22,7 @@ use lodforge_texgen::{Basis, Job, Light, Pass, Renderer, Scene, TexData, View};
 use crate::{dilation, hemioct};
 
 /// Bumped whenever the baked pixels or the manifest's meaning change (part of the cache key).
-pub const BAKER_VERSION: u32 = 1;
+pub const BAKER_VERSION: u32 = 2;
 
 /// Unlit albedo: the texture colour times the vertex colour, no light terms.
 pub const ALBEDO_LIGHT: Light = Light { direct: 0.0, ambient: 1.0, dir: [0.0, 0.0, 1.0], pbr_scale: 1.0, normal_pull: 0.0 };
@@ -37,21 +37,37 @@ pub struct Settings {
     pub units_per_px: f32,
     pub min_frame: u32,
     pub max_frame: u32,
+    /// Auto frame size: trees at least this tall (world units) get `large_frame` px frames.
+    pub large_height: f32,
+    /// 0 = no large tier.
+    pub large_frame: u32,
     /// Dilation rings per frame.
     pub dilation: u32,
+    /// Mip bias of the source textures: negative so the supersampled alpha test sees the
+    /// foliage's real coverage (mip-averaged alpha drops below the threshold and thins crowns).
+    pub mip_bias: f32,
+    /// Pre-lighting of the albedo.
+    pub shading: crate::shade::Shading,
+    /// Size of the light-view depth map for the sun's transmittance.
+    pub light_map_px: u32,
+    /// The game's alpha-test reference (0..1): mips keep each frame's coverage at it.
+    pub alpha_ref: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { grid: 0, frame_px: 0, units_per_px: 12.0, min_frame: 32, max_frame: 128, dilation: 16 }
+        Settings { grid: 0, frame_px: 0, units_per_px: 12.0, min_frame: 32, max_frame: 128, large_height: 2600.0, large_frame: 256, dilation: 16, mip_bias: -2.0, shading: Default::default(), light_map_px: 256, alpha_ref: 0.5 }
     }
 }
 
 impl Settings {
-    /// (grid, frame px) for a tree `height` units tall.
+    /// (grid, frame px) for a tree `height` units tall (in the world: model height times its
+    /// typical reference scale).
     pub fn layout(&self, height: f32) -> (u32, u32) {
         let frame = if self.frame_px > 0 {
             self.frame_px
+        } else if self.large_frame > 0 && height >= self.large_height {
+            self.large_frame
         } else {
             let px = (height / self.units_per_px.max(1e-3)).round().max(1.0) as u32;
             px.next_power_of_two().clamp(self.min_frame.max(4), self.max_frame.max(self.min_frame.max(4)))
@@ -112,12 +128,17 @@ impl Baked {
 
 /// The capture view of frame (i, j): `frame_px` square, centred on the bounding sphere.
 pub fn frame_view(fit: &Fit, i: u32, j: u32, grid: u32, frame_px: u32) -> View {
-    let dir = hemioct::frame_to_direction(i, j, grid);
+    sphere_view(fit, hemioct::frame_to_direction(i, j, grid), frame_px, 0.0)
+}
+
+/// The orthographic view of the bounding sphere from direction `dir` (toward the camera), in
+/// the frames' basis and slab, `px` square, textures sampled with `mip_bias`.
+pub fn sphere_view(fit: &Fit, dir: Vec3, px: u32, mip_bias: f32) -> View {
     let (right, up) = hemioct::frame_basis(dir);
     let r = fit.radius;
     let (cx, cy) = (fit.center.dot(right), fit.center.dot(up));
-    let basis = Basis { right: right.into(), up: up.into(), toward: dir.into(), slab: (fit.center.dot(dir) + r, 2.0 * r) };
-    View { yaw_deg: 0.0, x0: cx - r, x1: cx + r, z0: cy - r, z1: cy + r, width: frame_px, height: frame_px, basis: Some(basis) }
+    let basis = Basis { right: right.into(), up: up.into(), toward: dir.into(), slab: (fit.center.dot(dir) + r, 2.0 * r), mip_bias };
+    View { yaw_deg: 0.0, x0: cx - r, x1: cx + r, z0: cy - r, z1: cy + r, width: px, height: px, basis: Some(basis) }
 }
 
 /// Subsampled pixels per GPU round trip (memory bound of one `render_many` batch).
@@ -131,6 +152,16 @@ pub fn bake(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, scene: &Scene, texture
     let mut albedo = vec![0u8; size * size * 4];
     let mut nd: Vec<u8> = std::iter::repeat_n([128u8, 128, 255, 255], size * size).flatten().collect();
 
+    // The crown as the light sees it (sun transmittance of the pre-lighting).
+    let ldir = s.shading.light_dir();
+    let lpx = s.light_map_px.max(16);
+    let lview = sphere_view(&fit, ldir, lpx, s.mip_bias);
+    let lmap_px = renderer.render_many(gpu, &[Job { scene, textures, view: lview, light: ALBEDO_LIGHT, pass: Pass::ObjectNormalDepth }]).pop().unwrap_or_default();
+    if lmap_px.len() != (lpx * lpx * 4) as usize {
+        return None;
+    }
+    let lmap = crate::shade::LightMap::from_normal_depth(&lmap_px, lpx, ldir, fit.center, fit.radius);
+
     let frames: Vec<(u32, u32)> = (0..grid).flat_map(|j| (0..grid).map(move |i| (i, j))).collect();
     let ss = u64::from(lodforge_texgen::render::supersample_for(frame, frame));
     let per_frame = u64::from(frame * frame) * ss * ss * 2;
@@ -139,20 +170,32 @@ pub fn bake(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, scene: &Scene, texture
     for part in frames.chunks(chunk) {
         let mut jobs = Vec::with_capacity(part.len() * 2);
         for &(i, j) in part {
-            let view = frame_view(&fit, i, j, grid, frame);
+            let view = sphere_view(&fit, hemioct::frame_to_direction(i, j, grid), frame, s.mip_bias);
             jobs.push(Job { scene, textures, view, light: ALBEDO_LIGHT, pass: Pass::Diffuse });
             jobs.push(Job { scene, textures, view, light: ALBEDO_LIGHT, pass: Pass::ObjectNormalDepth });
         }
-        let imgs = renderer.render_many(gpu, &jobs);
+        let mut imgs = renderer.render_many(gpu, &jobs);
+        // Finish and pre-light the frames of this batch in parallel.
+        {
+            use rayon::prelude::*;
+            imgs.par_chunks_mut(2).zip(part.par_iter()).for_each(|(pair, &(i, j))| {
+                let (a, n) = pair.split_at_mut(1);
+                let (a, n) = (&mut a[0], &n[0]);
+                if a.len() != (frame * frame * 4) as usize || n.len() != a.len() {
+                    return;
+                }
+                // Un-premultiply the averaged colour (covered samples only) and bleed it into
+                // transparent texels (the billboards' soft alpha finish).
+                lodforge_texgen::finish_alpha_soft(a, frame);
+                crate::shade::shade_frame(a, n, frame, hemioct::frame_to_direction(i, j, grid), fit.center, fit.radius, &lmap, &s.shading);
+            });
+        }
         for (k, &(i, j)) in part.iter().enumerate() {
-            let mut a = imgs[2 * k].clone();
+            let a = &imgs[2 * k];
             let n = &imgs[2 * k + 1];
             if a.len() != (frame * frame * 4) as usize || n.len() != a.len() {
                 continue;
             }
-            // Un-premultiply the averaged colour and bleed it into transparent texels (the
-            // billboards' soft alpha finish).
-            lodforge_texgen::finish_alpha_soft(&mut a, frame);
             let f = frame as usize;
             let (x0, y0) = (i as usize * f, j as usize * f);
             for y in 0..f {
@@ -219,7 +262,10 @@ pub fn cache_key(model_crc: u32, textures: &[(String, u32)], grid: u32, frame_px
     for (p, c) in textures {
         h.mix_str(p).mix(*c);
     }
-    h.mix(grid).mix(frame_px).mix(s.dilation).mix(lodforge_texgen::render::supersample()).mix(BAKER_VERSION);
+    h.mix(grid).mix(frame_px).mix(s.dilation).mix(lodforge_texgen::render::supersample()).mix(s.mip_bias.to_bits()).mix(s.light_map_px).mix(BAKER_VERSION);
+    for w in s.shading.words() {
+        h.mix(w);
+    }
     h.finish()
 }
 
@@ -309,7 +355,10 @@ mod tests {
         assert_eq!(s.layout(1500.0), (12, 128));
         assert_eq!(s.layout(700.0), (16, 64));
         assert_eq!(s.layout(100.0), (16, 32));
-        assert_eq!(s.layout(90000.0), (12, 128));
+        // Large trees: 256 px frames from 2600 units.
+        assert_eq!(s.layout(2599.0), (12, 128));
+        assert_eq!(s.layout(2600.0), (12, 256));
+        assert_eq!(Settings { large_frame: 0, ..s }.layout(90000.0), (12, 128));
         let fixed = Settings { grid: 14, frame_px: 50, ..s };
         assert_eq!(fixed.layout(1500.0), (14, 52));
     }

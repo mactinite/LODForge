@@ -51,11 +51,44 @@ pub struct Opts {
     /// Also write every page as PNG (albedo, normal, depth) into this folder, for inspection.
     #[arg(long = "impostor-png")]
     pub png: Option<PathBuf>,
+    /// Large trees (world height = model height x reference scale up to 1.25, in units) at
+    /// least this tall get --impostor-large-frame px frames.
+    #[arg(long = "impostor-large-height", default_value_t = 2600.0)]
+    pub large_height: f32,
+    /// Frame size of large trees; 0 = no large tier.
+    #[arg(long = "impostor-large-frame", default_value_t = 256)]
+    pub large_frame: u32,
+    /// Mip bias of the tree textures in the bake (negative keeps the foliage's alpha-tested
+    /// coverage; 0 renders them as the billboards do).
+    #[arg(long = "impostor-mip-bias", default_value_t = -2.0, allow_hyphen_values = true)]
+    pub mip_bias: f32,
+    /// Leave the albedo unlit (no baked light, transmittance or occlusion).
+    #[arg(long = "impostor-unlit")]
+    pub unlit: bool,
+    /// Per-type colour correction: CSV `type,brightness,r,g,b` (type = manifest name, or `*` for
+    /// every type; later lines win), written into the manifests.
+    #[arg(long = "impostor-calibration")]
+    pub calibration: Option<PathBuf>,
 }
 
 impl Opts {
     fn settings(&self) -> bake::Settings {
-        bake::Settings { grid: self.grid, frame_px: self.frame, units_per_px: self.units_per_px, min_frame: self.min_frame, max_frame: self.max_frame, ..Default::default() }
+        let mut s = bake::Settings { grid: self.grid, frame_px: self.frame, units_per_px: self.units_per_px, min_frame: self.min_frame, max_frame: self.max_frame, large_height: self.large_height, large_frame: self.large_frame, mip_bias: self.mip_bias, ..Default::default() };
+        s.shading.enabled = !self.unlit;
+        s
+    }
+
+    /// `type -> (brightness, tint)` from --impostor-calibration (`*` = every type).
+    fn calibration(&self) -> Result<Vec<(String, f32, [f32; 3])>> {
+        let Some(f) = &self.calibration else { return Ok(Vec::new()) };
+        let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+        let mut out = Vec::new();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("type,")) {
+            let c: Vec<&str> = line.split(',').map(str::trim).collect();
+            let num = |i: usize, d: f32| c.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(d);
+            out.push((c[0].to_ascii_lowercase(), num(1, 1.0), [num(2, 1.0), num(3, 1.0), num(4, 1.0)]));
+        }
+        Ok(out)
     }
 
     fn cache_dir(&self) -> PathBuf {
@@ -110,7 +143,7 @@ struct TypeJob {
     bases: Vec<(u32, BaseRef)>,
     /// CRC-32 of the model file (set when loaded).
     crc: u32,
-    /// Largest reference scale of its bases in the worldspace (frame sizing), 1..2.
+    /// Largest reference scale of its bases in the worldspace (frame sizing), 1..1.25.
     scale: f32,
 }
 
@@ -304,7 +337,7 @@ pub fn bake_world(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, dyn
         let (n, scale) = refs[&id];
         let e = types.entry(job.name.clone()).or_insert(job);
         e.bases.push((id, BaseRef { plugin: c.plugin.clone(), form_id: format!("{:08X}", c.local), editor_id: c.editor_id.clone() }));
-        e.scale = e.scale.max(scale.clamp(1.0, 2.0));
+        e.scale = e.scale.max(scale.clamp(1.0, 1.25));
         *ref_counts.entry(e.name.clone()).or_default() += n;
         base_type.insert(id, e.name.clone());
     }
@@ -404,6 +437,7 @@ fn load(p: &Profile, j: &TypeJob) -> Result<Loaded> {
 #[allow(clippy::too_many_arguments)]
 fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Path, set: &str, worlds: &[String], jobs: Vec<TypeJob>, opts: &Opts) -> Result<SetReport> {
     let settings = opts.settings();
+    let calibration = opts.calibration()?;
     let cache = opts.cache_dir();
     std::fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
     let t_bake = Instant::now();
@@ -484,7 +518,7 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
     let sizes: Vec<u32> = unique.iter().map(|&k| baked[k].1.size()).collect();
     let unique_slots = atlas::pack(&sizes, opts.page);
     let refs: Vec<&bake::Baked> = unique.iter().map(|&k| &baked[k].1).collect();
-    let pages = atlas::compose(&refs, &unique_slots);
+    let pages = atlas::compose(&refs, &unique_slots, settings.alpha_ref);
     let slots: Vec<atlas::Slot> = slot_of.iter().map(|&u| unique_slots[u]).collect();
     if let Some(png_dir) = &opts.png {
         dump_pngs(png_dir, set, &pages)?;
@@ -512,6 +546,7 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
         // BC7: 1 byte per texel and map; the mip chain adds about a third.
         let levels = b.frame_px.max(1).ilog2() + 1;
         let bytes: u64 = if shared { 0 } else { (0..levels).map(|l| u64::from((size >> l).max(1).div_ceil(4) * 4).pow(2)).sum::<u64>() * 2 };
+        let calib = calibration.iter().filter(|(n, ..)| n == "*" || *n == j.name).last();
         let m = TypeManifest {
             version: lodforge_impostor::manifest::MANIFEST_VERSION,
             name: j.name.clone(),
@@ -533,6 +568,9 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
             rect: [s.x as f32 / pi.width as f32, s.y as f32 / pi.height as f32, size as f32 / pi.width as f32, size as f32 / pi.height as f32],
             coverage: b.coverage(),
             cache_key: key.clone(),
+            brightness: calib.map_or(1.0, |c| c.1),
+            tint: calib.map_or([1.0; 3], |c| c.2),
+            prelit: settings.shading.enabled,
         };
         std::fs::write(dir.join("types").join(format!("{}.json", j.name)), serde_json::to_string_pretty(&m)?)?;
         reports.push(TypeReport { name: j.name.clone(), model: j.model.clone(), refs: 0, grid: b.grid, frame_px: b.frame_px, atlas_px: size, quad_size: b.quad_size(), ms: *ms, cached: *cached, bytes, coverage: m.coverage, model_crc32: j.crc });

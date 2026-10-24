@@ -13,5 +13,6 @@ pub mod bake;
 pub mod dilation;
 pub mod hemioct;
 pub mod manifest;
+pub mod shade;
 
 pub use bake::{Baked, Settings, bake};

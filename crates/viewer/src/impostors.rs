@@ -68,6 +68,8 @@ pub struct ImpostorInstance {
     pub grid: f32,
     pub frame_px: f32,
     pub flags: u32,
+    /// Colour correction `brightness * tint` (rgb); w = 1 when the albedo is pre-lit.
+    pub tint: [f32; 4],
 }
 
 /// GPU instances of `inst`, grouped by atlas page (instances of page k are
@@ -84,7 +86,7 @@ pub fn instances(inst: &[PreviewInstance], index: &Index) -> (Vec<ImpostorInstan
             unknown += 1;
             continue;
         };
-        page.push(ImpostorInstance { pos: i.pos, yaw: i.yaw, center: t.bounds_center_offset, scale: i.scale, rect: t.rect, quad: t.quad_size, grid: t.grid as f32, frame_px: t.frame_px as f32, flags: 0 });
+        page.push(ImpostorInstance { pos: i.pos, yaw: i.yaw, center: t.bounds_center_offset, scale: i.scale, rect: t.rect, quad: t.quad_size, grid: t.grid as f32, frame_px: t.frame_px as f32, flags: 0, tint: [t.tint[0] * t.brightness, t.tint[1] * t.brightness, t.tint[2] * t.brightness, if t.prelit { 1.0 } else { 0.0 }] });
     }
     let mut out = Vec::new();
     let mut ranges = Vec::new();
@@ -122,6 +124,9 @@ mod tests {
             rect_px: [0, 0, 768, 768],
             rect: [0.0, 0.0, 0.5, 0.5],
             coverage: 0.3,
+            brightness: 1.0,
+            tint: [1.0; 3],
+            prelit: true,
             cache_key: String::new(),
         };
         let p = |index: u32| PageInfo { index, albedo: String::new(), normal_depth: String::new(), width: 1536, height: 1536, mips: 7 };
@@ -148,7 +153,7 @@ mod tests {
         assert_eq!(ranges, vec![0..1, 1..2]);
         assert_eq!(gpu[0].pos[0], 1.0);
         assert_eq!(gpu[1].pos[0], 0.0);
-        assert_eq!(std::mem::size_of::<ImpostorInstance>(), 64);
+        assert_eq!(std::mem::size_of::<ImpostorInstance>(), 80);
         assert!(parse_preview(b"LFPI\x02\0\0\0\0\0\0\0").is_none());
     }
 }

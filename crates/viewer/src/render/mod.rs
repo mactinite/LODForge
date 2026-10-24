@@ -289,11 +289,11 @@ impl LineVertex {
 }
 
 /// [`crate::impostors::ImpostorInstance`]: pos + yaw, centre + scale, rect, (quad, grid, frame px,
-/// flags).
+/// flags), tint (rgb, w pre-lit).
 const IMPOSTOR_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: std::mem::size_of::<crate::impostors::ImpostorInstance>() as u64,
     step_mode: wgpu::VertexStepMode::Instance,
-    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4],
+    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4],
 };
 
 const TREE_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
