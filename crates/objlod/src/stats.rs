@@ -35,6 +35,8 @@ pub struct Stats {
     pub reuv_parts: AtomicUsize,
     /// Parts re-cut at their atlas tile edges because their UVs overshoot the tile.
     pub overshoot_parts: AtomicUsize,
+    /// Parts of generated models drawn from a repeat tile (crate::tiling).
+    pub repeat_tiled_parts: AtomicUsize,
     /// Parts whose colours the VC side file marked white (dropped).
     pub vc_whitened: AtomicUsize,
 }

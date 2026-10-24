@@ -445,6 +445,30 @@ fn load_tile(vfs: &Vfs, path: &str, w: u32, h: u32, kind: MipKind) -> Option<Vec
     Some(lodforge_dds::mips::resize_rgba8(img.width, img.height, &img.rgba, (w, h), kind, Edge::Wrap))
 }
 
+/// A repeat tile's pixels: the texture at a `ru x rv`-th of the tile, laid out `ru x rv` times
+/// (resized to the tile when it does not divide evenly).
+fn load_repeated(vfs: &Vfs, path: &str, w: u32, h: u32, (ru, rv): (u32, u32), kind: MipKind) -> Option<Vec<u8>> {
+    let (rw, rh) = ((w / ru).max(1), (h / rv).max(1));
+    let one = load_tile(vfs, path, rw, rh, kind)?;
+    let tiled = repeat_rgba(&one, rw, rh, ru, rv);
+    let (tw, th) = (rw * ru, rh * rv);
+    Some(if (tw, th) == (w, h) { tiled } else { lodforge_dds::mips::resize_rgba8(tw, th, &tiled, (w, h), kind, Edge::Wrap) })
+}
+
+/// An RGBA image `w x h` laid out `ru x rv` times.
+fn repeat_rgba(px: &[u8], w: u32, h: u32, ru: u32, rv: u32) -> Vec<u8> {
+    let (w, h) = (w as usize, h as usize);
+    let tw = w * ru as usize;
+    let mut out = vec![0u8; tw * h * rv as usize * 4];
+    for y in 0..h * rv as usize {
+        let src = &px[(y % h) * w * 4..(y % h + 1) * w * 4];
+        for r in 0..ru as usize {
+            out[(y * tw + r * w) * 4..(y * tw + (r + 1) * w) * 4].copy_from_slice(src);
+        }
+    }
+    out
+}
+
 const FLAT_NORMAL: [u8; 4] = [128, 128, 255, 255];
 
 /// Renders every page of `layout` in `formats`. Entry keys are `diffuse[,normal[,glow]][=alpha]`
@@ -482,10 +506,16 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                         let g = load_tile(vfs, parts[2], e.width, e.height, MipKind::Color).map(|px| chain(&opaque(px), MipKind::Color));
                         return (d, chain(&n, MipKind::Normal), g);
                     }
-                    let sources = e.texture.split('=').next().unwrap_or("");
+                    // A repeat tile (`key*<ru>x<rv>`) holds its texture ru x rv times.
+                    let (key, repeats) = lodforge_objlod::tiling::split_key(&e.texture);
+                    let load = |path: &str, kind: MipKind| match repeats {
+                        Some(r) => load_repeated(vfs, path, e.width, e.height, r, kind),
+                        None => load_tile(vfs, path, e.width, e.height, kind),
+                    };
+                    let sources = key.split('=').next().unwrap_or("");
                     let mut parts = sources.split(',');
                     let d = parts.next().unwrap_or("");
-                    let Some(mut rgba) = load_tile(vfs, d, e.width, e.height, MipKind::Color) else {
+                    let Some(mut rgba) = load(d, MipKind::Color) else {
                         return (None, chain(&flat(), MipKind::Normal), None);
                     };
                     // Far-LOD bake matching: the planner's per-diffuse RGB factors.
@@ -503,7 +533,7 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                         Some(n) if !n.is_empty() => n.to_string(),
                         _ => normal_for(d, |n| vfs.read(&n.to_lowercase()).ok().flatten().is_some()),
                     };
-                    let n = opaque(load_tile(vfs, &npath, e.width, e.height, MipKind::Normal).unwrap_or_else(flat));
+                    let n = opaque(load(&npath, MipKind::Normal).unwrap_or_else(flat));
                     (Some(chain(&rgba, MipKind::Color)), chain(&n, MipKind::Normal), None)
                 })
                 .collect();
@@ -633,6 +663,20 @@ fn find_ci(root: &Path, rel: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeat_tiles_lay_the_texture_out() {
+        // A 2 x 1 image (red, green) laid out 3 x 2 times.
+        let px = [255, 0, 0, 255, 0, 255, 0, 255];
+        let t = repeat_rgba(&px, 2, 1, 3, 2);
+        assert_eq!(t.len(), 6 * 2 * 4);
+        let at = |x: usize, y: usize| &t[(y * 6 + x) * 4..(y * 6 + x) * 4 + 4];
+        for y in 0..2 {
+            for x in 0..6 {
+                assert_eq!(at(x, y), if x % 2 == 0 { &px[0..4] } else { &px[4..8] });
+            }
+        }
+    }
 
     #[test]
     fn stale_season_btos_go() {

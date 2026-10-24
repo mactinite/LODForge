@@ -53,6 +53,11 @@ pub struct PlanInput<'a> {
     pub match_far: Option<(&'a std::path::Path, f32)>,
 }
 
+/// A repeat tile may be up to this many times the ordinary tile cap per side (at 4 repeats and
+/// more), so each repeat keeps at least a quarter of an ordinary tile's detail
+/// (`FullTextureMaxTileSize` 256: 1024 px tiles, 128..256 px per repeat).
+pub const REPEAT_TILE_GROWTH: u32 = 2;
+
 #[derive(Debug, Default)]
 pub struct PlanStats {
     pub models: usize,
@@ -63,6 +68,8 @@ pub struct PlanStats {
     pub mini: usize,
     /// Far-LOD bakes whose tiles get an RGB factor (`PlanInput::match_far`).
     pub matched: usize,
+    /// Repeat tiles for generated models (`lodforge_objlod::tiling`).
+    pub repeat_tiles: usize,
     pub skipped_tiled: usize,
     pub skipped_missing: usize,
     pub skipped_ignored: usize,
@@ -74,6 +81,8 @@ struct KeyInfo {
     glow: String,
     alpha: Option<u8>,
     usable: bool,
+    /// A repeat tile (`lodforge_objlod::tiling`): the texture `ru x rv` times in one tile.
+    repeats: Option<(u32, u32)>,
 }
 
 fn strip_linear(t: String) -> String {
@@ -142,16 +151,21 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
         /// Mean vertex-colour luminance (0..1; 1 without colours): what the shape's diffuse
         /// is multiplied by on screen.
         vc: f32,
+        /// Generated models whose UVs repeat: the repeat tile they are drawn from
+        /// (`lodforge_objlod::tiling`; `(1, 1)` = the ordinary tile after a whole-repeat shift).
+        repeats: Option<(u32, u32)>,
     }
     let loaded: HashMap<String, Vec<Shape>> = model_list
         .par_iter()
         .filter_map(|m| {
             let bytes = p.vfs.read(m).ok().flatten()?;
             let mesh = mesh::import(m, &bytes).ok()?;
+            let generated = lodforge_objlod::tiling::is_generated_model(m);
             let shapes = mesh
                 .parts
                 .iter()
                 .map(|part| Shape {
+                    repeats: (generated && lodforge_objlod::reuv::needs_recut(&part.uvs, lodforge_objlod::build::ATLAS_UV_SLACK)).then(|| lodforge_objlod::tiling::tile_repeats(&part.uvs)).flatten(),
                     index: part.index,
                     name: part.name.clone(),
                     textures: part.textures.clone(),
@@ -166,6 +180,8 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
         .collect();
     // Keys from every (reference, model, shape), AltTextures applied.
     let mut keys: BTreeMap<String, KeyInfo> = BTreeMap::new();
+    // Repeat tiles of generated models: per base key, the most repeats per axis.
+    let mut repeat_max: BTreeMap<String, (KeyInfo, (u32, u32))> = BTreeMap::new();
     for (s, alt) in exports.seasons.iter().zip(&alts) {
         for l in &s.lines {
             let ref_id = format!("{:08X}", l.ref_id);
@@ -178,11 +194,27 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
                         None => sh.textures.to_vec(),
                     };
                     let Some((key, parts)) = shape_key(&textures, sh.glow_map, sh.alpha) else { continue };
-                    let e = keys.entry(key).or_insert(KeyInfo { diffuse: parts.diffuse, normal: parts.normal, glow: parts.glow, alpha: parts.alpha, usable: false });
+                    // Generated models with repeating UVs: a repeat tile (glow shapes keep theirs).
+                    if let Some(r) = sh.repeats.filter(|_| parts.glow.is_empty()) {
+                        if r == (1, 1) {
+                            // Inside one repeat once shifted: the ordinary tile.
+                            keys.entry(key).or_insert(KeyInfo { diffuse: parts.diffuse, normal: parts.normal, glow: String::new(), alpha: parts.alpha, usable: false, repeats: None }).usable = true;
+                        } else {
+                            // One repeat tile per texture, holding the most repeats any shape needs.
+                            let e = repeat_max.entry(key).or_insert((KeyInfo { diffuse: parts.diffuse, normal: parts.normal, glow: String::new(), alpha: parts.alpha, usable: true, repeats: None }, (1, 1)));
+                            e.1 = (e.1.0.max(r.0), e.1.1.max(r.1));
+                        }
+                        continue;
+                    }
+                    let e = keys.entry(key).or_insert(KeyInfo { diffuse: parts.diffuse, normal: parts.normal, glow: parts.glow, alpha: parts.alpha, usable: false, repeats: None });
                     e.usable |= sh.fits;
                 }
             }
         }
+    }
+    for (key, (mut k, r)) in repeat_max {
+        k.repeats = Some(r);
+        keys.insert(lodforge_objlod::tiling::tiled_key(&key, r), k);
     }
     stats.keys = keys.len();
     let mini_sources: HashMap<String, String> = input.mini.iter().map(|r| (texture_key(&r.source), texture_key(&r.dest))).collect();
@@ -194,7 +226,7 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
         }
         if let Some(dest) = mini_sources.get(&k.diffuse) {
             let stem = dest.trim_end_matches(".dds");
-            chained.entry(format!("{dest},{stem}_n.dds")).or_insert(KeyInfo { diffuse: dest.clone(), normal: format!("{stem}_n.dds"), glow: String::new(), alpha: None, usable: true });
+            chained.entry(format!("{dest},{stem}_n.dds")).or_insert(KeyInfo { diffuse: dest.clone(), normal: format!("{stem}_n.dds"), glow: String::new(), alpha: None, usable: true, repeats: None });
         }
     }
     keys.extend(chained);
@@ -223,14 +255,24 @@ pub fn plan(p: &Profile, exports: &WorldExport, input: &PlanInput<'_>) -> (Atlas
             stats.skipped_ignored += 1;
             continue;
         }
-        if mini_sources.contains_key(&k.diffuse) {
+        // (A repeat tile is drawn from the full texture even when TexGen stitched it into a
+        // mini atlas for the installed LOD models.)
+        if mini_sources.contains_key(&k.diffuse) && k.repeats.is_none() {
             continue;
         }
         let Some(&(w, h, transparent)) = info.get(&k.diffuse) else {
             stats.skipped_missing += 1;
             continue;
         };
-        let (tw, th) = tile_size(w, h, cap(&k.diffuse));
+        let (tw, th) = match k.repeats {
+            // The texture ru x rv times; the tile may grow up to REPEAT_TILE_GROWTH times the cap
+            // so a repeat keeps some detail.
+            Some((ru, rv)) => {
+                stats.repeat_tiles += 1;
+                tile_size(w * ru, h * rv, cap(&k.diffuse) * ru.max(rv).min(REPEAT_TILE_GROWTH))
+            }
+            None => tile_size(w, h, cap(&k.diffuse)),
+        };
         if !k.glow.is_empty() {
             glow.push((key.clone(), tw, th));
         } else if settings.separate_alpha() && (transparent || k.alpha.is_some()) {

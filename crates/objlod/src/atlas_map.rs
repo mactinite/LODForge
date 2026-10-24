@@ -69,6 +69,8 @@ impl<'a> Remap<'a> {
 pub struct AtlasMap {
     pub rows: Vec<AtlasRow>,
     by_key: HashMap<String, usize>,
+    /// Repeat tiles (crate::tiling) by their base key: (repeats, row).
+    tiled: HashMap<String, Vec<((u32, u32), usize)>>,
 }
 
 impl AtlasMap {
@@ -87,8 +89,16 @@ impl AtlasMap {
             }
             let u = |i: usize| c[i].parse::<u32>().map_err(|_| format!("atlas map line {}: column {} is not a number: {:?}", n + 1, i + 1, c[i]));
             let s = |i: usize| c[i].parse::<i32>().map_err(|_| format!("atlas map line {}: column {} is not a number: {:?}", n + 1, i + 1, c[i]));
-            let scale = if c.len() >= 10 { Some((c[8].parse().unwrap_or(1.0), c[9].parse().unwrap_or(1.0))) } else { None };
+            let scale = if c.len() >= 10 {
+                Some((c[8].parse().unwrap_or(1.0), c[9].parse().unwrap_or(1.0)))
+            } else {
+                // A repeat tile (`key*<ru>x<rv>`, crate::tiling) holds the texture ru x rv times.
+                crate::tiling::split_key(c[0]).1.map(|(ru, rv)| (1.0 / ru as f32, 1.0 / rv as f32))
+            };
             let row = AtlasRow { key: c[0].to_ascii_lowercase(), width: u(1)?, height: u(2)?, x: s(3)?, y: s(4)?, page: c[5].to_string(), page_width: u(6)?, page_height: u(7)?, scale };
+            if let (base, Some(r)) = crate::tiling::split_key(&row.key) {
+                m.tiled.entry(base.to_string()).or_default().push((r, m.rows.len()));
+            }
             m.by_key.entry(row.key.clone()).or_insert(m.rows.len());
             m.rows.push(row);
         }
@@ -146,6 +156,30 @@ impl AtlasMap {
 
     /// The remap chain of a shape with the given texture set and UVs: `None` when the texture has
     /// no row or the UVs (times the first row's scale) leave `[-tolerance, 1 + tolerance]`.
+    /// The repeat tile (`crate::tiling`) of a diffuse / normal / alpha that holds at least
+    /// `ru x rv` repeats (the smallest such tile when there are several).
+    pub fn lookup_tiled(&self, diffuse: &str, normal: &str, alpha: Option<u8>, repeats: (u32, u32)) -> Option<&AtlasRow> {
+        let k = crate::export::texture_key;
+        let d = k(diffuse);
+        let d = match d.strip_suffix("linear.dds") {
+            Some(stem) => format!("{stem}.dds"),
+            None => d,
+        };
+        if d.is_empty() {
+            return None;
+        }
+        let n = match k(normal) {
+            n if n.is_empty() => format!("{}_n.dds", d.trim_end_matches(".dds")),
+            n => n,
+        };
+        let base = match alpha {
+            Some(a) => format!("{d},{n}={a}"),
+            None => format!("{d},{n}"),
+        };
+        let (ru, rv) = repeats;
+        self.tiled.get(&base.to_ascii_lowercase())?.iter().filter(|((u, v), _)| *u >= ru && *v >= rv).min_by_key(|((u, v), _)| u * v).map(|(_, i)| &self.rows[*i])
+    }
+
     pub fn resolve(&self, diffuse: &str, normal: &str, glow: &str, alpha: Option<u8>, uvs: &[[f32; 2]], tolerance: f32) -> Option<Remap<'_>> {
         let first = self.lookup(diffuse, normal, glow, alpha)?;
         let (su, sv) = first.scale.unwrap_or((1.0, 1.0));
@@ -215,5 +249,20 @@ mod tests {
         let uv = r.apply([1.9, 1.9]);
         assert!((uv[0] - (3328.0 + 0.95 * 256.0) / 8192.0).abs() < 1e-6 && (uv[1] - (2048.0 + 0.95 * 256.0) / 4096.0).abs() < 1e-6);
         assert!(m.resolve("textures\\pbr\\landscape\\d.dds", "", "", None, &[[0.0, 0.0], [2.5, 0.0]], 0.2).is_none());
+    }
+
+    #[test]
+    fn repeat_tile_rows() {
+        // A tile holding the texture 4 x 2 times: UV (4, 2) is the tile's far corner.
+        let m = AtlasMap::parse("textures\\w.dds,textures\\w_n.dds*4x2\t1024\t512\t1024\t0\ttextures\\x.dds\t4096\t2048\r\ntextures\\w.dds,textures\\w_n.dds\t256\t256\t0\t0\ttextures\\x.dds\t4096\t2048\r\n").unwrap();
+        let t = m.lookup_tiled("textures\\W.dds", "textures\\w_n.dds", None, (4, 2)).unwrap();
+        assert_eq!(t.scale, Some((0.25, 0.5)));
+        assert_eq!(t.remap([4.0, 2.0]), [2048.0 / 4096.0, 512.0 / 2048.0]);
+        assert_eq!(t.remap([1.0, 1.0]), [(1024.0 + 256.0) / 4096.0, 256.0 / 2048.0]);
+        // Fewer repeats use the tile that holds more; more than it holds, none.
+        assert_eq!(m.lookup_tiled("textures\\w.dds", "", None, (2, 1)).unwrap().key, t.key);
+        assert!(m.lookup_tiled("textures\\w.dds", "", None, (2, 3)).is_none());
+        // The ordinary row is untouched.
+        assert_eq!(m.lookup("textures\\w.dds", "textures\\w_n.dds", "", None).unwrap().scale, None);
     }
 }

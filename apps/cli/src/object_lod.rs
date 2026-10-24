@@ -448,7 +448,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             }
         }
         println!(
-            "  placements {}, missing meshes {}, tree billboards {} (without a FlatTextures line {}), grass instances {} (unmapped {}), passthru shapes {}, HD shapes {}, shapes split at 65,535 {}, AltTextures applied {}, parts atlased {} (re-cut {}, cut at tile edges {}), VC-whitened {}",
+            "  placements {}, missing meshes {}, tree billboards {} (without a FlatTextures line {}), grass instances {} (unmapped {}), passthru shapes {}, HD shapes {}, shapes split at 65,535 {}, AltTextures applied {}, parts atlased {} (re-cut {}, cut at tile edges {}, generated on repeat tiles {}), VC-whitened {}",
             Stats::get(&s.placed),
             Stats::get(&s.missing_meshes),
             Stats::get(&s.billboards),
@@ -462,6 +462,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             Stats::get(&s.atlased_parts),
             Stats::get(&s.reuv_parts),
             Stats::get(&s.overshoot_parts),
+            Stats::get(&s.repeat_tiled_parts),
             Stats::get(&s.vc_whitened)
         );
         if let Some(g) = &a.golden {

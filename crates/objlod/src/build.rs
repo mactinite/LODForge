@@ -370,6 +370,31 @@ impl<'a> ObjectLod<'a> {
                 if passthru && let Some(m) = &mut remap {
                     m.rows.truncate(1);
                 }
+                // Generated models whose UVs repeat: their repeat tile (crate::tiling), UVs
+                // shifted by whole repeats (and cut every MAX_REPEATS where they span more).
+                // Any UV past the tile counts (not the atlas tolerance): a generated shape that
+                // overshot into neighbouring tiles would bleed off the page at edge tiles.
+                let tiled: Option<MeshPart>;
+                let wants_tile = !hd_part && glow_slot.is_empty() && crate::tiling::is_generated_model(&model_l) && crate::reuv::needs_recut(&part.uvs, ATLAS_UV_SLACK);
+                let part = match wants_tile.then(|| crate::tiling::tile_repeats(&part.uvs)).flatten() {
+                    Some(reps) => match crate::tiling::prepare(part, reps) {
+                        Some(p) => {
+                            // One repeat once shifted: the ordinary row (with its mini-atlas chain).
+                            let found = if reps == (1, 1) { self.atlas.resolve(&textures[0], normal_slot, glow_slot, alpha, &p.uvs, ATLAS_UV_SLACK) } else { self.atlas.lookup_tiled(&textures[0], normal_slot, alpha, reps).map(|row| crate::atlas_map::Remap { rows: vec![row] }) };
+                            match found {
+                                Some(m) => {
+                                    remap = Some(m);
+                                    Stats::add(&self.stats.repeat_tiled_parts, 1);
+                                    tiled = Some(p);
+                                    tiled.as_ref().unwrap()
+                                }
+                                None => part,
+                            }
+                        }
+                        None => part,
+                    },
+                    None => part,
+                };
                 let recut: Option<MeshPart>;
                 let unit_scale = remap.as_ref().is_some_and(|m| m.rows[0].scale.is_none_or(|s| s == (1.0, 1.0)));
                 let part = if remap.is_none() && self.opts.reuv && self.atlas.lookup(&textures[0], normal_slot, glow_slot, alpha).is_some() && !part.name.to_ascii_lowercase().contains("noreuv") {
@@ -396,6 +421,15 @@ impl<'a> ObjectLod<'a> {
                 } else {
                     part
                 };
+                if page_uv_trace()
+                    && let Some(m) = &remap
+                {
+                    let out: Vec<[f32; 2]> = part.uvs.iter().map(|uv| m.apply(*uv)).filter(|p| p[0] < -0.001 || p[0] > 1.001 || p[1] < -0.001 || p[1] > 1.001).collect();
+                    if !out.is_empty() {
+                        let (lo, hi) = part.uvs.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]));
+                        eprintln!("page-uv-trace\t{model_l}\t{}\t{}\trows {:?}\tuv {lo:?}..{hi:?}\tout {}", part.name, textures[0], m.rows.iter().map(|r| (&r.key, r.scale)).collect::<Vec<_>>(), out.len());
+                    }
+                }
                 let row = remap.as_ref().map(|r| r.last());
                 if row.is_some() {
                     atlased += 1;
@@ -606,6 +640,13 @@ impl<'a> ObjectLod<'a> {
         });
         Some(BuiltQuad { quad: *q, nif, shapes: shapes.len(), triangles, vertices, heights })
     }
+}
+
+/// `LODFORGE_PAGE_UV_TRACE=1`: print the parts whose UVs land outside their atlas page after the
+/// remap (read once).
+fn page_uv_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LODFORGE_PAGE_UV_TRACE").is_some())
 }
 
 /// One output shape's geometry in block-local, level-scaled units.

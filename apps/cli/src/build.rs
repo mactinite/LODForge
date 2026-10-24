@@ -363,7 +363,7 @@ pub fn run(a: &Args) -> Result<()> {
                     own_output(&mut p, &out, &before)?;
                     c.rescan(&p);
                     if !a.json {
-                        println!("LOD models: {} generated for {} full models ({} from cache, {} without geometry), {} LOD models now; {}", rep.made.len(), items.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len(), c.index.len(), rep.fit_summary());
+                        println!("LOD models: {} generated for {} full models ({} from cache, {} without geometry), {} LOD models now", rep.made.len(), items.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len(), c.index.len());
                     }
                     event(a.json, "all", "lod-models", None, t.elapsed().as_millis());
                 }

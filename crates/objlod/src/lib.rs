@@ -41,6 +41,7 @@ pub mod sidefiles;
 pub mod source;
 pub mod stats;
 pub mod terrain;
+pub mod tiling;
 pub mod transform;
 
 pub use atlas_map::AtlasMap;

@@ -675,7 +675,7 @@ pub fn atlas(p: &Profile, c: &Config, world: &Worldspace, exports: &WorldExport,
     billboards.extend(trees.iter().cloned());
     let input = crate::object_atlas_plan::PlanInput { settings, tolerance: 0.2, ignore_masks: &masks, mini, billboards: &billboards, base: format!("textures\\DynDOLOD\\LOD\\DynDOLOD_{}", world.editor_id), match_far };
     let (layout, st) = crate::object_atlas_plan::plan(p, exports, &input);
-    println!("  atlas plan: {} models, {} keys: {} main, {} alpha, {} glow tiles, {} mini rows; skipped {} tiled, {} missing, {} ignored; {} far-LOD bakes matched to LOD4", st.models, st.keys, st.main, st.alpha, st.glow, st.mini, st.skipped_tiled, st.skipped_missing, st.skipped_ignored, st.matched);
+    println!("  atlas plan: {} models, {} keys: {} main, {} alpha, {} glow tiles ({} repeat tiles for generated models), {} mini rows; skipped {} tiled, {} missing, {} ignored; {} far-LOD bakes matched to LOD4", st.models, st.keys, st.main, st.alpha, st.glow, st.repeat_tiles, st.mini, st.skipped_tiled, st.skipped_missing, st.skipped_ignored, st.matched);
     Ok(layout)
 }
 
