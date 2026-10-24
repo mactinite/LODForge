@@ -65,3 +65,23 @@ was added still converts.
 
 skyrim-cs-base has no grass cache installed (2026-10-24); the measurements above used the
 skyrim-cs cache from the determinism run.
+
+## skyrim-cs-base test data (2026-10-24)
+
+For local runtime tests only, a cache for the cs-base Default profile was generated with the
+parked G1 generator (branch `g1-grass-cache`, fc61802, GPL, not part of `main`; its existing
+binary in `D:\Modlists\LODForge-grass`): `lodforge grass-cache --world <W> --out <dir>` per
+worldspace, 7,208 `.cgid` files (1.5 GB) in about 10 s in all. G1 has no seasonal grass, so only
+the default season exists and the runtime uses `<World>.lfg` in every season.
+
+| World | Cells | Instances | `.lfg` (zstd 3) |
+|---|---|---|---|
+| Tamriel | 5,660 | 41,973,405 | 323.4 MB |
+| DLC2SolstheimWorld | 799 | 2,072,300 | 16.9 MB |
+| DLC01SoulCairn | 300 | 1,953,606 | 15.4 MB |
+| MarkarthWorld | 126 | 676,008 | 5.8 MB |
+| Blackreach | 68 | 681,615 | 5.8 MB |
+| 8 more worlds | 175 | 347,000 | 3.1 MB |
+
+Tamriel per density level (raw / zstd): 1/1 420.3 / 323.4 MB, 1/2 210.4 / 162.6, 1/4 105.5 / 81.7,
+1/8 53.0 / 41.4, 1/16 26.8 / 21.2, 1/32 13.7 / 11.0, 1/64 7.1 / 5.9, 1/128 3.8 / 3.3.
