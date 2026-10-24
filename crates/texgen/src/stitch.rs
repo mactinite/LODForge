@@ -84,7 +84,7 @@ pub fn parse_copy(text: &str) -> Vec<(String, String)> {
 /// `textures\x\y.dds` -> `textures\pbr\x\y.dds` (other prefixes kept, `DynDOLOD-temp\` too).
 pub fn pbr_path(p: &str) -> String {
     let p = norm(p);
-    if let Some(i) = p.find("textures\\") {
+    if let Some(i) = lodforge_nif::data_folder_start(&p, "textures") {
         let (head, rest) = p.split_at(i + "textures\\".len());
         if rest.starts_with("pbr\\") {
             return p;
@@ -570,6 +570,9 @@ mod tests {
         assert_eq!(pbr_dest("textures\\dlc02\\lod\\dlc2lodbasaltside.dds"), "textures\\pbr\\dlc02\\lod\\dlc2lodbasaltside.dds");
         assert_eq!(pbr_dest("textures\\landscape\\glacierslabnoalpha.dds"), "textures\\pbr\\landscape\\glacierslabnoalpha.dds");
         assert_eq!(pbr_path("dyndolod-temp\\textures\\a\\b.dds"), "dyndolod-temp\\textures\\pbr\\a\\b.dds");
+        // The twin goes under the textures folder, never inside a mod folder ending in "textures".
+        assert_eq!(pbr_path("textures\\xjkcowtextures\\a.dds"), "textures\\pbr\\xjkcowtextures\\a.dds");
+        assert_eq!(pbr_path("xjkcowtextures\\a.dds"), "xjkcowtextures\\a.dds");
     }
 
     #[test]

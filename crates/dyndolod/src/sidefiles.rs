@@ -80,7 +80,7 @@ pub fn texture_path(t: &str) -> String {
     if t.is_empty() {
         return String::new();
     }
-    if let Some(p) = t.find("textures\\") { t[p..].to_string() } else { format!("textures\\{t}") }
+    if let Some(p) = lodforge_nif::data_folder_start(t, "textures") { t[p..].to_string() } else { format!("textures\\{t}") }
 }
 
 /// TXST field `TXnn` -> NIF texture set slot (TX02 environment mask is slot 5, TX03 glow slot 2,
@@ -403,6 +403,9 @@ mod tests {
         assert_eq!(pbr_lod_name("textures\\lod\\mrkbuildingslod02.dds").as_deref(), Some("textures\\lod\\mrkbuildingspbr_lod02.dds"));
         assert_eq!(pbr_lod_name("textures\\lod\\dirt02pbr_lod.dds"), None);
         assert_eq!(texture_path("landscape/rocks01.dds"), "textures\\landscape\\rocks01.dds");
+        assert_eq!(texture_path("Data\\Textures\\A.dds"), "textures\\a.dds");
+        // A mod folder ending in "textures" is part of the path, not the prefix.
+        assert_eq!(texture_path("XJKCoWTextures/Arch.dds"), "textures\\xjkcowtextures\\arch.dds");
     }
 
     #[test]

@@ -358,7 +358,7 @@ fn mask_texture(t: &str) -> String {
     }
     let l = t.to_lowercase().replace('/', "\\");
     let l = l.trim_start_matches('\\');
-    let l = match l.find("textures\\") {
+    let l = match lodforge_nif::data_folder_start(l, "textures") {
         Some(i) => l[i..].to_string(),
         None => format!("textures\\{l}"),
     };
@@ -377,5 +377,6 @@ mod tests {
         assert_eq!(angle_as_lodgen(-0.1), "354.2704".parse::<f32>().unwrap());
         assert_eq!(scale_as_lodgen(0.69), 0.69);
         assert_eq!(mask_texture("Landscape\\Mountains\\MountainSlab02.dds"), "textures\\landscape\\mountains\\mountainslab02.dds");
+        assert_eq!(mask_texture("MyTextures\\Slab.dds"), "textures\\mytextures\\slab.dds");
     }
 }

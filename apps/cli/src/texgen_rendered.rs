@@ -27,7 +27,7 @@ pub struct RenderObject {
 /// Lower case, backslashes, from `textures\` on.
 fn tex_path(t: &str) -> String {
     let t = t.trim().replace('/', "\\").to_ascii_lowercase();
-    match t.find("textures\\") {
+    match lodforge_nif::data_folder_start(&t, "textures") {
         Some(p) => t[p..].to_string(),
         None => format!("textures\\{t}"),
     }
@@ -266,4 +266,13 @@ pub fn render_all(p: &crate::profile::Profile, gpu: &lodforge_gpu::Gpu, renderer
         }
     }
     Ok((out, skipped))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn texture_folder_is_a_whole_folder() {
+        assert_eq!(super::tex_path(r"Data\Textures\A.dds"), r"textures\a.dds");
+        assert_eq!(super::tex_path("XJKCoWTextures/Arch.dds"), r"textures\xjkcowtextures\arch.dds");
+    }
 }
