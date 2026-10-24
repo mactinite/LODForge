@@ -23,6 +23,7 @@ mod strip_statics;
 mod tree_pack;
 mod tree_pack_preview;
 mod grass_far;
+mod grass_pack;
 mod lod_models;
 mod lod_sources;
 mod tree_report;
@@ -218,6 +219,8 @@ enum Command {
     RuntimeStripStatics(strip_statics::Args),
     /// Lists statics instances whose mesh has no pack mesh.
     RuntimeCheck(strip_statics::CheckArgs),
+    /// Rebuilds only GrassMeshes.bin (grass model, simplified, card per .lfg grass type).
+    RuntimeGrassPack(grass_pack::Args),
     /// CPU preview of TreeMeshes.bin meshes through the atlas pages (PNG).
     TreePackPreview(tree_pack_preview::Args),
     /// Rebuilds only StaticMeshes.bin from the statics files of an output.
@@ -317,6 +320,7 @@ fn main() -> Result<()> {
         Command::RuntimeTrees(a) => runtime_trees::run(&a),
         Command::RuntimeStripStatics(a) => strip_statics::run(&a),
         Command::RuntimeCheck(a) => strip_statics::check(&a),
+        Command::RuntimeGrassPack(a) => grass_pack::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
         Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),

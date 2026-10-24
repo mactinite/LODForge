@@ -782,6 +782,14 @@ pub fn run(a: &Args) -> Result<()> {
         }
         let packs = crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options()).and_then(|t| {
             let s = if a.rt.runtime_min_copies > 0 { Some(crate::tree_pack::build_statics(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options())?) } else { None };
+            // Far grass: the grass types of the `.lfg` files this build wrote.
+            let has_lfg = std::fs::read_dir(crate::instances::out_dir(&out)).map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".lfg"))).unwrap_or(false);
+            if has_lfg {
+                let g = crate::grass_pack::build(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options())?;
+                if !a.json {
+                    println!("  grass {}", g.summary());
+                }
+            }
             Ok((t, s))
         });
         match packs {

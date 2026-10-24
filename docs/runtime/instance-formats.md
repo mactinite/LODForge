@@ -1,6 +1,6 @@
-# LODForge Runtime instance formats (v1.5)
+# LODForge Runtime instance formats (v1.6)
 
-Status: **v1.5, 2026-10-24** (1.0-1.4 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
+Status: **v1.6, 2026-10-24** (1.0-1.5 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
 Runtime SKSE plugin. This document is the contract between the two; when the code and this
 document disagree, the document wins and the code is a bug. Changes follow the versioning rules in
 section 2.
@@ -69,7 +69,7 @@ round-trip tests and the test vectors in section 8 pin the byte layout.
 |---|---|---|---|
 | 0 | u8[4] | magic | `LFTR`, `LFST`, `LFGR` or `LFMP` (ASCII) |
 | 4 | u16 | major | 1 |
-| 6 | u16 | minor | 5 |
+| 6 | u16 | minor | 6 |
 | 8 | u32 | header_size | 64 |
 | 12 | u32 | flags | bit 0: at least one section is zstd-compressed. Other bits 0. |
 | 16 | u32 | record_size | 24 (trees), 32 (statics), 10 (grass) |
@@ -203,6 +203,23 @@ reference flag share a pack mesh.
 | 4 | u32 | form (local form id of the GRAS record; the cache's load-order form id when `plugin` is 0xFFFF) |
 | 8 | f32 | wave_period |
 | 12 | str | model (`meshes\...`, lower case) |
+
+**`GMPK`** (grass, since 1.6, present when the build wrote `GrassMeshes.bin`): `u32 count` (=
+`GTYP` count), then per type 20 bytes:
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u32[3] | pack mesh per tier in `GrassMeshes.bin` (section 7a): 0 full grass model, 1 simplified, 2 card; `0xFFFFFFFF` for none |
+| 12 | u8[4] | mean albedo of the type's covered diffuse texels (sRGB RGB; texels below alpha 128 skipped when the shape alpha-tests), A = covered share (0..255) |
+| 16 | f32 | model height (bounds z extent), model units |
+
+Tiers: **full** is the grass model as the game draws it (vertex colours and alpha test kept,
+the threshold remapped onto the page's 128). **Simplified**: LODForge's mesh simplifier with
+a 3-unit error limit, at least a third of the triangles kept. **Card**: two crossed, double-sided
+quads over the model's bounds (one in the XZ plane, one in YZ, through the bounds centre) showing
+the model's first textured shape's whole diffuse (UV 0..1) with its alpha test, upward normals
+(lit like the ground) and the shape's mean vertex colour. For "complex grass" models whose
+diffuse is a sheet of many blades the card shows the whole sheet.
 
 ### 3.3 Section index
 
@@ -382,6 +399,12 @@ world `x = half[0] + 12*trunc(cell_x/12)*4096` and likewise `y`; `z = half[2]`; 
 
 ## 7a. Mesh packs (`LFMP`: `TreeMeshes.bin` since 1.3, `StaticMeshes.bin` since 1.4)
 
+`GrassMeshes.bin` (since 1.6) has the same layout too: the three tiers of every grass type of the
+build's `.lfg` files (mesh names `<model>`, `<model>#decimated`, `<model>#card`), plain page class,
+pages `textures\lodforge\grassatlas\grassatlas_alpha[NN].dds`; `.lfg` files link to it with
+`GMPK`. Grass meshes are small (often under 64 triangles), so their clusters carry more
+padding.
+
 `StaticMeshes.bin` has exactly the layout described below for `TreeMeshes.bin`; it holds every
 `MESH` model (and texture variant) of the build's statics files, its pages are
 `textures\lodforge\staticatlas\staticatlas_alpha[NN].dds` (+ `_n`), and statics files link to it
@@ -491,6 +514,8 @@ kinds, raw and zstd.
 
 ## History
 
+- **1.6** (2026-10-24): `GrassMeshes.bin` (three tiers per grass type) and the `GMPK` chunk in
+  `.lfg` (tier meshes, mean albedo, height). Additive.
 - **1.5** (2026-10-24): snow/ash references in the static pack: `MCLS` per-part classes, page
   class in `MPPG` (former reserved byte); opaque shapes get alpha-255 tiles. Additive.
 - **1.4** (2026-10-24): static mesh pack `StaticMeshes.bin`; statics files instance repeated object

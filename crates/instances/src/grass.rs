@@ -198,6 +198,25 @@ pub struct GrassFile {
     pub common: Common,
     pub types: Vec<GrassType>,
     pub cells: BTreeMap<(i16, i16), GrassCell>,
+    /// `GMPK`: per `GTYP` entry, its meshes in `GrassMeshes.bin` and colour stats; empty: no
+    /// chunk.
+    pub pack: Vec<GrassTypePack>,
+}
+
+/// Tiers of a grass type's meshes in `GrassMeshes.bin`.
+pub const TIER_FULL: usize = 0;
+pub const TIER_DECIMATED: usize = 1;
+pub const TIER_CARD: usize = 2;
+
+/// One `GMPK` entry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GrassTypePack {
+    /// Pack mesh per tier (full, decimated, card); `meshpack::NO_MESH` for none.
+    pub tiers: [u32; 3],
+    /// Mean albedo of the type's covered diffuse texels (sRGB RGB) and their coverage share (A).
+    pub albedo: [u8; 4],
+    /// Model height (bounds max z - min z), model units.
+    pub height: f32,
 }
 
 impl GrassFile {
@@ -221,6 +240,18 @@ impl GrassFile {
     pub fn to_bytes(&self, opts: WriteOptions) -> Result<Vec<u8>> {
         let mut chunks = self.common.chunks();
         chunks.push(self.type_chunk());
+        if !self.pack.is_empty() {
+            let mut b = Buf::default();
+            b.u32(self.pack.len() as u32);
+            for t in &self.pack {
+                for m in t.tiers {
+                    b.u32(m);
+                }
+                b.0.extend(t.albedo);
+                b.f32(t.height);
+            }
+            chunks.push(Chunk { tag: *b"GMPK", data: b.0 });
+        }
         let sections = self.cells.values().map(|c| RawSection { level: 0, x: c.x, y: c.y, data: c.to_payload(), records: c.records.len() as u32 }).collect();
         write(Kind::Grass, &chunks, sections, opts)
     }
@@ -236,13 +267,22 @@ impl GrassFile {
                 types.push(GrassType { plugin: r.u16()?, flags: r.u16()?, form: r.u32()?, wave_period: r.f32()?, model: r.str()? });
             }
         }
+        let mut pack = Vec::new();
+        if let Some(ch) = c.chunk(b"GMPK") {
+            let mut r = Cur::new(&ch.data);
+            for _ in 0..r.u32()? {
+                let tiers = [r.u32()?, r.u32()?, r.u32()?];
+                let albedo: [u8; 4] = r.take(4)?.try_into().unwrap();
+                pack.push(GrassTypePack { tiers, albedo, height: r.f32()? });
+            }
+        }
         let mut cells = BTreeMap::new();
         for e in &c.index {
             let raw = c.payload(e)?;
             let cell = GrassCell::parse(&raw, c.header.record_size as usize, e.record_count as usize)?;
             cells.insert((e.x, e.y), cell);
         }
-        Ok(GrassFile { common, types, cells })
+        Ok(GrassFile { common, types, cells, pack })
     }
 }
 

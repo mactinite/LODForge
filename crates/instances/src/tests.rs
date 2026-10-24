@@ -60,7 +60,7 @@ fn rejects_other_major_and_kind() {
     let mut bytes = trees().to_bytes(WriteOptions::default()).unwrap();
     assert!(StaticsFile::from_bytes(&bytes).is_err());
     bytes[4] = 2;
-    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 5))));
+    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 6))));
 }
 
 #[test]
@@ -163,6 +163,7 @@ fn grass_file_round_trip() {
     let other = GrassCell { x: 4, ..other };
     f.cells.insert((-3, 7), cell);
     f.cells.insert((4, 7), other);
+    f.pack = (0..15u32).map(|k| crate::grass::GrassTypePack { tiers: [3 * k, 3 * k + 1, if k == 2 { crate::meshpack::NO_MESH } else { 3 * k + 2 }], albedo: [90, 110, 40, 200], height: 40.0 + k as f32 }).collect();
     for opts in [WriteOptions::default(), WriteOptions { zstd: Some(9), crc: true }] {
         let bytes = f.to_bytes(opts).unwrap();
         let back = GrassFile::from_bytes(&bytes).unwrap();
@@ -229,7 +230,7 @@ fn golden_trees_bytes() {
     assert_eq!(hex, expect, "\n{hex}");
 }
 
-const GOLDEN_TREES: &str = "4c4654520100050040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
+const GOLDEN_TREES: &str = "4c4654520100060040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
 
 #[test]
 fn tree_meshes_round_trip() {

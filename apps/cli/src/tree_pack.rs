@@ -106,7 +106,7 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
             }
         }
     }
-    let (mut rep, mesh_of) = make(p, out, &models, s, write, PAGE_BASE, lodforge_instances::meshpack::FILE_NAME)?;
+    let (mut rep, mesh_of) = make(p, out, &models, s, write, PAGE_BASE, lodforge_instances::meshpack::FILE_NAME, &|m| vfs_mesh(p, m))?;
     rep.trees_files = files.len();
     for f in &files {
         let mut t = TreeFile::from_bytes(&std::fs::read(f)?)?;
@@ -139,7 +139,7 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
             models.entry(key_of(m)).or_insert_with(|| (m.model.clone(), m.textures.iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect(), m.classes.clone()));
         }
     }
-    let (mut rep, mesh_of) = make(p, out, &models, s, write, STATIC_PAGE_BASE, STATIC_FILE_NAME)?;
+    let (mut rep, mesh_of) = make(p, out, &models, s, write, STATIC_PAGE_BASE, STATIC_FILE_NAME, &|m| vfs_mesh(p, m))?;
     rep.trees_files = files.len();
     for f in &files {
         let mut t = StaticsFile::from_bytes(&std::fs::read(f)?)?;
@@ -153,7 +153,7 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
 /// A mesh pack of `models` (with their shapes' resolved diffuse/normal in part order; an empty
 /// list resolves the textures the model names) written to `out` as `file_name` with pages under
 /// `page_base`. Returns the report and model -> pack mesh.
-pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)>, s: &Settings, write: WriteOptions, page_base: &str, file_name: &str) -> Result<(Report, HashMap<String, u32>)> {
+pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)>, s: &Settings, write: WriteOptions, page_base: &str, file_name: &str, load: &dyn Fn(&str) -> Option<lodforge_objlod::mesh::LodMesh>) -> Result<(Report, HashMap<String, u32>)> {
     let dir = crate::instances::out_dir(out);
     std::fs::create_dir_all(&dir)?;
     let mut rep = Report { models: models.len(), ..Default::default() };
@@ -167,8 +167,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
     let mut loaded: Vec<(String, String, Vec<Part>)> = Vec::new();
     let mut sizes: BTreeMap<(u8, String), (u32, u32)> = BTreeMap::new();
     for (key, (model, shapes, classes)) in models {
-        let Some(bytes) = p.vfs.read(model).ok().flatten() else { continue };
-        let Ok(lm) = lodforge_objlod::mesh::import(model, &bytes) else { continue };
+        let Some(lm) = load(model) else { continue };
         let mut parts = Vec::new();
         for (i, part) in lm.parts.into_iter().enumerate() {
             let shape = match shapes.get(i) {
@@ -326,4 +325,10 @@ pub fn run_statics(a: &StaticsArgs) -> Result<()> {
         println!("  unresolved: {u}");
     }
     Ok(())
+}
+
+/// A model from the load order, imported with its node transforms.
+pub fn vfs_mesh(p: &Profile, model: &str) -> Option<lodforge_objlod::mesh::LodMesh> {
+    let bytes = p.vfs.read(model).ok().flatten()?;
+    lodforge_objlod::mesh::import(model, &bytes).ok()
 }
