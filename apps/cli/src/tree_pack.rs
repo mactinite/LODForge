@@ -17,9 +17,9 @@ use lodforge_instances::{Common, WriteOptions};
 
 use crate::profile::Profile;
 
-/// Game path of the pages (the `_Alpha` suffix makes the page renderer treat them as alpha-tested
+/// Game path stem of the pages (`<stem>_Alpha[NN].dds`: the `_Alpha` suffix makes the page renderer treat them as alpha-tested
 /// pages: average colour under the cut-out, coverage-preserving mips).
-pub const PAGE_BASE: &str = r"textures\LODForge\TreeAtlas\TreeAtlas_Alpha";
+pub const PAGE_BASE: &str = r"textures\LODForge\TreeAtlas\TreeAtlas";
 /// UV slack before a part is re-cut (half a texel of a 512 tile).
 const UV_SLACK: f32 = 0.001;
 
@@ -51,6 +51,8 @@ pub struct Report {
     pub recut_parts: usize,
     pub dropped_parts: usize,
     pub other_threshold_parts: usize,
+    /// Parts drawn without alpha test (tile alpha forced to 255).
+    pub opaque_parts: usize,
     pub trees_files: usize,
     pub ms: u128,
     /// A sample of parts dropped for want of a texture.
@@ -61,7 +63,7 @@ impl Report {
     pub fn summary(&self) -> String {
         let mb = |b: f64| b / 1e6;
         format!(
-            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({:.1} MB BC7 + mips); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128); {} instance files linked; {:.1} s",
+            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({:.1} MB BC7 + mips); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128), {} opaque parts; {} instance files linked; {:.1} s",
             self.models,
             self.meshes,
             self.textures,
@@ -76,6 +78,7 @@ impl Report {
             self.recut_parts,
             self.dropped_parts,
             self.other_threshold_parts,
+            self.opaque_parts,
             self.trees_files,
             self.ms as f64 / 1000.0
         )
@@ -94,12 +97,12 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
     let dir = crate::instances::out_dir(out);
     let files = trees_files(&dir)?;
     // Every model (sorted, so the pack is deterministic) with its resolved textures.
-    let mut models: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
+    let mut models: BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)> = BTreeMap::new();
     for f in &files {
         let t = TreeFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for m in t.meshes {
             if !m.model.is_empty() {
-                models.entry(m.model.clone()).or_insert_with(|| (m.model.clone(), m.shapes.iter().map(|s| (s.diffuse.clone(), s.normal.clone())).collect()));
+                models.entry(m.model.clone()).or_insert_with(|| (m.model.clone(), m.shapes.iter().map(|s| (s.diffuse.clone(), s.normal.clone())).collect(), Vec::new()));
             }
         }
     }
@@ -115,7 +118,7 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
 }
 
 /// Game path of the static mesh pack's pages.
-pub const STATIC_PAGE_BASE: &str = r"textures\LODForge\StaticAtlas\StaticAtlas_Alpha";
+pub const STATIC_PAGE_BASE: &str = r"textures\LODForge\StaticAtlas\StaticAtlas";
 pub const STATIC_FILE_NAME: &str = "StaticMeshes.bin";
 
 /// Builds the static pack from the `.statics.bin` files in `out` (every `MESH` model) and links
@@ -127,13 +130,13 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".statics.bin")).collect();
     files.sort();
     // One pack mesh per (model, texture set); large-reference entries share it.
-    let key_of = |m: &lodforge_instances::statics::Mesh| format!("{}|{}", m.model, m.textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"));
+    let key_of = |m: &lodforge_instances::statics::Mesh| format!("{}|{}|{:?}", m.model, m.textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), m.classes);
     let mut textures = crate::instances::TextureIndex::default();
-    let mut models: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
+    let mut models: BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)> = BTreeMap::new();
     for f in &files {
         let t = StaticsFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for m in &t.meshes {
-            models.entry(key_of(m)).or_insert_with(|| (m.model.clone(), m.textures.iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect()));
+            models.entry(key_of(m)).or_insert_with(|| (m.model.clone(), m.textures.iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect(), m.classes.clone()));
         }
     }
     let (mut rep, mesh_of) = make(p, out, &models, s, write, STATIC_PAGE_BASE, STATIC_FILE_NAME)?;
@@ -150,7 +153,7 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
 /// A mesh pack of `models` (with their shapes' resolved diffuse/normal in part order; an empty
 /// list resolves the textures the model names) written to `out` as `file_name` with pages under
 /// `page_base`. Returns the report and model -> pack mesh.
-pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(String, String)>)>, s: &Settings, write: WriteOptions, page_base: &str, file_name: &str) -> Result<(Report, HashMap<String, u32>)> {
+pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)>, s: &Settings, write: WriteOptions, page_base: &str, file_name: &str) -> Result<(Report, HashMap<String, u32>)> {
     let dir = crate::instances::out_dir(out);
     std::fs::create_dir_all(&dir)?;
     let mut rep = Report { models: models.len(), ..Default::default() };
@@ -158,10 +161,11 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
     struct Part {
         part: lodforge_objlod::mesh::MeshPart,
         key: String,
+        class: u8,
     }
     let mut loaded: Vec<(String, String, Vec<Part>)> = Vec::new();
-    let mut sizes: BTreeMap<String, (u32, u32)> = BTreeMap::new();
-    for (key, (model, shapes)) in models {
+    let mut sizes: BTreeMap<(u8, String), (u32, u32)> = BTreeMap::new();
+    for (key, (model, shapes, classes)) in models {
         let Some(bytes) = p.vfs.read(model).ok().flatten() else { continue };
         let Ok(lm) = lodforge_objlod::mesh::import(model, &bytes) else { continue };
         let mut parts = Vec::new();
@@ -184,20 +188,27 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
             }
             // Shapes alpha-testing at another threshold get their own tile with remapped alpha.
             let mut key = format!("{},{}", shape.diffuse, shape.normal);
-            if let Some((flags, threshold)) = part.alpha
-                && flags & 0x200 != 0
-                && threshold != 128
-            {
-                rep.other_threshold_parts += 1;
-                key.push_str(&format!("=t{threshold}"));
+            match part.alpha {
+                Some((flags, threshold)) if flags & 0x200 != 0 => {
+                    if threshold != 128 {
+                        rep.other_threshold_parts += 1;
+                        key.push_str(&format!("=t{threshold}"));
+                    }
+                }
+                // No alpha test (or blending only): drawn opaque, so its tile gets alpha 255.
+                _ => {
+                    rep.opaque_parts += 1;
+                    key.push_str("=o");
+                }
             }
-            if !sizes.contains_key(&key) {
+            let class = classes.get(i).copied().unwrap_or(0);
+            if !sizes.contains_key(&(class, key.clone())) {
                 let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, i.height, s.tile_cap));
                 let Some(size) = size else {
                     rep.dropped_parts += 1;
                     continue;
                 };
-                sizes.insert(key.clone(), size);
+                sizes.insert((class, key.clone()), size);
             }
             let part = if lodforge_objlod::reuv::needs_recut(&part.uvs, UV_SLACK) {
                 rep.recut_parts += 1;
@@ -205,35 +216,51 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
             } else {
                 part
             };
-            parts.push(Part { part, key });
+            parts.push(Part { part, key, class });
         }
         if !parts.is_empty() {
             loaded.push((key.clone(), model.clone(), parts));
         }
     }
     rep.textures = sizes.len();
-    // Atlas: the object LOD planner and renderer, largest tiles first.
-    let mut list: Vec<(String, u32, u32)> = sizes.iter().map(|(k, (w, h))| (k.clone(), *w, *h)).collect();
-    list.sort_by(|a, b| (b.1 * b.2).cmp(&(a.1 * a.2)).then(a.0.cmp(&b.0)));
-    let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, page_base);
+    // Atlas: the object LOD planner and renderer, largest tiles first; one page family per LOD
+    // material class (`<stem>[_Snow|_SnowHD|_Ash|_AshHD]_Alpha[NN].dds`).
     let gpu = lodforge_gpu::Gpu::new()?;
     let formats = crate::object_atlas::Formats { diffuse: crate::object_atlas::Encoding::Bc7, alpha_diffuse: crate::object_atlas::Encoding::Bc7, normal: crate::object_atlas::Encoding::Bc7, mips: u32::MAX, alpha_fill: true };
-    let pages = crate::object_atlas::render(&p.vfs, &layout, &gpu, &formats)?;
-    crate::object_atlas::write(out, &pages)?;
-    rep.pages = pages.len();
-    rep.page_bytes = pages.iter().map(|pg| (pg.diffuse.len() + pg.normal.len()) as u64).sum();
-    let entry: HashMap<&str, &lodforge_objlod::atlas_build::AtlasEntry> = layout.entries.iter().filter(|e| e.page != usize::MAX).map(|e| (e.texture.as_str(), e)).collect();
     let mut pack = MeshPack { common: Common { world: String::new(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("tile_cap={}\npage={}\nalpha_threshold=128", s.tile_cap, s.page) }, ..Default::default() };
-    pack.pages = layout.pages.iter().map(|pg| Page { width: pg.width, height: pg.height, mips: pg.width.max(pg.height).ilog2() + 1, alpha_threshold: 128, albedo: pg.name.to_ascii_lowercase(), normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase() }).collect();
+    // (class, texture key) -> (pack page, tile).
+    let mut entry: HashMap<(u8, String), (u16, lodforge_objlod::atlas_build::AtlasEntry)> = HashMap::new();
+    let classes: std::collections::BTreeSet<u8> = sizes.keys().map(|(c, _)| *c).collect();
+    for class in classes {
+        let mut list: Vec<(String, u32, u32)> = sizes.iter().filter(|((c, _), _)| *c == class).map(|((_, k), (w, h))| (k.clone(), *w, *h)).collect();
+        list.sort_by(|a, b| (b.1 * b.2).cmp(&(a.1 * a.2)).then(a.0.cmp(&b.0)));
+        let tag = match class {
+            lodforge_instances::meshpack::CLASS_SNOW => "_Snow",
+            lodforge_instances::meshpack::CLASS_SNOW_HD => "_SnowHD",
+            lodforge_instances::meshpack::CLASS_ASH => "_Ash",
+            lodforge_instances::meshpack::CLASS_ASH_HD => "_AshHD",
+            _ => "",
+        };
+        let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, &format!("{page_base}{tag}_Alpha"));
+        let pages = crate::object_atlas::render(&p.vfs, &layout, &gpu, &formats)?;
+        crate::object_atlas::write(out, &pages)?;
+        rep.pages += pages.len();
+        rep.page_bytes += pages.iter().map(|pg| (pg.diffuse.len() + pg.normal.len()) as u64).sum::<u64>();
+        let first = pack.pages.len() as u16;
+        pack.pages.extend(layout.pages.iter().map(|pg| Page { width: pg.width, height: pg.height, mips: pg.width.max(pg.height).ilog2() + 1, alpha_threshold: 128, class, albedo: pg.name.to_ascii_lowercase(), normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase() }));
+        for e in layout.entries.into_iter().filter(|e| e.page != usize::MAX) {
+            entry.insert((class, e.texture.clone()), (first + e.page as u16, e));
+        }
+    }
     let mut mesh_of: HashMap<String, u32> = HashMap::new();
     for (key, model, parts) in loaded {
         let mut input = MeshInput { model: model.clone(), vertices: Vec::new(), triangles: Vec::new() };
-        for Part { part, key } in &parts {
-            let Some(e) = entry.get(key.as_str()) else {
+        for Part { part, key, class } in &parts {
+            let Some((page, e)) = entry.get(&(*class, key.clone())) else {
                 rep.dropped_parts += 1;
                 continue;
             };
-            let pg = &layout.pages[e.page];
+            let pg = &pack.pages[usize::from(*page)];
             let base = input.vertices.len() as u32;
             // Half-texel inset so bilinear filtering stays inside the tile.
             let map = |uv: f32, origin: u32, size: u32, page: u32| ((f64::from(origin) + 0.5 + f64::from(uv.clamp(0.0, 1.0)) * f64::from(size.saturating_sub(1))) / f64::from(page) * 65535.0).round().clamp(0.0, 65535.0) as u16;
@@ -253,7 +280,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                 });
             }
             for tri in &part.triangles {
-                input.triangles.push(([base + u32::from(tri[0]), base + u32::from(tri[1]), base + u32::from(tri[2])], e.page as u16));
+                input.triangles.push(([base + u32::from(tri[0]), base + u32::from(tri[1]), base + u32::from(tri[2])], *page));
             }
         }
         if !input.triangles.is_empty() {

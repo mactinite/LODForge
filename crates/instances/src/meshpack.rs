@@ -17,6 +17,13 @@ pub const SECTION_INDICES: u8 = 2;
 pub const SECTION_CLUSTERS: u8 = 3;
 /// `TMPK` value of a type without a pack mesh.
 pub const NO_MESH: u32 = u32::MAX;
+/// Page classes (`Page::class`, statics `MCLS`): the LOD material the runtime gives the page's
+/// proxy (shape name `obj`, `objSnow`, `objSnowHD`, `objAsh`, `objAshHD`).
+pub const CLASS_PLAIN: u8 = 0;
+pub const CLASS_SNOW: u8 = 1;
+pub const CLASS_SNOW_HD: u8 = 2;
+pub const CLASS_ASH: u8 = 3;
+pub const CLASS_ASH_HD: u8 = 4;
 
 /// One vertex as stored (28 bytes).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,6 +75,8 @@ pub struct Page {
     pub mips: u32,
     /// Alpha test threshold (0..255, `alpha >= threshold` is drawn).
     pub alpha_threshold: u8,
+    /// LOD material class of every cluster on the page (`CLASS_*`, since 1.5).
+    pub class: u8,
     pub albedo: String,
     pub normal: String,
 }
@@ -114,7 +123,7 @@ impl MeshPack {
             b.u32(p.height);
             b.u16(p.mips as u16);
             b.u8(p.alpha_threshold);
-            b.u8(0);
+            b.u8(p.class);
             b.str(&p.albedo);
             b.str(&p.normal);
         }
@@ -176,8 +185,8 @@ impl MeshPack {
             let mut r = Cur::new(&ch.data);
             for _ in 0..r.u32()? {
                 let (width, height, mips, alpha_threshold) = (r.u32()?, r.u32()?, u32::from(r.u16()?), r.u8()?);
-                let _ = r.u8()?;
-                pack.pages.push(Page { width, height, mips, alpha_threshold, albedo: r.str()?, normal: r.str()? });
+                let class = r.u8()?;
+                pack.pages.push(Page { width, height, mips, alpha_threshold, class, albedo: r.str()?, normal: r.str()? });
             }
         }
         if let Some(ch) = c.chunk(b"MPMS") {
@@ -317,8 +326,8 @@ mod tests {
     #[test]
     fn clusters_pad_and_round_trip() {
         let mut pack = MeshPack::default();
-        pack.pages.push(Page { width: 4096, height: 4096, mips: 13, alpha_threshold: 128, albedo: "a.dds".into(), normal: "a_n.dds".into() });
-        pack.pages.push(Page { width: 2048, height: 2048, mips: 12, alpha_threshold: 128, albedo: "b.dds".into(), normal: "b_n.dds".into() });
+        pack.pages.push(Page { width: 4096, height: 4096, mips: 13, alpha_threshold: 128, class: 0, albedo: "a.dds".into(), normal: "a_n.dds".into() });
+        pack.pages.push(Page { width: 2048, height: 2048, mips: 12, alpha_threshold: 128, class: 2, albedo: "b.dds".into(), normal: "b_n.dds".into() });
         // 100 triangles on page 0, 30 on page 1 -> clusters 64 + 36 + 30.
         let mut verts = Vec::new();
         let mut tris = Vec::new();

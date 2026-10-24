@@ -137,3 +137,87 @@ pub fn run(a: &Args) -> Result<()> {
     println!("runtime-trees finished in {:.1} s", t0.elapsed().as_secs_f64());
     Ok(())
 }
+
+/// `lodforge runtime-statics-plan`: from a fresh export only, how many LOD4 references and
+/// source triangles static instancing would take out of `.bto` per copy threshold, plain
+/// materials alone and with snow/ash (projection; no object LOD build).
+#[derive(clap::Args)]
+pub struct PlanArgs {
+    #[command(flatten)]
+    pub profile: ProfileArgs,
+    #[arg(long, default_value = "Tamriel")]
+    pub world: String,
+    #[arg(long, default_value = "High")]
+    pub preset: String,
+}
+
+pub fn plan(a: &PlanArgs) -> Result<()> {
+    let p = a.profile.open()?;
+    let dir = a.profile.instance.join("tools").join("DynDOLOD").join("Edit Scripts").join("DynDOLOD");
+    let mut c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
+    c.ultra = true;
+    let all = lodforge_esp::scan_worldspaces(&p.load_order)?;
+    let ws = all.iter().find(|w| w.editor_id.eq_ignore_ascii_case(&a.world)).context("worldspace not found")?;
+    let h = crate::dyndolod_build::header(&p, &c, ws, "", &a.profile.game_dir().join("Data"), "");
+    let we = crate::dyndolod_build::with_resolver(&p, &c, |r| -> Result<_> {
+        let copies = crate::child_copies::for_world(&p, &c, r, &all, ws, "Low");
+        crate::dyndolod_build::export_world(&p, &c, r, ws, &[], &h, &copies)
+    })?;
+    let lines = &we.seasons[0].lines;
+    let tris_cache = std::cell::RefCell::new(HashMap::<String, usize>::new());
+    let tris = |m: &str| -> usize {
+        if let Some(&t) = tris_cache.borrow().get(m) {
+            return t;
+        }
+        let t = p.vfs.read(m).ok().flatten().and_then(|b| lodforge_objlod::mesh::import(m, &b).ok()).map(|lm| lm.parts.iter().map(|p| p.triangles.len()).sum()).unwrap_or(0);
+        tris_cache.borrow_mut().insert(m.to_string(), t);
+        t
+    };
+    // LOD4 model of each non-tree, non-billboard, non-glow reference, with its material kind.
+    let mut refs: Vec<(String, bool)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for l in lines {
+        let Some(b) = c.bases.get(&l.base) else { continue };
+        if lodforge_dyndolod::assign::is_tree(b) || !seen.insert(l.ref_id) {
+            continue;
+        }
+        let m = l.columns[0].to_ascii_lowercase();
+        if m.is_empty() || m.ends_with(".dds") || m.contains("glow") {
+            continue;
+        }
+        let class = lodforge_objlod::material::MaterialClass::parse(l.material.trim_end_matches("-LargeRef"));
+        let snow = class.is_snow_or_ash();
+        if !snow && !matches!(class, lodforge_objlod::material::MaterialClass::Plain | lodforge_objlod::material::MaterialClass::PassThru) {
+            continue;
+        }
+        refs.push((m, snow));
+    }
+    let total: usize = refs.iter().map(|(m, _)| tris(m)).sum();
+    println!("{}: {} non-tree LOD4 references with plain or snow/ash material, {:.2} M source triangles", a.world, refs.len(), total as f64 / 1e6);
+    for snow_too in [false, true] {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for (m, s) in &refs {
+            if snow_too || !s {
+                *counts.entry(m.as_str()).or_default() += 1;
+            }
+        }
+        let mut line = format!("  {}:", if snow_too { "plain + snow/ash" } else { "plain only" });
+        for nmin in [1usize, 2, 4, 8, 16, 32] {
+            let (mut r, mut t, mut sr, mut st) = (0usize, 0usize, 0usize, 0usize);
+            for (m, s) in &refs {
+                if (snow_too || !s) && counts.get(m.as_str()).copied().unwrap_or(0) >= nmin {
+                    let x = tris(m);
+                    r += 1;
+                    t += x;
+                    if *s {
+                        sr += 1;
+                        st += x;
+                    }
+                }
+            }
+            line.push_str(&format!(" N>={nmin}: {r} refs {:.2}M tris (snow {sr} refs {:.2}M);", t as f64 / 1e6, st as f64 / 1e6));
+        }
+        println!("{line}");
+    }
+    Ok(())
+}

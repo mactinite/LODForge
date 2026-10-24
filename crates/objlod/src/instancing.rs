@@ -36,6 +36,9 @@ pub struct Instancing {
     pub large_refs: bool,
     /// References with AltTextures entries may be instanced (their textures go on the instance).
     pub alt_textures: bool,
+    /// With `plain_only`: snow and ash references may be instanced too (their parts carry a
+    /// snow/ash class, see [`Instance::part_classes`]).
+    pub snow: bool,
 }
 
 /// One instanced placement.
@@ -57,7 +60,16 @@ pub struct Instance {
     /// Per part of the model: the (diffuse, normal) the AltTextures side file gives this
     /// reference, `None` for none (the model's own textures).
     pub alt_textures: Option<Vec<(String, String)>>,
+    /// Per part: the LOD material class the `.bto` would give it ([`PART_PLAIN`], [`PART_SNOW`],
+    /// [`PART_SNOW_HD`], [`PART_ASH`], [`PART_ASH_HD`]); empty = all plain.
+    pub part_classes: Vec<u8>,
 }
+
+pub const PART_PLAIN: u8 = 0;
+pub const PART_SNOW: u8 = 1;
+pub const PART_SNOW_HD: u8 = 2;
+pub const PART_ASH: u8 = 3;
+pub const PART_ASH_HD: u8 = 4;
 
 /// What [`Instancing::plan`] decided for one reference of a quad.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +86,10 @@ impl Instancing {
 
     /// Whether model `m` of `r` may be instanced at all (side-file overrides aside).
     pub fn eligible(&self, r: &StaticRef, m: &str) -> bool {
-        let plain = || matches!(crate::material::MaterialClass::parse(r.material()), crate::material::MaterialClass::Plain | crate::material::MaterialClass::PassThru);
+        let plain = || {
+            let c = crate::material::MaterialClass::parse(r.material());
+            matches!(c, crate::material::MaterialClass::Plain | crate::material::MaterialClass::PassThru) || (self.snow && c.is_snow_or_ash())
+        };
         !m.ends_with(".dds") && (self.large_refs || !r.is_large_ref()) && !m.contains("glow") && self.model_matches(m) && (!self.plain_only || plain())
     }
 

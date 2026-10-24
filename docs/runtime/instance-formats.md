@@ -1,6 +1,6 @@
-# LODForge Runtime instance formats (v1.4)
+# LODForge Runtime instance formats (v1.5)
 
-Status: **v1.4, 2026-10-24** (1.0-1.3 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
+Status: **v1.5, 2026-10-24** (1.0-1.4 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
 Runtime SKSE plugin. This document is the contract between the two; when the code and this
 document disagree, the document wins and the code is a bug. Changes follow the versioning rules in
 section 2.
@@ -69,7 +69,7 @@ round-trip tests and the test vectors in section 8 pin the byte layout.
 |---|---|---|---|
 | 0 | u8[4] | magic | `LFTR`, `LFST`, `LFGR` or `LFMP` (ASCII) |
 | 4 | u16 | major | 1 |
-| 6 | u16 | minor | 4 |
+| 6 | u16 | minor | 5 |
 | 8 | u32 | header_size | 64 |
 | 12 | u32 | flags | bit 0: at least one section is zstd-compressed. Other bits 0. |
 | 16 | u32 | record_size | 24 (trees), 32 (statics), 10 (grass) |
@@ -184,6 +184,10 @@ count), then per entry `u16 n` and `n` x (`str diffuse`, `str normal`): the text
 parts in order, from the reference's AltTextures entries (the model's own textures for parts
 without one); `n = 0`: the model's own textures throughout.
 
+**`MCLS`** (statics, since 1.5, present when some entry has snow/ash parts): `u32 count` (=
+`MESH` count), then per entry `u16 n` and `n` x `u8`: the LOD material class of each part (0
+plain, 1 snow, 2 snowHD, 3 ash, 4 ashHD); `n = 0`: all plain.
+
 **`SMPK`** (statics, since 1.4): `u32 count` (= `MESH` count), then per entry a `u32`: its mesh in
 `StaticMeshes.bin` (section 7a), `0xFFFFFFFF` for none. Entries that differ only by the large
 reference flag share a pack mesh.
@@ -293,8 +297,9 @@ split), so the instances swap together with the merged shapes of the same block.
 - Any other model placed at least `min_copies` times **in the worldspace** at that LOD level
   (since 1.4; default 8 in runtime mode; counted per worldspace and level, not per block), when its
   path contains one of `model_masks` (default: every model) and the reference is eligible:
-  - material plain or passthru (no snow/ash LOD shader, no material object): the runtime draws
-    the pack with one lighting material;
+  - material plain, passthru, or (since 1.5, default on) snow/ash; no material object. Each part
+    gets a LOD material class (`MCLS`: plain, snow, snowHD, ash, ashHD; HD by the same rule as
+    the `.bto` shape names) and lands on pages of that class (`MPPG.class`);
   - not a glow-window model, not a billboard;
   - no vertex-colour override for that reference in the VC side file.
   Large references are eligible (their `MESH` entry has flag bit 3; the runtime hides such an
@@ -403,9 +408,14 @@ entry's `level` names the stream:
 | 3 | clusters | 40 bytes | cluster count |
 
 **`MPPG`** (pages): `u32 count`, then per page: `u32 width`, `u32 height`, `u16 mips`,
-`u8 alpha_threshold` (128: draw where `albedo.a >= 128/255`), `u8` reserved, `str albedo`,
+`u8 alpha_threshold` (128: draw where `albedo.a >= 128/255`), `u8 class` (since 1.5; the LOD
+material of every cluster on the page: 0 plain `obj`, 1 snow `objSnow` (SnowLODMaterial
+00050372), 2 snowHD `objSnowHD` (0006AE38), 3 ash `objAsh`, 4 ashHD `objAshHD`; the runtime names
+the page's proxy shape accordingly or sets that material. Vertex alpha carries the snow amount,
+as in `.bto`; 0 before 1.5), `str albedo`,
 `str normal` (Data-relative DDS, BC7 with full mips; pages are `textures\lodforge\treeatlas\
-treeatlas_alpha[NN].dds` and `..._n.dds`). Albedo RGB is the source diffuse (sRGB), A its alpha
+treeatlas_alpha[NN].dds` and `..._n.dds`). Static pages: `staticatlas[_snow|_snowhd|_ash|_ashhd]_alpha[NN].dds`, one page family
+per class. Shapes without an alpha test get tiles with alpha 255 (their alpha is not coverage). Albedo RGB is the source diffuse (sRGB), A its alpha
 remapped so that the shape's own alpha-test threshold lands on 128 (shapes with another
 threshold get their own tile), with coverage-preserving mips and the average colour under the
 cut-out (the object LOD page renderer). Normal pages hold the source normal maps
@@ -478,6 +488,8 @@ kinds, raw and zstd.
 
 ## History
 
+- **1.5** (2026-10-24): snow/ash references in the static pack: `MCLS` per-part classes, page
+  class in `MPPG` (former reserved byte); opaque shapes get alpha-255 tiles. Additive.
 - **1.4** (2026-10-24): static mesh pack `StaticMeshes.bin`; statics files instance repeated object
   LOD models per worldspace (`min_copies`, default 8), large references and AltTextures variants
   included; new `MESH` flag bit 3, `MTEX` and `SMPK` chunks. Additive.

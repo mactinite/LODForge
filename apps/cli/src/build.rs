@@ -684,7 +684,7 @@ pub fn run(a: &Args) -> Result<()> {
                 l.wait_meshes(world);
             }
             if let Some(names) = &form_names {
-                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, min_copies: a.rt.runtime_min_copies, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
             if a.rt.on() && !a.rt.runtime_no_grass {

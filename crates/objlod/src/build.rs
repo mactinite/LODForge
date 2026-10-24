@@ -334,7 +334,30 @@ impl<'a> ObjectLod<'a> {
                                 (t.first().cloned().unwrap_or_default(), t.get(1).cloned().unwrap_or_default())
                             }).collect()
                         });
-                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures });
+                        // Per part: the LOD material class the merged shape would get (snow/ash,
+                        // HD by the same rule as the shape names).
+                        let class = MaterialClass::parse(r.material());
+                        let part_classes: Vec<u8> = if class.is_snow_or_ash() {
+                            let passthru = is_passthru_model(&model_l, &self.opts.passthru_masks);
+                            let model_hd = self.opts.hd.mesh_masks.iter().any(|m| model_l.contains(m.as_str()));
+                            let ctx = Context { class: class.clone(), large_ref: r.is_large_ref(), level: q.level, passthru, hd: &self.opts.hd, model_hd };
+                            mesh.parts
+                                .iter()
+                                .zip(&alt)
+                                .map(|(p, a)| {
+                                    let hd = crate::material::is_hd(&ctx, a.unwrap_or(&p.textures[..]));
+                                    match (class == MaterialClass::Snow, hd) {
+                                        (true, false) => crate::instancing::PART_SNOW,
+                                        (true, true) => crate::instancing::PART_SNOW_HD,
+                                        (false, false) => crate::instancing::PART_ASH,
+                                        (false, true) => crate::instancing::PART_ASH_HD,
+                                    }
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures, part_classes });
                         placed += 1;
                     } else {
                         missing += 1;

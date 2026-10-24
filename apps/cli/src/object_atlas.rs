@@ -488,6 +488,11 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                     let Some(mut rgba) = load_tile(vfs, d, e.width, e.height, MipKind::Color) else {
                         return (None, chain(&flat(), MipKind::Normal), None);
                     };
+                    // `=o` (mesh packs): the shape has no alpha test; its alpha (often specular or
+                    // a mask) must not cut holes on an alpha-tested page.
+                    if e.texture.split_once('=').is_some_and(|(_, o)| o == "o") {
+                        rgba.chunks_exact_mut(4).for_each(|px| px[3] = 255);
+                    }
                     // `=tNNN` (tree mesh pack): the shape alpha-tests at NNN; remap alpha so that
                     // NNN lands on the page's 128 (piecewise linear, 0 and 255 kept).
                     if let Some(t) = e.texture.split_once("=t").and_then(|(_, t)| t.parse::<u8>().ok()).filter(|&t| t != 128 && t > 0 && t < 255) {

@@ -210,6 +210,8 @@ enum Command {
     TreePackPreview(tree_pack_preview::Args),
     /// Rebuilds only StaticMeshes.bin from the statics files of an output.
     RuntimeStaticsPack(tree_pack::StaticsArgs),
+    /// Projects what static instancing would take out of .bto per copy threshold (export only).
+    RuntimeStaticsPlan(runtime_trees::PlanArgs),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
     TreeModels(tree_models::Args),
     /// LOD models generated from full models where DynDOLOD's rules want LOD and none is installed.
@@ -285,6 +287,7 @@ fn main() -> Result<()> {
         Command::RuntimeStripStatics(a) => strip_statics::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
+        Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),
         Command::PluginDump(a) => plugin_dump::run(&a),

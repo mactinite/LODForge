@@ -24,6 +24,8 @@ pub struct Mesh {
     /// `MTEX`: per part of the model, the (diffuse, normal) this entry draws it with (AltTextures
     /// variants); empty = the model's own textures.
     pub textures: Vec<(String, String)>,
+    /// `MCLS`: per part, the LOD material class (`meshpack::CLASS_*`); empty = all plain.
+    pub classes: Vec<u8>,
 }
 
 /// `MESH.flags`: the entry's instances are large references (hidden while their 3D is loaded).
@@ -147,6 +149,15 @@ impl StaticsFile {
             }
             chunks.push(Chunk { tag: *b"MTEX", data: b.0 });
         }
+        if self.meshes.iter().any(|m| !m.classes.is_empty()) {
+            let mut b = Buf::default();
+            b.u32(self.meshes.len() as u32);
+            for m in &self.meshes {
+                b.u16(m.classes.len() as u16);
+                b.0.extend(&m.classes);
+            }
+            chunks.push(Chunk { tag: *b"MCLS", data: b.0 });
+        }
         if !self.pack_meshes.is_empty() {
             let mut b = Buf::default();
             b.u32(self.pack_meshes.len() as u32);
@@ -184,7 +195,7 @@ impl StaticsFile {
                 for v in &mut bounds {
                     *v = r.f32()?;
                 }
-                let m = Mesh { bounds, flags: r.u32()?, triangles: r.u32()?, model: r.str()?, textures: Vec::new() };
+                let m = Mesh { bounds, flags: r.u32()?, triangles: r.u32()?, model: r.str()?, textures: Vec::new(), classes: Vec::new() };
                 f.mesh_index.insert(format!("{}#{}", m.model, f.meshes.len()), f.meshes.len() as u16);
                 f.meshes.push(m);
             }
@@ -197,6 +208,17 @@ impl StaticsFile {
                 let t = (0..k).map(|_| Ok((r.str()?, r.str()?))).collect::<Result<Vec<_>>>()?;
                 if let Some(m) = f.meshes.get_mut(i) {
                     m.textures = t;
+                }
+            }
+        }
+        if let Some(ch) = c.chunk(b"MCLS") {
+            let mut r = Cur::new(&ch.data);
+            let n = r.u32()? as usize;
+            for i in 0..n {
+                let k = usize::from(r.u16()?);
+                let v = r.take(k)?.to_vec();
+                if let Some(m) = f.meshes.get_mut(i) {
+                    m.classes = v;
                 }
             }
         }

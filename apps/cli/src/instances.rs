@@ -52,6 +52,10 @@ pub struct Opts {
     /// tree records are the only placements).
     #[arg(long)]
     pub runtime_tree_statics: bool,
+    /// Runtime: keep snow/ash LOD shapes merged in `.bto` (by default they are instanced too, on
+    /// snow/ash pages of the static pack).
+    #[arg(long)]
+    pub runtime_no_static_snow: bool,
     /// Runtime: zstd level for the instance file sections (0 = uncompressed).
     #[arg(long, default_value_t = 0)]
     pub runtime_zstd: i32,
@@ -255,6 +259,8 @@ pub struct RuntimeObjects {
     /// Season code (`""`, `SPR`, ...) -> export column 1 of the runtime trees.
     pub refs: HashMap<String, Arc<HashSet<String>>>,
     pub tree_models: bool,
+    /// Instance snow/ash references too.
+    pub snow: bool,
     pub min_copies: usize,
     pub model_masks: Vec<String>,
     pub names: Arc<FormNames>,
@@ -280,6 +286,7 @@ impl RuntimeObjects {
             plain_only: true,
             large_refs: true,
             alt_textures: true,
+            snow: self.snow,
         }
     }
 }
@@ -292,11 +299,12 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
         for i in *list {
             // One MESH entry per (model, large reference, AltTextures set).
             let textures = i.alt_textures.clone().unwrap_or_default();
-            let key = format!("{}|{}|{}", i.model, u8::from(i.large_ref), textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"));
+            let key = format!("{}|{}|{}|{:?}", i.model, u8::from(i.large_ref), textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), i.part_classes);
             let m = f.mesh_variant(&key, || {
                 let mut e = mesh_entry(&i.model, mesh(&i.model).as_deref(), i.runtime_ref);
                 e.model = i.model.clone();
                 e.textures = textures.iter().map(|(d, n)| (d.to_ascii_lowercase(), n.to_ascii_lowercase())).collect();
+                e.classes = i.part_classes.clone();
                 if i.large_ref {
                     e.flags |= lodforge_instances::statics::MESH_LARGE_REF;
                 }
@@ -319,7 +327,7 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
 }
 
 fn mesh_entry(model: &str, m: Option<&lodforge_objlod::mesh::LodMesh>, tree: bool) -> Mesh {
-    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new(), textures: Vec::new() };
+    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new(), textures: Vec::new(), classes: Vec::new() };
     if tree {
         e.flags |= MESH_TREE;
     }
