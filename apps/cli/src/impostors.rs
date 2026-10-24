@@ -164,7 +164,7 @@ pub fn run(a: &Args) -> Result<()> {
     }
     let worlds = if a.worlds.is_empty() { vec!["Tamriel".to_string()] } else { a.worlds.clone() };
     for w in &worlds {
-        let r = bake_world(&p, &gpu, &renderer, &dyndolod, &a.out, w, &a.seasons, a.filter.as_deref(), a.preview_instances, &a.opts)?;
+        let r = bake_world(&p, &gpu, &renderer, &dyndolod, &a.out, w, &a.seasons, a.filter.as_deref(), a.preview_instances, &a.opts, &std::collections::HashSet::new())?;
         finish(a, w, &r)?;
     }
     println!("impostors done in {:.1} s", t.elapsed().as_secs_f32());
@@ -245,12 +245,12 @@ pub fn skip_ref(r: &lodforge_esp::world::Placement) -> bool {
 /// Bakes the tree types of worldspace `world` (TexGen's accepted billboard candidates its
 /// references use, plus their season swaps) into its set.
 #[allow(clippy::too_many_arguments)]
-pub fn bake_world(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, dyndolod: &Path, out: &Path, world: &str, seasons: &[String], filter: Option<&str>, preview: bool, opts: &Opts) -> Result<SetReport> {
+pub fn bake_world(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, dyndolod: &Path, out: &Path, world: &str, seasons: &[String], filter: Option<&str>, preview: bool, opts: &Opts, extra: &std::collections::HashSet<u32>) -> Result<SetReport> {
     let lo = &p.load_order;
     let t = Instant::now();
     let bases = lodforge_dyndolod::bases::read_bases(lo)?;
     let cands = crate::texgen_billboards::discover_trees(p, &bases, dyndolod);
-    let accepted: HashMap<u32, &Candidate> = cands.iter().filter(|c| c.accepted).map(|c| (c.base, c)).collect();
+    let accepted: HashMap<u32, &Candidate> = cands.iter().filter(|c| c.accepted || extra.contains(&c.base)).map(|c| (c.base, c)).collect();
     let worlds = lodforge_esp::scan_worldspaces(lo)?;
     let Some(ws) = worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(world)) else { bail!("worldspace {world} not found") };
     // Season swaps of tree bases.
@@ -282,6 +282,13 @@ pub fn bake_world(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, dyn
     let mut ref_counts: HashMap<String, usize> = HashMap::new();
     let mut base_type: HashMap<u32, String> = HashMap::new();
     let flt = filter.map(str::to_ascii_lowercase);
+    // The runtime's tree bases get a type even when no reference reaches them through the swaps
+    // read here (the export's season swaps decide).
+    for &b in extra {
+        if accepted.contains_key(&b) {
+            refs.entry(b).or_insert((0, 1.0));
+        }
+    }
     let mut ids: Vec<u32> = refs.keys().copied().collect();
     ids.sort_unstable();
     for id in ids {
@@ -522,10 +529,10 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
 }
 
 /// `build --impostors`: the worldspace's set into the build output.
-pub fn build_stage(p: &Profile, dyndolod: &Path, out: &Path, world: &str, seasons: &[String], opts: &Opts) -> Result<SetReport> {
+pub fn build_stage(p: &Profile, dyndolod: &Path, out: &Path, world: &str, seasons: &[String], opts: &Opts, extra: &std::collections::HashSet<u32>) -> Result<SetReport> {
     let gpu = lodforge_gpu::Gpu::new()?;
     let renderer = Renderer::new(&gpu);
-    let r = bake_world(p, &gpu, &renderer, dyndolod, out, world, seasons, None, false, opts)?;
+    let r = bake_world(p, &gpu, &renderer, dyndolod, out, world, seasons, None, false, opts, extra)?;
     std::fs::write(report_path(out, world), report_csv(&r))?;
     print_summary(world, &r);
     Ok(r)

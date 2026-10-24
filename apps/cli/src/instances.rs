@@ -125,6 +125,8 @@ pub struct SeasonTrees {
     /// Load-order form ids of the references in `file`.
     pub refs: HashSet<u32>,
     pub kept: Kept,
+    /// EditorIDs of bases without an impostor type and their reference counts.
+    pub no_impostor: HashMap<String, usize>,
 }
 
 impl SeasonTrees {
@@ -134,8 +136,52 @@ impl SeasonTrees {
     }
 }
 
-/// Selects the trees of one season export the runtime draws (instance-formats.md section 5).
-/// `world` includes child worldspace copies, as the export saw it.
+/// A tree reference of the export the runtime can draw (instance-formats.md section 5, without
+/// the impostor condition): its base and placement. Counts the reasons for leaving one out.
+fn eligible<'a>(c: &'a Config, world: &'a Worldspace, l: &RefLine, bounds: &[(i32, i32, i32, i32)], tilt: f64, kept: &mut Kept) -> Option<(&'a lodforge_dyndolod::bases::Base, &'a lodforge_esp::world::Placement)> {
+    let b = c.bases.get(&l.base)?;
+    if !is_tree(b) || !l.columns.iter().any(|c| !c.is_empty()) {
+        return None;
+    }
+    if lodforge_dyndolod::childworld::is_copy(l.ref_id) {
+        kept.copies += 1;
+        return None;
+    }
+    if l.material.ends_with("-LargeRef") {
+        kept.large += 1;
+        return None;
+    }
+    let pl = world.refs.get(&l.ref_id)?;
+    if tree_tilted(pl.rotation, tilt) {
+        kept.tilted += 1;
+        return None;
+    }
+    let cell = ((pl.position[0] / 4096.0).floor() as i32, (pl.position[1] / 4096.0).floor() as i32);
+    if bounds.iter().any(|&(x0, y0, x1, y1)| (x0..=x1).contains(&cell.0) && (y0..=y1).contains(&cell.1)) {
+        kept.bounds += 1;
+        return None;
+    }
+    Some((b, pl))
+}
+
+/// Bases of every tree the runtime would draw in these season exports, whether or not an
+/// impostor exists yet: the impostor stage bakes them all.
+pub fn runtime_bases(c: &Config, world: &Worldspace, seasons: &[SeasonExport]) -> HashSet<u32> {
+    let bounds = crate::dyndolod_build::tree_object_bounds(c, &world.editor_id);
+    let tilt: f64 = c.num("TreeLODMaxTilt", 30.0);
+    let mut kept = Kept::default();
+    let mut out = HashSet::new();
+    for s in seasons {
+        for l in &s.lines {
+            if eligible(c, world, l, &bounds, tilt, &mut kept).is_some() {
+                out.insert(l.base);
+            }
+        }
+    }
+    out
+}
+
+/// Selects the trees of one season export the runtime draws, typed by the impostor set.
 pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &FormNames, impostors: &crate::impostors::SetReport) -> SeasonTrees {
     let bounds = crate::dyndolod_build::tree_object_bounds(c, &world.editor_id);
     let tilt: f64 = c.num("TreeLODMaxTilt", 30.0);
@@ -143,31 +189,14 @@ pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &Fo
     let mut file = TreeFile { common: Common { world: world.editor_id.clone(), season, generator: generator(), plugins: Vec::new(), params: format!("tree_max_tilt={tilt}") }, ..Default::default() };
     file.types = impostors.types.iter().map(|t| TreeType { name: t.name.clone(), model: t.model.clone(), model_crc32: t.model_crc32, ..Default::default() }).collect();
     let mut seen_base: HashSet<u32> = HashSet::new();
+    let mut no_impostor: HashMap<String, usize> = HashMap::new();
     let mut refs = HashSet::new();
     let mut kept = Kept::default();
     for l in &s.lines {
-        let Some(b) = c.bases.get(&l.base) else { continue };
-        if !is_tree(b) || refs.contains(&l.ref_id) || !l.columns.iter().any(|c| !c.is_empty()) {
+        if refs.contains(&l.ref_id) {
             continue;
         }
-        if lodforge_dyndolod::childworld::is_copy(l.ref_id) {
-            kept.copies += 1;
-            continue;
-        }
-        if l.material.ends_with("-LargeRef") {
-            kept.large += 1;
-            continue;
-        }
-        let Some(pl) = world.refs.get(&l.ref_id) else { continue };
-        if tree_tilted(pl.rotation, tilt) {
-            kept.tilted += 1;
-            continue;
-        }
-        let cell = ((pl.position[0] / 4096.0).floor() as i32, (pl.position[1] / 4096.0).floor() as i32);
-        if bounds.iter().any(|&(x0, y0, x1, y1)| (x0..=x1).contains(&cell.0) && (y0..=y1).contains(&cell.1)) {
-            kept.bounds += 1;
-            continue;
-        }
+        let Some((b, pl)) = eligible(c, world, l, &bounds, tilt, &mut kept) else { continue };
         let Some((plugin, local)) = names.split(l.ref_id) else {
             kept.no_plugin += 1;
             continue;
@@ -176,6 +205,7 @@ pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &Fo
         // baked impostor stay in object LOD.
         let Some(&ti) = impostors.base_index.get(&l.base) else {
             kept.no_impostor += 1;
+            *no_impostor.entry(b.editor_id.clone()).or_default() += 1;
             continue;
         };
         let ty = ti as u16;
@@ -195,7 +225,7 @@ pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &Fo
         }
     }
     file.finish();
-    SeasonTrees { file, refs, kept }
+    SeasonTrees { file, refs, kept, no_impostor }
 }
 
 /// Writes one trees file; returns its path and size.
@@ -375,4 +405,13 @@ pub fn bto_stats(a: &StatsArgs) -> Result<()> {
         println!("  LOD{l:<2}: {n:>5} files, {:>8.1} MB, {s:>7} shapes, {t:>10} triangles, {:.1} shapes/file", *b as f64 / 1e6, *s as f64 / (*n).max(1) as f64);
     }
     Ok(())
+}
+
+impl SeasonTrees {
+    /// The most referenced bases without an impostor type, `EditorID xN` comma separated.
+    pub fn top_no_impostor(&self, n: usize) -> String {
+        let mut v: Vec<(&String, &usize)> = self.no_impostor.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        v.into_iter().take(n).map(|(e, c)| format!("{e} x{c}")).collect::<Vec<_>>().join(", ")
+    }
 }

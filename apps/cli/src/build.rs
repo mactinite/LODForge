@@ -431,14 +431,11 @@ pub fn run(a: &Args) -> Result<()> {
                 }
             }
         };
-        // Impostors first: in runtime mode the trees files name the impostor set's type indices.
-        let mut impostor_set: Option<crate::impostors::SetReport> = None;
-        if a.impostors || a.rt.on() {
-            let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
-            step("impostors", None, &mut || {
-                impostor_set = Some(crate::impostors::build_stage(&p, &dyndolod, &out, world, &a.seasons, &a.impostor_opts)?);
-                Ok(())
-            });
+        // Impostors without the runtime files: TexGen's tree candidates. (Runtime mode bakes them
+        // after the export, for every tree the runtime draws; see `runtime-trees` below.)
+        let impostor_dir = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
+        if a.impostors && !a.rt.on() {
+            step("impostors", None, &mut || crate::impostors::build_stage(&p, &impostor_dir, &out, world, &a.seasons, &a.impostor_opts, &std::collections::HashSet::new()).map(|_| ()));
         }
         if !a.no_objects && dyn_mode {
             let Some(c) = &dyn_cfg else { continue };
@@ -454,6 +451,8 @@ pub fn run(a: &Args) -> Result<()> {
             let mut world_mini = mini_rows.clone();
             let mut mini_written: Vec<String> = Vec::new();
             let mut rt_refs: std::collections::HashMap<String, std::sync::Arc<std::collections::HashSet<String>>> = std::collections::HashMap::new();
+            let mut rt_bases: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            let mut rt_rows: Vec<crate::tree_report::Row> = Vec::new();
             step("dyndolod-export", None, &mut || {
                 // LODGen's input files are all written below; nothing of an earlier run stays.
                 if export_dir.is_dir() {
@@ -467,28 +466,18 @@ pub fn run(a: &Args) -> Result<()> {
                     let we = crate::dyndolod_build::export_world(&p, c, r, ws, &seasons, &h, &copies)?;
                     // What every tree got (docs: tree_report.rs), from the default season.
                     let with = lodforge_dyndolod::childworld::with_copies(ws, &copies);
-                    // Runtime mode: the trees the LODForge Runtime draws, per season.
-                    let mut runtime_counts = std::collections::HashMap::new();
-                    if let Some(names) = &form_names {
-                        let empty = crate::impostors::SetReport::default();
-                        let set = impostor_set.as_ref().unwrap_or(&empty);
-                        for (k, s) in we.seasons.iter().enumerate() {
-                            let t = crate::instances::select_trees(c, &with, s, names, set);
-                            let (path, size) = crate::instances::write_trees(&out, &t, a.rt.write_options())?;
-                            if !a.json {
-                                println!("  runtime trees: {} references, {} types in {} cells; {} ({:.2} MB); kept in object LOD: {} tilted, {} large, {} child copies, {} in child-world bounds, {} without a plugin, {} without an impostor", t.file.records(), t.file.types.len(), t.file.cells.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6, t.kept.tilted, t.kept.large, t.kept.copies, t.kept.bounds, t.kept.no_plugin, t.kept.no_impostor);
-                            }
-                            if k == 0 {
-                                runtime_counts = crate::instances::count_by_base(&s.lines, &t.refs);
-                            }
-                            rt_refs.insert(t.file.common.season.clone(), std::sync::Arc::new(t.ref_columns()));
-                        }
+                    // Runtime mode: every tree base the runtime will draw, for the impostor stage.
+                    if a.rt.on() {
+                        rt_bases = crate::instances::runtime_bases(c, &with, &we.seasons);
                     }
                     let s = &we.seasons[0];
-                    let rows = crate::tree_report::rows(&p, c, r, &with, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "DynDOLOD Resources SE 3", &runtime_counts);
+                    let rows = crate::tree_report::rows(&p, c, r, &with, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "DynDOLOD Resources SE 3", &std::collections::HashMap::new());
                     Ok((we, rows))
                 })?;
-                if !tree_rows.is_empty() {
+                if a.rt.on() {
+                    // Written by `runtime-trees` with the runtime column.
+                    rt_rows = tree_rows;
+                } else if !tree_rows.is_empty() {
                     std::fs::write(out.join(format!("LODForge_TreeReport_{world}.csv")), crate::tree_report::csv(&tree_rows))?;
                     if !a.json {
                         print!("{}", crate::tree_report::summary(world, &tree_rows));
@@ -540,6 +529,47 @@ pub fn run(a: &Args) -> Result<()> {
                 pending = Some(we);
                 Ok(())
             });
+            // Runtime mode: impostors for every tree the runtime draws, then the trees files typed
+            // by the impostor set (docs/runtime/instance-formats.md section 5).
+            if let Some(names) = &form_names
+                && pending.is_some()
+            {
+                let mut set: Option<crate::impostors::SetReport> = None;
+                step("impostors", None, &mut || {
+                    set = Some(crate::impostors::build_stage(&p, &impostor_dir, &out, world, &a.seasons, &a.impostor_opts, &rt_bases)?);
+                    Ok(())
+                });
+                step("runtime-trees", None, &mut || {
+                    let Some(we) = pending.as_ref() else { return Ok(()) };
+                    let empty = crate::impostors::SetReport::default();
+                    let set = set.as_ref().unwrap_or(&empty);
+                    let mut runtime_counts = std::collections::HashMap::new();
+                    for (k, s) in we.seasons.iter().enumerate() {
+                        let t = crate::instances::select_trees(c, ws, s, names, set);
+                        let (path, size) = crate::instances::write_trees(&out, &t, a.rt.write_options())?;
+                        if !a.json {
+                            println!("  runtime trees: {} references, {} types in {} cells; {} ({:.2} MB); kept in object LOD: {} tilted, {} large, {} child copies, {} in child-world bounds, {} without a plugin, {} without an impostor", t.file.records(), t.file.types.len(), t.file.cells.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6, t.kept.tilted, t.kept.large, t.kept.copies, t.kept.bounds, t.kept.no_plugin, t.kept.no_impostor);
+                            if t.kept.no_impostor > 0 {
+                                println!("    without an impostor: {}", t.top_no_impostor(6));
+                            }
+                        }
+                        if k == 0 {
+                            runtime_counts = crate::instances::count_by_base(&s.lines, &t.refs);
+                        }
+                        rt_refs.insert(t.file.common.season.clone(), std::sync::Arc::new(t.ref_columns()));
+                    }
+                    for r in &mut rt_rows {
+                        r.runtime_refs = runtime_counts.get(&r.base).copied().unwrap_or(0);
+                    }
+                    if !rt_rows.is_empty() {
+                        std::fs::write(out.join(format!("LODForge_TreeReport_{world}.csv")), crate::tree_report::csv(&rt_rows))?;
+                        if !a.json {
+                            print!("{}", crate::tree_report::summary(world, &rt_rows));
+                        }
+                    }
+                    Ok(())
+                });
+            }
             if !mini_written.is_empty() {
                 p.vfs.add_loose_files(&out, mini_written.iter().map(String::as_str));
             }

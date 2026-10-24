@@ -87,6 +87,8 @@ pub struct Row {
     pub note: String,
     /// Big enough for a generated 3D model ([generator_candidate]).
     pub candidate: bool,
+    /// Load-order form id of the base.
+    pub base: u32,
     /// References drawn by the LODForge Runtime (`build --runtime lodforge`; out of `.bto`).
     pub runtime_refs: usize,
 }
@@ -151,7 +153,7 @@ pub fn rows(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>, wo
         let owner = c.owners.get(&lodforge_dyndolod::bases::owner_key(base)).and_then(|&i| p.plugin_names.get(i)).cloned().unwrap_or_default();
         let local = if base >> 24 == 0xFE { base & 0xFFF } else { base & 0x00FF_FFFF };
         let candidate = generator_candidate(&model, b.bounds);
-        out.push(Row { plugin: owner, form_id: local, editor_id: b.editor_id.clone(), model: full, crc, refs, kinds, lod4, source, note, candidate, runtime_refs: runtime.get(&base).copied().unwrap_or(0) });
+        out.push(Row { base, plugin: owner, form_id: local, editor_id: b.editor_id.clone(), model: full, crc, refs, kinds, lod4, source, note, candidate, runtime_refs: runtime.get(&base).copied().unwrap_or(0) });
     }
     out.sort_by(|a, b| b.refs.cmp(&a.refs).then_with(|| a.editor_id.cmp(&b.editor_id)));
     out
