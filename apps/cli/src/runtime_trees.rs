@@ -132,7 +132,7 @@ pub fn run(a: &Args) -> Result<()> {
     }
     if !a.no_pack {
         let rep = crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings { tile_cap: a.tree_atlas_tile, ..Default::default() }, write)?;
-        println!("{}", rep.summary());
+        println!("tree {}", rep.summary());
     }
     println!("runtime-trees finished in {:.1} s", t0.elapsed().as_secs_f64());
     Ok(())

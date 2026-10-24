@@ -60,7 +60,7 @@ fn rejects_other_major_and_kind() {
     let mut bytes = trees().to_bytes(WriteOptions::default()).unwrap();
     assert!(StaticsFile::from_bytes(&bytes).is_err());
     bytes[4] = 2;
-    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 3))));
+    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 4))));
 }
 
 #[test]
@@ -74,17 +74,22 @@ fn corrupt_crc_is_detected() {
 #[test]
 fn statics_round_trip() {
     let mut f = StaticsFile::new(common("Tamriel", "WIN"));
-    let pine = f.mesh(r"meshes\dyndolod\lod\trees\treepineforest01passthru_lod.nif", || Mesh { bounds: [-1.0, -2.0, 0.0, 1.0, 2.0, 30.0], flags: crate::statics::MESH_TREE | crate::statics::MESH_PASSTHRU, triangles: 120, model: String::new() });
+    let pine = f.mesh(r"meshes\dyndolod\lod\trees\treepineforest01passthru_lod.nif", || Mesh { bounds: [-1.0, -2.0, 0.0, 1.0, 2.0, 30.0], flags: crate::statics::MESH_TREE | crate::statics::MESH_PASSTHRU, triangles: 120, model: String::new(), textures: Vec::new() });
     let rock = f.mesh(r"meshes\lod\rocks\rock01_lod.nif", Mesh::default);
+    let snowy = f.mesh_variant("rock-variant", || Mesh { model: r"meshes\lod\rocks\rock01_lod.nif".into(), flags: crate::statics::MESH_LARGE_REF, textures: vec![(r"textures\a.dds".into(), String::new())], ..Default::default() });
+    assert_ne!(snowy, rock);
+    assert_eq!(f.mesh_variant("rock-variant", Mesh::default), snowy);
     assert_eq!(f.mesh(r"MESHES\lod\rocks\rock01_lod.nif", Mesh::default), rock);
     for i in 0..20u32 {
         f.add(4, (-4, 8), [i as f32 * 100.0, 5.0, -3.0], [0.1, -0.2, i as f32], 1.5, if i % 2 == 0 { pine } else { rock }, Some("Skyrim.esm"), 0x1000 + i);
     }
     f.add(8, (-8, 8), [98400.0, -237948.0, -7100.0], [0.0; 3], 1.0, rock, None, 0);
+    f.pack_meshes = vec![3, crate::meshpack::NO_MESH];
     f.finish();
     let bytes = f.to_bytes(WriteOptions { zstd: Some(1), crc: true }).unwrap();
     let back = StaticsFile::from_bytes(&bytes).unwrap();
     assert_eq!(back.meshes, f.meshes);
+    assert_eq!(back.pack_meshes, f.pack_meshes);
     assert_eq!(back.blocks, f.blocks);
     assert_eq!(back.common.file_name(crate::statics::EXT), "Tamriel.WIN.statics.bin");
     let recs = &back.blocks[&(4, -4, 8)];
@@ -224,7 +229,7 @@ fn golden_trees_bytes() {
     assert_eq!(hex, expect, "\n{hex}");
 }
 
-const GOLDEN_TREES: &str = "4c4654520100030040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
+const GOLDEN_TREES: &str = "4c4654520100040040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
 
 #[test]
 fn tree_meshes_round_trip() {

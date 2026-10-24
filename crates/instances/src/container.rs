@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use crate::{Error, Result};
 
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 3;
+pub const MINOR: u16 = 4;
 pub const HEADER_SIZE: usize = 64;
 pub const INDEX_ENTRY: usize = 32;
 pub const FLAG_ZSTD: u8 = 1;

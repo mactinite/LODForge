@@ -771,10 +771,21 @@ pub fn run(a: &Args) -> Result<()> {
         // The near-tier mesh pack of every worldspace's trees files (shared atlas + clusters).
         let t = Instant::now();
         begin(a.json, "all", "tree-pack", None);
-        match crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options()) {
-            Ok(rep) => {
+        // Every texture this build wrote (mini atlases, PBR copies, ...) is a pack input.
+        if let Err(e) = own_output(&mut p, &out, &before) {
+            eprintln!("tree-pack: {e:#}");
+        }
+        let packs = crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options()).and_then(|t| {
+            let s = if a.rt.runtime_min_copies > 0 { Some(crate::tree_pack::build_statics(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options())?) } else { None };
+            Ok((t, s))
+        });
+        match packs {
+            Ok((rep, statics)) => {
                 if !a.json {
-                    println!("  {}", rep.summary());
+                    println!("  tree {}", rep.summary());
+                    if let Some(s) = statics {
+                        println!("  static {}", s.summary());
+                    }
                 }
                 event(a.json, "all", "tree-pack", None, t.elapsed().as_millis());
             }

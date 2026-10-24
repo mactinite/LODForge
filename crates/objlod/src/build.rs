@@ -308,7 +308,7 @@ impl<'a> ObjectLod<'a> {
         let routes: Option<Vec<crate::instancing::Route>> = self.opts.instancing.as_ref().map(|inst| {
             let list: Vec<&StaticRef> = refs.iter().map(|&ri| &self.export.statics[ri]).collect();
             inst.plan(&list, k, |r, m| {
-                self.opts.alt_textures.has_ref(&r.ref_id) || self.mesh(m).is_some_and(|mesh| mesh.parts.iter().any(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White))
+                (!inst.alt_textures && self.opts.alt_textures.has_ref(&r.ref_id)) || self.mesh(m).is_some_and(|mesh| mesh.parts.iter().any(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White))
             })
         });
         let mut instances: Vec<crate::instancing::Instance> = Vec::new();
@@ -323,10 +323,18 @@ impl<'a> ObjectLod<'a> {
                 Some(crate::instancing::Route::Instance) => {
                     let model_l = model.to_ascii_lowercase().replace('/', "\\");
                     // A model that is missing or has no geometry draws nothing either way.
-                    if self.mesh(&model_l).is_some_and(|m| !m.parts.is_empty()) {
+                    if let Some(mesh) = self.mesh(&model_l).filter(|m| !m.parts.is_empty()) {
                         Stats::add(&self.stats.instanced, 1);
                         let runtime_ref = self.opts.instancing.as_ref().is_some_and(|i| i.is_runtime_ref(r));
-                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref });
+                        // The reference's AltTextures, per part (diffuse, normal).
+                        let alt: Vec<Option<&[String]>> = mesh.parts.iter().map(|p| self.opts.alt_textures.textures_for(&r.ref_id, p.index, &p.name)).collect();
+                        let alt_textures = alt.iter().any(Option::is_some).then(|| {
+                            mesh.parts.iter().zip(&alt).map(|(p, a)| {
+                                let t = a.unwrap_or(&p.textures[..]);
+                                (t.first().cloned().unwrap_or_default(), t.get(1).cloned().unwrap_or_default())
+                            }).collect()
+                        });
+                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures });
                         placed += 1;
                     } else {
                         missing += 1;

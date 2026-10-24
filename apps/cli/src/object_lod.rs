@@ -341,7 +341,54 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             opts.recut_overshoot = false;
         }
         if let Some(rt) = &a.runtime {
-            opts.instancing = Some(rt.instancing(&export.season));
+            let mut inst = rt.instancing(&export.season);
+            let counts = inst.count_world(&export.statics, |r| opts.alt_textures.has_ref(&r.ref_id));
+            if export.season.is_empty() {
+                // How many placements and triangles each copy threshold would instance (LOD4).
+                let tris = |m: &str| read(m).and_then(|b| lodforge_objlod::mesh::import(m, &b).ok()).map(|lm| lm.parts.iter().map(|p| p.triangles.len()).sum::<usize>()).unwrap_or(0);
+                let lod4: Vec<(&String, usize, usize)> = counts.iter().filter(|((k, _), _)| *k == 0).map(|((_, m), &n)| (m, n, tris(m))).collect();
+                let mut line = format!("  static instancing candidates ({world}, LOD4, plain materials):");
+                for nmin in [2usize, 4, 8, 16, 32, 64, 128] {
+                    let sel: Vec<_> = lod4.iter().filter(|(_, n, _)| *n >= nmin).collect();
+                    let placements: usize = sel.iter().map(|(_, n, _)| n).sum();
+                    let triangles: usize = sel.iter().map(|(_, n, t)| n * t).sum();
+                    line.push_str(&format!(" N>={nmin}: {} models {placements} refs {:.1}M tris;", sel.len(), triangles as f64 / 1e6));
+                }
+                println!("{line}");
+                // Why LOD4 placements are not candidates.
+                let mut why: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
+                let mut tri_cache: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for r in &export.statics {
+                    let Some(m) = r.model(0).map(|m| m.to_ascii_lowercase().replace('/', "\\")) else { continue };
+                    let class = lodforge_objlod::material::MaterialClass::parse(r.material());
+                    let reason = if inst.is_runtime_ref(r) {
+                        "runtime tree"
+                    } else if m.ends_with(".dds") {
+                        "billboard"
+                    } else if r.is_large_ref() {
+                        "large ref"
+                    } else if m.contains("glow") {
+                        "glow"
+                    } else if class.is_snow_or_ash() {
+                        "snow/ash material"
+                    } else if !matches!(class, lodforge_objlod::material::MaterialClass::Plain | lodforge_objlod::material::MaterialClass::PassThru) {
+                        "material object"
+                    } else if opts.alt_textures.has_ref(&r.ref_id) {
+                        "alt textures"
+                    } else {
+                        "candidate"
+                    };
+                    let t = *tri_cache.entry(m.clone()).or_insert_with(|| tris(&m));
+                    let e = why.entry(reason).or_default();
+                    e.0 += 1;
+                    e.1 += t;
+                }
+                println!("  LOD4 placements by reason: {}", why.iter().map(|(k, (n, t))| format!("{k} {n} refs {:.1}M tris", *t as f64 / 1e6)).collect::<Vec<_>>().join("; "));
+            }
+            if inst.min_copies > 0 {
+                inst.world_counts = std::sync::Arc::new(counts);
+            }
+            opts.instancing = Some(inst);
         }
         let lod = ObjectLod::new(export, atlas, opts, grid, &read);
         let load_ms = t0.elapsed().as_millis();

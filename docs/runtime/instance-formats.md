@@ -1,6 +1,6 @@
-# LODForge Runtime instance formats (v1.3)
+# LODForge Runtime instance formats (v1.4)
 
-Status: **v1.3, 2026-10-24** (1.0-1.2 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
+Status: **v1.4, 2026-10-24** (1.0-1.3 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
 Runtime SKSE plugin. This document is the contract between the two; when the code and this
 document disagree, the document wins and the code is a bug. Changes follow the versioning rules in
 section 2.
@@ -69,7 +69,7 @@ round-trip tests and the test vectors in section 8 pin the byte layout.
 |---|---|---|---|
 | 0 | u8[4] | magic | `LFTR`, `LFST`, `LFGR` or `LFMP` (ASCII) |
 | 4 | u16 | major | 1 |
-| 6 | u16 | minor | 3 |
+| 6 | u16 | minor | 4 |
 | 8 | u32 | header_size | 64 |
 | 12 | u32 | flags | bit 0: at least one section is zstd-compressed. Other bits 0. |
 | 16 | u32 | record_size | 24 (trees), 32 (statics), 10 (grass) |
@@ -171,9 +171,22 @@ uses `TMSH` only for diagnostics.
 | Offset | Type | Field |
 |---|---|---|
 | 0 | f32[6] | bounds: AABB of the mesh's vertices in model space (min xyz, max xyz) after its own node transforms |
-| 24 | u32 | flags: bit 0 a tree LOD model (used by tree references), bit 1 passthru (`PassThruMeshMask` / `passthru` in the name), bit 2 the mesh has vertex alpha < 255 somewhere |
+| 24 | u32 | flags: bit 0 a tree LOD model (used by tree references), bit 1 passthru (`PassThruMeshMask` / `passthru` in the name), bit 2 the mesh has vertex alpha < 255 somewhere, bit 3 (1.4) its instances are large references |
 | 28 | u32 | triangles (all shapes of the mesh) |
 | 32 | str | model (`meshes\...`, the LOD model path from the export's LOD column) |
+
+Several `MESH` entries can name the same model (since 1.4): one per (model, large reference,
+texture set). Records point at the entry, so a record's entry says whether it is a large reference
+and which textures it uses.
+
+**`MTEX`** (statics, since 1.4, present when some entry has textures): `u32 count` (= `MESH`
+count), then per entry `u16 n` and `n` x (`str diffuse`, `str normal`): the textures of the model's
+parts in order, from the reference's AltTextures entries (the model's own textures for parts
+without one); `n = 0`: the model's own textures throughout.
+
+**`SMPK`** (statics, since 1.4): `u32 count` (= `MESH` count), then per entry a `u32`: its mesh in
+`StaticMeshes.bin` (section 7a), `0xFFFFFFFF` for none. Entries that differ only by the large
+reference flag share a pack mesh.
 
 **`GTYP`** (grass): `u32 count`, then per grass type:
 
@@ -277,17 +290,24 @@ split), so the instances swap together with the merged shapes of the same block.
   (`tree_refs=0`). With `build --runtime-tree-statics` their LOD models are written here per
   block and level as before (`tree_refs=1`). Billboard columns are always dropped (the impostor
   replaces them).
-- Any other model listed in a block at least `min_copies` times at that level, when its path
-  contains one of `model_masks` (default `passthru`, i.e. the 3D tree LOD models such as
-  `...treepineforest01passthru_lod.nif`; empty = every model). `min_copies=0` disables this rule.
-- Never instanced: billboards (`.dds` columns), large references (`-LargeRef`), and shapes that use
-  side-file alternate textures or vertex-colour overrides for that reference (they cannot share a
-  mesh).
+- Any other model placed at least `min_copies` times **in the worldspace** at that LOD level
+  (since 1.4; default 8 in runtime mode; counted per worldspace and level, not per block), when its
+  path contains one of `model_masks` (default: every model) and the reference is eligible:
+  - material plain or passthru (no snow/ash LOD shader, no material object): the runtime draws
+    the pack with one lighting material;
+  - not a glow-window model, not a billboard;
+  - no vertex-colour override for that reference in the VC side file.
+  Large references are eligible (their `MESH` entry has flag bit 3; the runtime hides such an
+  instance while the reference's own 3D is loaded, as the engine does for object LOD). References
+  with AltTextures entries are eligible: they get their own `MESH` entry carrying the textures
+  (`MTEX`). `min_copies=0` disables this rule.
 
-An instanced reference keeps its LOD exactly as the merged shapes would: the runtime draws `mesh`
-with the record's transform (section 1). Textures, atlas remaps and vertex colours come from the
-mesh file itself (the merged `.bto` would have remapped them into the object LOD atlas; the runtime
-binds the mesh's own textures).
+An instanced reference keeps its LOD model as the merged shapes would: the runtime draws the
+entry's pack mesh (`SMPK`) with the record's transform (section 1, full 3-axis rotation). The
+pack mesh carries the model's (or `MTEX`) textures on the static atlas pages and the model's
+vertex colours; hidden-face removal does not apply to instances. The section's level is the LOD
+level; a reference has one record per level it has a model at (same plugin, form and hash), so the
+runtime can pick the level per instance by distance and dither between them.
 
 Section payload: `record_count` records of 32 bytes, **sorted by mesh, then hash**.
 
@@ -352,7 +372,13 @@ world `x = half[0] + 12*trunc(cell_x/12)*4096` and likewise `y`; `z = half[2]`; 
 `yaw = atan2(r3, r0)`; `h = half[13]`.
 
 
-## 7a. Tree mesh pack (`LFMP`, `TreeMeshes.bin`, since 1.3)
+## 7a. Mesh packs (`LFMP`: `TreeMeshes.bin` since 1.3, `StaticMeshes.bin` since 1.4)
+
+`StaticMeshes.bin` has exactly the layout described below for `TreeMeshes.bin`; it holds every
+`MESH` model (and texture variant) of the build's statics files, its pages are
+`textures\lodforge\staticatlas\staticatlas_alpha[NN].dds` (+ `_n`), and statics files link to it
+with `SMPK`. The rest of this section describes the tree pack; read "statics file" and `SMPK` for
+the static pack.
 
 `SKSE\Plugins\LODForgeRuntime\TreeMeshes.bin`: one file per build, shared by every worldspace and
 season. It holds every near-tier tree model of the build's trees files (`TMSH`) merged for
@@ -452,6 +478,9 @@ kinds, raw and zstd.
 
 ## History
 
+- **1.4** (2026-10-24): static mesh pack `StaticMeshes.bin`; statics files instance repeated object
+  LOD models per worldspace (`min_copies`, default 8), large references and AltTextures variants
+  included; new `MESH` flag bit 3, `MTEX` and `SMPK` chunks. Additive.
 - **1.3** (2026-10-24): `TreeMeshes.bin` (`LFMP`, section 7a): the near-tier models merged onto
   shared atlas pages and cut into 64-triangle clusters; `TMPK` chunk in trees files. Additive.
 - **1.2** (2026-10-24): new `TMSH` chunk in trees files (the near-tier LOD4 tree mesh per type);

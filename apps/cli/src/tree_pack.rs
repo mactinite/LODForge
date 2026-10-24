@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use lodforge_instances::meshpack::{CLUSTER_SIZE, MeshInput, MeshPack, NO_MESH, Page, VERTEX_SIZE, Vertex, pack_unit};
-use lodforge_instances::trees::{TreeFile, TreeMesh};
+use lodforge_instances::trees::TreeFile;
 use lodforge_instances::{Common, WriteOptions};
 
 use crate::profile::Profile;
@@ -53,13 +53,15 @@ pub struct Report {
     pub other_threshold_parts: usize,
     pub trees_files: usize,
     pub ms: u128,
+    /// A sample of parts dropped for want of a texture.
+    pub unresolved: Vec<String>,
 }
 
 impl Report {
     pub fn summary(&self) -> String {
         let mb = |b: f64| b / 1e6;
         format!(
-            "tree mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({:.1} MB BC7 + mips); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, TreeMeshes.bin {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128); {} trees files linked; {:.1} s",
+            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({:.1} MB BC7 + mips); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128); {} instance files linked; {:.1} s",
             self.models,
             self.meshes,
             self.textures,
@@ -86,41 +88,98 @@ fn trees_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(v)
 }
 
-/// Builds the pack from the trees files in `out` and links them to it.
+/// Builds the tree pack from the trees files in `out` and links them to it (`TMPK`).
 pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Result<Report> {
     let t0 = Instant::now();
     let dir = crate::instances::out_dir(out);
     let files = trees_files(&dir)?;
-    let mut rep = Report { trees_files: files.len(), ..Default::default() };
     // Every model (sorted, so the pack is deterministic) with its resolved textures.
-    let mut models: BTreeMap<String, TreeMesh> = BTreeMap::new();
+    let mut models: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
     for f in &files {
         let t = TreeFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for m in t.meshes {
             if !m.model.is_empty() {
-                models.entry(m.model.clone()).or_insert(m);
+                models.entry(m.model.clone()).or_insert_with(|| (m.model.clone(), m.shapes.iter().map(|s| (s.diffuse.clone(), s.normal.clone())).collect()));
             }
         }
     }
-    rep.models = models.len();
-    // Load every model; parts pair with the TMSH shapes in order.
+    let (mut rep, mesh_of) = make(p, out, &models, s, write, PAGE_BASE, lodforge_instances::meshpack::FILE_NAME)?;
+    rep.trees_files = files.len();
+    for f in &files {
+        let mut t = TreeFile::from_bytes(&std::fs::read(f)?)?;
+        t.pack_meshes = t.meshes.iter().map(|m| mesh_of.get(&m.model).copied().unwrap_or(NO_MESH)).collect();
+        std::fs::write(f, t.to_bytes(write)?)?;
+    }
+    rep.ms = t0.elapsed().as_millis();
+    Ok(rep)
+}
+
+/// Game path of the static mesh pack's pages.
+pub const STATIC_PAGE_BASE: &str = r"textures\LODForge\StaticAtlas\StaticAtlas_Alpha";
+pub const STATIC_FILE_NAME: &str = "StaticMeshes.bin";
+
+/// Builds the static pack from the `.statics.bin` files in `out` (every `MESH` model) and links
+/// them to it (`SMPK`).
+pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Result<Report> {
+    use lodforge_instances::statics::StaticsFile;
+    let t0 = Instant::now();
+    let dir = crate::instances::out_dir(out);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".statics.bin")).collect();
+    files.sort();
+    // One pack mesh per (model, texture set); large-reference entries share it.
+    let key_of = |m: &lodforge_instances::statics::Mesh| format!("{}|{}", m.model, m.textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"));
+    let mut textures = crate::instances::TextureIndex::default();
+    let mut models: BTreeMap<String, (String, Vec<(String, String)>)> = BTreeMap::new();
+    for f in &files {
+        let t = StaticsFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
+        for m in &t.meshes {
+            models.entry(key_of(m)).or_insert_with(|| (m.model.clone(), m.textures.iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect()));
+        }
+    }
+    let (mut rep, mesh_of) = make(p, out, &models, s, write, STATIC_PAGE_BASE, STATIC_FILE_NAME)?;
+    rep.trees_files = files.len();
+    for f in &files {
+        let mut t = StaticsFile::from_bytes(&std::fs::read(f)?)?;
+        t.pack_meshes = t.meshes.iter().map(|m| mesh_of.get(&key_of(m)).copied().unwrap_or(NO_MESH)).collect();
+        std::fs::write(f, t.to_bytes(write)?)?;
+    }
+    rep.ms = t0.elapsed().as_millis();
+    Ok(rep)
+}
+
+/// A mesh pack of `models` (with their shapes' resolved diffuse/normal in part order; an empty
+/// list resolves the textures the model names) written to `out` as `file_name` with pages under
+/// `page_base`. Returns the report and model -> pack mesh.
+pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(String, String)>)>, s: &Settings, write: WriteOptions, page_base: &str, file_name: &str) -> Result<(Report, HashMap<String, u32>)> {
+    let dir = crate::instances::out_dir(out);
+    std::fs::create_dir_all(&dir)?;
+    let mut rep = Report { models: models.len(), ..Default::default() };
+    let mut textures = crate::instances::TextureIndex::default();
     struct Part {
         part: lodforge_objlod::mesh::MeshPart,
         key: String,
     }
-    let mut loaded: Vec<(String, Vec<Part>)> = Vec::new();
+    let mut loaded: Vec<(String, String, Vec<Part>)> = Vec::new();
     let mut sizes: BTreeMap<String, (u32, u32)> = BTreeMap::new();
-    for (model, tm) in &models {
+    for (key, (model, shapes)) in models {
         let Some(bytes) = p.vfs.read(model).ok().flatten() else { continue };
         let Ok(lm) = lodforge_objlod::mesh::import(model, &bytes) else { continue };
         let mut parts = Vec::new();
         for (i, part) in lm.parts.into_iter().enumerate() {
-            let Some(shape) = tm.shapes.get(i) else {
-                rep.dropped_parts += 1;
-                continue;
+            let shape = match shapes.get(i) {
+                Some(s) => s.clone(),
+                None if shapes.is_empty() => (textures.resolve(p, &part.textures[0]), textures.resolve(p, &part.textures[1])),
+                None => {
+                    rep.dropped_parts += 1;
+                    continue;
+                }
             };
+            let shape = lodforge_instances::trees::MeshShape { diffuse: shape.0, normal: shape.1, ..Default::default() };
             if shape.diffuse.is_empty() {
                 rep.dropped_parts += 1;
+                if rep.unresolved.len() < 12 {
+                    rep.unresolved.push(format!("{model}: {:?} {:?}", part.name, part.textures[0]));
+                }
                 continue;
             }
             // Shapes alpha-testing at another threshold get their own tile with remapped alpha.
@@ -149,14 +208,14 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
             parts.push(Part { part, key });
         }
         if !parts.is_empty() {
-            loaded.push((model.clone(), parts));
+            loaded.push((key.clone(), model.clone(), parts));
         }
     }
     rep.textures = sizes.len();
     // Atlas: the object LOD planner and renderer, largest tiles first.
     let mut list: Vec<(String, u32, u32)> = sizes.iter().map(|(k, (w, h))| (k.clone(), *w, *h)).collect();
     list.sort_by(|a, b| (b.1 * b.2).cmp(&(a.1 * a.2)).then(a.0.cmp(&b.0)));
-    let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, PAGE_BASE);
+    let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, page_base);
     let gpu = lodforge_gpu::Gpu::new()?;
     let formats = crate::object_atlas::Formats { diffuse: crate::object_atlas::Encoding::Bc7, alpha_diffuse: crate::object_atlas::Encoding::Bc7, normal: crate::object_atlas::Encoding::Bc7, mips: u32::MAX, alpha_fill: true };
     let pages = crate::object_atlas::render(&p.vfs, &layout, &gpu, &formats)?;
@@ -167,7 +226,7 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
     let mut pack = MeshPack { common: Common { world: String::new(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("tile_cap={}\npage={}\nalpha_threshold=128", s.tile_cap, s.page) }, ..Default::default() };
     pack.pages = layout.pages.iter().map(|pg| Page { width: pg.width, height: pg.height, mips: pg.width.max(pg.height).ilog2() + 1, alpha_threshold: 128, albedo: pg.name.to_ascii_lowercase(), normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase() }).collect();
     let mut mesh_of: HashMap<String, u32> = HashMap::new();
-    for (model, parts) in loaded {
+    for (key, model, parts) in loaded {
         let mut input = MeshInput { model: model.clone(), vertices: Vec::new(), triangles: Vec::new() };
         for Part { part, key } in &parts {
             let Some(e) = entry.get(key.as_str()) else {
@@ -198,7 +257,7 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
             }
         }
         if !input.triangles.is_empty() {
-            mesh_of.insert(model, pack.add_mesh(input));
+            mesh_of.insert(key, pack.add_mesh(input));
         }
     }
     rep.meshes = pack.meshes.len();
@@ -208,15 +267,34 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
     rep.buffer_bytes = pack.buffer_bytes();
     debug_assert_eq!(rep.buffer_bytes, rep.vertices * VERTEX_SIZE + rep.clusters * (192 * 4 + CLUSTER_SIZE));
     let bytes = pack.to_bytes(write)?;
-    anyhow::ensure!(MeshPack::from_bytes(&bytes)?.clusters.len() == pack.clusters.len(), "TreeMeshes.bin reads back differently");
-    std::fs::write(dir.join(lodforge_instances::meshpack::FILE_NAME), &bytes)?;
+    anyhow::ensure!(MeshPack::from_bytes(&bytes)?.clusters.len() == pack.clusters.len(), "{file_name} reads back differently");
+    std::fs::write(dir.join(file_name), &bytes)?;
     rep.pack_bytes = bytes.len();
-    // Link the trees files.
-    for f in &files {
-        let mut t = TreeFile::from_bytes(&std::fs::read(f)?)?;
-        t.pack_meshes = t.meshes.iter().map(|m| mesh_of.get(&m.model).copied().unwrap_or(NO_MESH)).collect();
-        std::fs::write(f, t.to_bytes(write)?)?;
+    Ok((rep, mesh_of))
+}
+
+/// `lodforge runtime-statics-pack`: rebuilds only `StaticMeshes.bin` (and its pages) from the
+/// statics files of an output, with that output's own files visible as inputs.
+#[derive(clap::Args)]
+pub struct StaticsArgs {
+    #[command(flatten)]
+    pub profile: crate::profile::ProfileArgs,
+    /// The output (Data or mod folder) holding SKSE\Plugins\LODForgeRuntime\*.statics.bin.
+    #[arg(long)]
+    pub data: PathBuf,
+    #[arg(long, default_value_t = 512)]
+    pub tile: u32,
+    #[arg(long, default_value_t = 3)]
+    pub zstd: i32,
+}
+
+pub fn run_statics(a: &StaticsArgs) -> Result<()> {
+    let mut p = a.profile.open()?;
+    p.vfs.add_loose_root_since(&a.data, &lodforge_archive::DirSnapshot::default())?;
+    let rep = build_statics(&p, &a.data, &Settings { tile_cap: a.tile, ..Default::default() }, WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true })?;
+    println!("static {}", rep.summary());
+    for u in &rep.unresolved {
+        println!("  unresolved: {u}");
     }
-    rep.ms = t0.elapsed().as_millis();
-    Ok(rep)
+    Ok(())
 }

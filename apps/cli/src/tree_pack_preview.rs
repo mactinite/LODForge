@@ -21,11 +21,14 @@ pub struct Args {
     pub size: u32,
     #[arg(long)]
     pub out: PathBuf,
+    /// Pack file name (`TreeMeshes.bin` or `StaticMeshes.bin`).
+    #[arg(long, default_value = "TreeMeshes.bin")]
+    pub file: String,
 }
 
 pub fn run(a: &Args) -> Result<()> {
     let dir = crate::instances::out_dir(&a.data);
-    let pack = MeshPack::from_bytes(&std::fs::read(dir.join(lodforge_instances::meshpack::FILE_NAME))?)?;
+    let pack = MeshPack::from_bytes(&std::fs::read(dir.join(&a.file))?)?;
     let mut pages: Vec<(u32, u32, Vec<u8>)> = Vec::new();
     for p in &pack.pages {
         let path = a.data.join(&p.albedo);

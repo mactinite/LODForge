@@ -26,6 +26,16 @@ pub struct Instancing {
     pub min_copies: usize,
     /// Only models whose lower-case path contains one of these; empty = every model.
     pub model_masks: Vec<String>,
+    /// Per (level index, model): eligible placements in the whole worldspace. When set,
+    /// `min_copies` counts copies per worldspace instead of per quad.
+    pub world_counts: Arc<HashMap<(usize, String), usize>>,
+    /// Only references with a plain or passthru material (no snow/ash shader, no material
+    /// object): the runtime draws instances with one lighting material.
+    pub plain_only: bool,
+    /// Large references may be instanced (flagged on the instance).
+    pub large_refs: bool,
+    /// References with AltTextures entries may be instanced (their textures go on the instance).
+    pub alt_textures: bool,
 }
 
 /// One instanced placement.
@@ -41,6 +51,12 @@ pub struct Instance {
     pub scale: f32,
     /// One of `runtime_refs`.
     pub runtime_ref: bool,
+    /// A large reference (`-LargeRef`): the runtime hides it while the reference's own 3D is
+    /// loaded, as the engine does for its object LOD.
+    pub large_ref: bool,
+    /// Per part of the model: the (diffuse, normal) the AltTextures side file gives this
+    /// reference, `None` for none (the model's own textures).
+    pub alt_textures: Option<Vec<(String, String)>>,
 }
 
 /// What [`Instancing::plan`] decided for one reference of a quad.
@@ -56,6 +72,31 @@ impl Instancing {
         self.runtime_refs.contains(&r.ref_id.to_ascii_uppercase())
     }
 
+    /// Whether model `m` of `r` may be instanced at all (side-file overrides aside).
+    pub fn eligible(&self, r: &StaticRef, m: &str) -> bool {
+        let plain = || matches!(crate::material::MaterialClass::parse(r.material()), crate::material::MaterialClass::Plain | crate::material::MaterialClass::PassThru);
+        !m.ends_with(".dds") && (self.large_refs || !r.is_large_ref()) && !m.contains("glow") && self.model_matches(m) && (!self.plain_only || plain())
+    }
+
+    /// Eligible placements per (level index, model) over a whole export (runtime references and
+    /// references with AltTextures entries left out).
+    pub fn count_world(&self, statics: &[StaticRef], has_alt: impl Fn(&StaticRef) -> bool) -> HashMap<(usize, String), usize> {
+        let mut out = HashMap::new();
+        for r in statics {
+            if self.is_runtime_ref(r) || (!self.alt_textures && has_alt(r)) {
+                continue;
+            }
+            for k in 0..4 {
+                if let Some(m) = r.model(k).map(|m| m.to_ascii_lowercase().replace('/', "\\"))
+                    && self.eligible(r, &m)
+                {
+                    *out.entry((k, m)).or_default() += 1;
+                }
+            }
+        }
+        out
+    }
+
     fn model_matches(&self, model_l: &str) -> bool {
         self.model_masks.is_empty() || self.model_masks.iter().any(|m| model_l.contains(m.as_str()))
     }
@@ -64,7 +105,7 @@ impl Instancing {
     /// reference has side-file texture or colour changes for this model.
     pub fn plan(&self, refs: &[&StaticRef], k: usize, per_ref_overrides: impl Fn(&StaticRef, &str) -> bool) -> Vec<Route> {
         let model_of = |r: &StaticRef| r.model(k).map(|m| m.to_ascii_lowercase().replace('/', "\\"));
-        let eligible = |r: &StaticRef, m: &str| !m.ends_with(".dds") && !r.is_large_ref() && self.model_matches(m) && !per_ref_overrides(r, m);
+        let eligible = |r: &StaticRef, m: &str| self.eligible(r, m) && !per_ref_overrides(r, m);
         let mut counts: HashMap<String, usize> = HashMap::new();
         if self.min_copies > 0 {
             for r in refs {
@@ -84,7 +125,8 @@ impl Instancing {
                 if self.is_runtime_ref(r) {
                     return if !m.ends_with(".dds") && self.runtime_ref_instances { Route::Instance } else { Route::Drop };
                 }
-                if self.min_copies > 0 && eligible(r, &m) && counts.get(&m).copied().unwrap_or(0) >= self.min_copies { Route::Instance } else { Route::Merge }
+                let n = if self.world_counts.is_empty() { counts.get(&m).copied().unwrap_or(0) } else { self.world_counts.get(&(k, m.clone())).copied().unwrap_or(0) };
+                if self.min_copies > 0 && eligible(r, &m) && n >= self.min_copies { Route::Instance } else { Route::Merge }
             })
             .collect()
     }
@@ -110,7 +152,7 @@ mod tests {
             r("00000007", r"meshes\lod\rock_lod.nif", ""),
         ];
         let refs: Vec<&StaticRef> = refs.iter().collect();
-        let i = Instancing { runtime_refs: Arc::new(["00000001".to_string(), "00000002".to_string()].into()), runtime_ref_instances: true, min_copies: 2, model_masks: vec!["passthru".into()] };
+        let i = Instancing { runtime_refs: Arc::new(["00000001".to_string(), "00000002".to_string()].into()), runtime_ref_instances: true, min_copies: 2, model_masks: vec!["passthru".into()], ..Default::default() };
         // 1: runtime 3D -> instance; 2: runtime billboard -> drop; 3, 4: two non-runtime copies
         // -> instances; 5: large ref -> merge; 6, 7: no mask match -> merge.
         assert_eq!(i.plan(&refs, 0, |_, _| false), vec![Route::Instance, Route::Drop, Route::Instance, Route::Instance, Route::Merge, Route::Merge, Route::Merge]);

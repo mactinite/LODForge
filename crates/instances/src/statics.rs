@@ -21,7 +21,13 @@ pub struct Mesh {
     pub flags: u32,
     pub triangles: u32,
     pub model: String,
+    /// `MTEX`: per part of the model, the (diffuse, normal) this entry draws it with (AltTextures
+    /// variants); empty = the model's own textures.
+    pub textures: Vec<(String, String)>,
 }
+
+/// `MESH.flags`: the entry's instances are large references (hidden while their 3D is loaded).
+pub const MESH_LARGE_REF: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StaticRecord {
@@ -65,6 +71,9 @@ pub const NO_PLUGIN: u16 = 0xFFFF;
 pub struct StaticsFile {
     pub common: Common,
     pub meshes: Vec<Mesh>,
+    /// `SMPK`: per `MESH` entry, its mesh index in `StaticMeshes.bin` (`meshpack::NO_MESH` for
+    /// none); empty: no chunk.
+    pub pack_meshes: Vec<u32>,
     /// Keyed by (level, block x, block y).
     pub blocks: BTreeMap<(u8, i16, i16), Vec<StaticRecord>>,
     mesh_index: std::collections::HashMap<String, u16>,
@@ -78,14 +87,18 @@ impl StaticsFile {
     /// The `MESH` index of `model`, added with `make` when new.
     pub fn mesh(&mut self, model: &str, make: impl FnOnce() -> Mesh) -> u16 {
         let key = model.to_ascii_lowercase();
-        if let Some(&i) = self.mesh_index.get(&key) {
+        self.mesh_variant(&key.clone(), || Mesh { model: key, ..make() })
+    }
+
+    /// The `MESH` index of a variant (`key` names model, textures and flags), added with `make`
+    /// (which sets `model`) when new.
+    pub fn mesh_variant(&mut self, key: &str, make: impl FnOnce() -> Mesh) -> u16 {
+        if let Some(&i) = self.mesh_index.get(key) {
             return i;
         }
-        let mut m = make();
-        m.model = key.clone();
-        self.meshes.push(m);
+        self.meshes.push(make());
         let i = (self.meshes.len() - 1) as u16;
-        self.mesh_index.insert(key, i);
+        self.mesh_index.insert(key.to_string(), i);
         i
     }
 
@@ -122,6 +135,26 @@ impl StaticsFile {
     pub fn to_bytes(&self, opts: WriteOptions) -> Result<Vec<u8>> {
         let mut chunks = self.common.chunks();
         chunks.push(self.mesh_chunk());
+        if self.meshes.iter().any(|m| !m.textures.is_empty()) {
+            let mut b = Buf::default();
+            b.u32(self.meshes.len() as u32);
+            for m in &self.meshes {
+                b.u16(m.textures.len() as u16);
+                for (d, n) in &m.textures {
+                    b.str(d);
+                    b.str(n);
+                }
+            }
+            chunks.push(Chunk { tag: *b"MTEX", data: b.0 });
+        }
+        if !self.pack_meshes.is_empty() {
+            let mut b = Buf::default();
+            b.u32(self.pack_meshes.len() as u32);
+            for &m in &self.pack_meshes {
+                b.u32(m);
+            }
+            chunks.push(Chunk { tag: *b"SMPK", data: b.0 });
+        }
         let sections = self
             .blocks
             .iter()
@@ -151,10 +184,26 @@ impl StaticsFile {
                 for v in &mut bounds {
                     *v = r.f32()?;
                 }
-                let m = Mesh { bounds, flags: r.u32()?, triangles: r.u32()?, model: r.str()? };
-                f.mesh_index.insert(m.model.clone(), f.meshes.len() as u16);
+                let m = Mesh { bounds, flags: r.u32()?, triangles: r.u32()?, model: r.str()?, textures: Vec::new() };
+                f.mesh_index.insert(format!("{}#{}", m.model, f.meshes.len()), f.meshes.len() as u16);
                 f.meshes.push(m);
             }
+        }
+        if let Some(ch) = c.chunk(b"MTEX") {
+            let mut r = Cur::new(&ch.data);
+            let n = r.u32()? as usize;
+            for i in 0..n {
+                let k = usize::from(r.u16()?);
+                let t = (0..k).map(|_| Ok((r.str()?, r.str()?))).collect::<Result<Vec<_>>>()?;
+                if let Some(m) = f.meshes.get_mut(i) {
+                    m.textures = t;
+                }
+            }
+        }
+        if let Some(ch) = c.chunk(b"SMPK") {
+            let mut r = Cur::new(&ch.data);
+            let n = r.u32()?;
+            f.pack_meshes = (0..n).map(|_| r.u32()).collect::<Result<Vec<_>>>()?;
         }
         let stride = c.header.record_size as usize;
         for e in &c.index {

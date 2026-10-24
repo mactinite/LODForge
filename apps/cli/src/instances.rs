@@ -39,13 +39,13 @@ pub struct Opts {
     /// (needs `--mode dyndolod`; trees are kept in object LOD as with `--tree-lod ultra`).
     #[arg(long, value_enum, default_value = "none")]
     pub runtime: RuntimeMode,
-    /// Runtime: other LOD models with at least this many copies in one object LOD block become
-    /// instances too (0 = only the runtime trees' 3D LOD models).
-    #[arg(long, default_value_t = 0)]
+    /// Runtime: LOD models with at least this many copies in the worldspace (per LOD level) are
+    /// drawn instanced from the static mesh pack instead of merged into `.bto` (0 = off).
+    #[arg(long, default_value_t = 8)]
     pub runtime_min_copies: usize,
     /// Runtime: which models `--runtime-min-copies` applies to (substrings of the lower-case
     /// path; empty = every model).
-    #[arg(long, value_delimiter = ',', default_value = "passthru")]
+    #[arg(long, value_delimiter = ',', default_value = "")]
     pub runtime_model_masks: Vec<String>,
     /// Runtime: also write the runtime trees' 3D LOD models as per-block instances in
     /// `.statics.bin` (off: the trees file's per-type mesh table, `TMSH`, is the near tier and the
@@ -274,6 +274,12 @@ impl RuntimeObjects {
             runtime_ref_instances: self.tree_models,
             min_copies: self.min_copies,
             model_masks: self.model_masks.iter().map(|m| m.to_ascii_lowercase()).filter(|m| !m.is_empty()).collect(),
+            // Static instances: copies counted per worldspace, plain materials only (the mesh pack
+            // has one lighting material); set by the object LOD stage.
+            world_counts: Default::default(),
+            plain_only: true,
+            large_refs: true,
+            alt_textures: true,
         }
     }
 }
@@ -284,7 +290,18 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
     let mut f = StaticsFile::new(Common { world: world.to_string(), season: season.to_string(), generator: generator(), plugins: Vec::new(), params });
     for (q, list) in quads {
         for i in *list {
-            let m = f.mesh(&i.model, || mesh_entry(&i.model, mesh(&i.model).as_deref(), i.runtime_ref));
+            // One MESH entry per (model, large reference, AltTextures set).
+            let textures = i.alt_textures.clone().unwrap_or_default();
+            let key = format!("{}|{}|{}", i.model, u8::from(i.large_ref), textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"));
+            let m = f.mesh_variant(&key, || {
+                let mut e = mesh_entry(&i.model, mesh(&i.model).as_deref(), i.runtime_ref);
+                e.model = i.model.clone();
+                e.textures = textures.iter().map(|(d, n)| (d.to_ascii_lowercase(), n.to_ascii_lowercase())).collect();
+                if i.large_ref {
+                    e.flags |= lodforge_instances::statics::MESH_LARGE_REF;
+                }
+                e
+            });
             if i.runtime_ref {
                 f.meshes[usize::from(m)].flags |= MESH_TREE;
             }
@@ -302,7 +319,7 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
 }
 
 fn mesh_entry(model: &str, m: Option<&lodforge_objlod::mesh::LodMesh>, tree: bool) -> Mesh {
-    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new() };
+    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new(), textures: Vec::new() };
     if tree {
         e.flags |= MESH_TREE;
     }
