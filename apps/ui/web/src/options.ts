@@ -64,7 +64,7 @@ export const OPTIONS: Option[] = [
     { value: "Medium", label: "Medium", explain: "More city objects show from outside." },
     { value: "High", label: "High", explain: "The shortest ignore list: most city objects get distant copies." },
   ] },
-  { key: "lodModels", flag: "--lod-models", kind: "bool", default: false, group: "objects", label: "Generate missing LOD models", explain: "Make LOD models from full models where the rules want LOD and none is installed (meshes\\lod\\lodforge\\)." },
+  { key: "lodModels", flag: "--lod-models", kind: "bool", default: true, group: "objects", label: "Generate missing LOD models", explain: "Make LOD models from full models where the rules want LOD and none is installed (meshes\\lod\\lodforge\\)." },
   { key: "lodModelMinSize", flag: "--lod-model-min-size", kind: "text", default: "", group: "objects", when: (v) => Boolean(v.lodModels), expert: true, label: "Generated model minimum size", placeholder: "256,512,1024", explain: "Smallest object size (game units) that gets a generated LOD4, LOD8, LOD16 model. Empty keeps 256, 512, 1024." },
   { key: "keepFarLodModels", flag: "--keep-far-lod-models", kind: "bool", default: false, group: "objects", expert: true, label: "Keep shipped LOD8/16 models", explain: "By default LOD8/16 models whose texture differs from LOD4 are rebuilt from the LOD4 model." },
   { key: "windows", flag: "--windows", kind: "bool", default: false, group: "objects", label: "Glowing windows", explain: "LOD window overlays that glow at night." },
