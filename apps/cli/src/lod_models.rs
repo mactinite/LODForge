@@ -214,14 +214,27 @@ pub struct Made {
     pub path: String,
     pub level: u8,
     pub source_triangles: usize,
+    /// Triangles written (after [`fit_uvs`]).
     pub triangles: usize,
     pub cached: bool,
+    /// Shapes re-cut so they fit the object LOD atlas ([`fit_uvs`]).
+    pub recut_shapes: usize,
+    /// Shapes left tiled (on their own texture).
+    pub tiled_shapes: usize,
 }
 
 #[derive(Debug, Default)]
 pub struct Report {
     pub made: Vec<(usize, Made)>,
     pub failed: Vec<(String, String)>,
+}
+
+impl Report {
+    /// One line on [`fit_uvs`]: shapes re-cut for the atlas, shapes left tiled.
+    pub fn fit_summary(&self) -> String {
+        let (r, t) = self.made.iter().fold((0, 0), |(r, t), (_, m)| (r + m.recut_shapes, t + m.tiled_shapes));
+        format!("{r} shapes re-cut to fit the object LOD atlas, {t} left tiled (would grow past {MAX_RECUT_GROWTH}x + {RECUT_SLACK} triangles)")
+    }
 }
 
 /// Generates the planned levels into `out` (a Data folder), through `cache` when given.
@@ -252,9 +265,11 @@ pub fn generate(p: &Profile, items: &[Item], out: &Path, cache: Option<&Path>, p
                             (d, st, false)
                         }
                     };
+                    // Atlas-ready UVs (after the cache, so cached models get them too).
+                    let (data, fit) = fit_uvs(&data)?;
                     std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
                     std::fs::write(&dest, &data).map_err(|e| e.to_string())?;
-                    made.push(Made { path: rel, level: k, source_triangles: st.source_triangles, triangles: st.triangles, cached });
+                    made.push(Made { path: rel, level: k, source_triangles: st.source_triangles, triangles: fit.triangles_after, cached, recut_shapes: fit.recut, tiled_shapes: fit.tiled });
                 }
                 Ok(made)
             })();
@@ -269,6 +284,117 @@ pub fn generate(p: &Profile, items: &[Item], out: &Path, cache: Option<&Path>, p
         }
     }
     rep
+}
+
+/// How much a shape may grow when its repeating UVs are re-cut for the atlas ([`fit_uvs`]):
+/// `MAX_RECUT_GROWTH` times its triangles plus [`RECUT_SLACK`] (small shapes cross a few repeat
+/// lines however few triangles they have). A shape that would grow more keeps its tiled UVs (and
+/// its own texture).
+pub const MAX_RECUT_GROWTH: usize = 4;
+pub const RECUT_SLACK: usize = 64;
+
+/// The most triangles a re-cut shape of `before` triangles may have.
+pub fn recut_limit(before: usize) -> usize {
+    before * MAX_RECUT_GROWTH + RECUT_SLACK
+}
+
+/// A lower bound of the triangles re-cutting a shape makes: each triangle becomes at least one
+/// piece per integer UV cell its UV box spans along its longer side. Cheap; lets [`fit_uvs`]
+/// skip shapes whose UVs repeat hundreds of times without cutting them first.
+pub fn recut_lower_bound(uvs: &[[f32; 2]], triangles: &[[u16; 3]]) -> usize {
+    triangles
+        .iter()
+        .map(|t| {
+            let span = |k: usize| {
+                let (lo, hi) = t.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(uvs[i as usize][k]), hi.max(uvs[i as usize][k])));
+                (hi.floor() - lo.floor()).max(0.0) as usize + 1
+            };
+            span(0).max(span(1))
+        })
+        .sum()
+}
+
+/// What [`fit_uvs`] did to one model.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Fit {
+    pub shapes: usize,
+    /// Shapes re-cut so their UVs lie in 0..1.
+    pub recut: usize,
+    /// Shapes whose UVs still repeat (re-cutting would grow them past [`recut_limit`]).
+    pub tiled: usize,
+    pub triangles_before: usize,
+    pub triangles_after: usize,
+}
+
+/// Makes a generated LOD model atlas-ready: every shape whose UVs (with its shader's UV
+/// offset / scale applied) repeat beyond one texture is re-cut along the integer UV lines and
+/// its UVs wrapped into 0..1 ([`lodforge_objlod::reuv`]), and the shader's UV transform is reset.
+/// Generated models come from full models, whose textures mostly tile; with tiled UVs the atlas
+/// planner keeps their full textures off the pages, so each such shape becomes a draw of its own
+/// in every block instead of merging with the block's other LOD shapes.
+pub fn fit_uvs(bytes: &[u8]) -> Result<(Vec<u8>, Fit), String> {
+    use lodforge_nif::Block;
+    let mut nif = lodforge_nif::parse(bytes).map_err(|e| e.to_string())?;
+    let mesh = lodforge_objlod::mesh::import("", bytes).map_err(|e| e.to_string())?;
+    // Generated models: a root node whose children are the shapes, in the importer's order.
+    let shape_blocks: Vec<usize> = match nif.blocks.first() {
+        Some(Block::Node(n)) => n.children.iter().flatten().map(|&c| c as usize).filter(|&c| matches!(nif.blocks.get(c), Some(Block::TriShape(_)))).collect(),
+        _ => return Err("not a generated LOD model".into()),
+    };
+    let mut fit = Fit::default();
+    if shape_blocks.len() != mesh.parts.len() {
+        return Err(format!("{} shapes, {} imported parts", shape_blocks.len(), mesh.parts.len()));
+    }
+    for (&bi, part) in shape_blocks.iter().zip(&mesh.parts) {
+        fit.shapes += 1;
+        fit.triangles_before += part.triangles.len();
+        if !lodforge_objlod::reuv::needs_recut(&part.uvs, 1e-3) {
+            fit.triangles_after += part.triangles.len();
+            continue;
+        }
+        // Shapes that would certainly grow too much are not cut at all (cutting one that repeats
+        // its texture hundreds of times takes long and makes millions of pieces).
+        if recut_lower_bound(&part.uvs, &part.triangles) > recut_limit(part.triangles.len()) {
+            fit.tiled += 1;
+            fit.triangles_after += part.triangles.len();
+            continue;
+        }
+        let mut r = lodforge_objlod::reuv::recut(part);
+        // Cuts through a corner leave zero-area slivers; they draw nothing.
+        r.triangles.retain(|t| {
+            let [a, b, c] = t.map(|i| r.positions[i as usize]);
+            let (e, f) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let n = [e[1] * f[2] - e[2] * f[1], e[2] * f[0] - e[0] * f[2], e[0] * f[1] - e[1] * f[0]];
+            n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 1e-6
+        });
+        if r.triangles.len() > recut_limit(part.triangles.len()) || r.positions.len() > usize::from(u16::MAX) {
+            fit.tiled += 1;
+            fit.triangles_after += part.triangles.len();
+            continue;
+        }
+        fit.recut += 1;
+        fit.triangles_after += r.triangles.len();
+        let Some(Block::TriShape(s)) = nif.blocks.get_mut(bi) else { unreachable!() };
+        // Only the attributes the shape stores (the importer fills in the others).
+        let had = (!s.uvs.is_empty(), !s.normals.is_empty(), !s.tangents.is_empty(), !s.bitangents.is_empty(), !s.colors.is_empty());
+        s.positions = r.positions.clone();
+        s.uvs = r.uvs.clone();
+        s.normals = if had.1 { r.normals.clone() } else { Vec::new() };
+        s.tangents = if had.2 { r.tangents.clone() } else { Vec::new() };
+        s.bitangents = if had.3 { r.bitangents.clone() } else { Vec::new() };
+        s.colors = if had.4 { r.colors.clone().unwrap_or_else(|| vec![[255; 4]; r.positions.len()]) } else { Vec::new() };
+        s.triangles = r.triangles.clone();
+        let shader = s.shader_property;
+        // The UV transform is in the vertices now.
+        if let Some(Block::LightingShader(l)) = shader.and_then(|i| nif.blocks.get_mut(i as usize)) {
+            l.uv_offset = [0.0; 2];
+            l.uv_scale = [1.0; 2];
+        }
+    }
+    if fit.recut == 0 {
+        return Ok((bytes.to_vec(), fit));
+    }
+    Ok((nif.to_bytes().map_err(|e| e.to_string())?, fit))
 }
 
 /// LOD models of a mod folder (reference for comparisons): an index over its `meshes`.
@@ -324,7 +450,7 @@ pub fn run(a: &Args) -> Result<()> {
         ours[k] += m.triangles;
         count[k] += 1;
     }
-    println!("generated {} files in {gen_ms} ms ({} from cache), {} models failed", rep.made.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len());
+    println!("generated {} files in {gen_ms} ms ({} from cache), {} models failed; {}", rep.made.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len(), rep.fit_summary());
     for k in 0..3 {
         println!("  level {k}: {:>5} models, {:>9} source triangles -> {:>8} ({:.1}%), {:.0} per model", count[k], src[k], ours[k], 100.0 * ours[k] as f64 / src[k].max(1) as f64, ours[k] as f64 / count[k].max(1) as f64);
     }
@@ -546,4 +672,91 @@ pub fn far_from_lod0(p: &Profile, exports: &mut crate::dyndolod_build::WorldExpo
         s.text = text.join("\r\n");
     }
     rep
+}
+
+#[cfg(test)]
+mod tests {
+    use lodforge_nif::{AvObject, Block, LightingShader, Nif, Node, ObjectNet, TriShape, VertexDesc};
+
+    use super::{fit_uvs, recut_limit, recut_lower_bound};
+
+    #[test]
+    fn recut_bound() {
+        let uvs = [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5], [300.0, 0.0], [0.0, 2.5]];
+        // Inside one repeat: 1 piece; spanning 301 repeats in u: at least 301; 3 in v: 3.
+        assert_eq!(recut_lower_bound(&uvs, &[[0, 1, 2]]), 1);
+        assert_eq!(recut_lower_bound(&uvs, &[[0, 3, 2], [0, 1, 4]]), 301 + 3);
+        assert!(recut_lower_bound(&uvs, &[[0, 3, 2]]) > recut_limit(1));
+    }
+
+    /// A generated-style model: a root node with one quad shape per (u repeats, v repeats,
+    /// shader UV scale).
+    fn model(quads: &[(f32, f32, f32)]) -> Vec<u8> {
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(Node { av: AvObject { net: ObjectNet::named("m"), ..Default::default() }, ..Default::default() }));
+        let mut children = Vec::new();
+        for &(u, v, scale) in quads {
+            let ts = nif.add_block(Block::TextureSet(vec![r"textures\architecture\wall.dds".into(), r"textures\architecture\wall_n.dds".into()]));
+            let sh = nif.add_block(Block::LightingShader(LightingShader { texture_set: Some(ts), uv_scale: [scale; 2], ..Default::default() }));
+            let s = TriShape {
+                av: AvObject { net: ObjectNet::named("m"), ..Default::default() },
+                shader_property: Some(sh),
+                vertex_desc: VertexDesc::with_attributes(true, true, true, false, false).0,
+                positions: vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [100.0, 0.0, 100.0], [0.0, 0.0, 100.0]],
+                uvs: vec![[0.0, 0.0], [u, 0.0], [u, v], [0.0, v]],
+                normals: vec![[0.0, -1.0, 0.0]; 4],
+                triangles: vec![[0, 1, 2], [0, 2, 3]],
+                ..Default::default()
+            };
+            children.push(Some(nif.add_block(Block::TriShape(s))));
+        }
+        if let Block::Node(r) = &mut nif.blocks[0] {
+            r.children = children;
+        }
+        nif.to_bytes().unwrap()
+    }
+
+    #[test]
+    fn repeating_uvs_are_recut_into_one_repeat() {
+        // 3 x 1 repeats; 1 x 1 UVs drawn with a shader UV scale of 2 (2 x 2 repeats); 1 x 1.
+        let (bytes, fit) = fit_uvs(&model(&[(3.0, 1.0, 1.0), (1.0, 1.0, 2.0), (1.0, 1.0, 1.0)])).unwrap();
+        assert_eq!((fit.shapes, fit.recut, fit.tiled, fit.triangles_before), (3, 2, 0, 6));
+        assert!(fit.triangles_after > 6);
+        let nif = lodforge_nif::parse(&bytes).unwrap();
+        for b in &nif.blocks {
+            match b {
+                Block::TriShape(s) => {
+                    assert!(s.uvs.iter().all(|uv| (-1e-4..=1.0 + 1e-4).contains(&uv[0]) && (-1e-4..=1.0 + 1e-4).contains(&uv[1])), "{:?}", s.uvs);
+                    assert_eq!(s.uvs.len(), s.positions.len());
+                    assert_eq!(s.normals.len(), s.positions.len());
+                    // The shape still covers the same quad.
+                    let area: f32 = s.triangles.iter().map(|t| {
+                        let [a, b, c] = t.map(|i| s.positions[i as usize]);
+                        let (e, f) = ([b[0] - a[0], b[2] - a[2]], [c[0] - a[0], c[2] - a[2]]);
+                        (e[0] * f[1] - e[1] * f[0]).abs() / 2.0
+                    }).sum();
+                    assert!((area - 10000.0).abs() < 1.0, "area {area}");
+                    // No zero-area slivers from cuts through corners.
+                    assert!(s.triangles.iter().all(|t| {
+                        let [a, b, c] = t.map(|i| s.positions[i as usize]);
+                        ((b[0] - a[0]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[0] - a[0])).abs() > 1e-3
+                    }));
+                }
+                Block::LightingShader(l) => assert_eq!((l.uv_offset, l.uv_scale), ([0.0; 2], [1.0; 2])),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn heavy_repeats_stay_tiled_and_fitting_models_are_unchanged() {
+        // 20 x 20 repeats would turn 2 triangles into ~800: kept tiled.
+        let src = model(&[(20.0, 20.0, 1.0)]);
+        let (bytes, fit) = fit_uvs(&src).unwrap();
+        assert_eq!((fit.recut, fit.tiled, fit.triangles_after), (0, 1, 2));
+        assert!(fit.triangles_after <= recut_limit(2));
+        assert_eq!(bytes, src);
+        let src = model(&[(1.0, 1.0, 1.0)]);
+        assert_eq!(fit_uvs(&src).unwrap().0, src);
+    }
 }

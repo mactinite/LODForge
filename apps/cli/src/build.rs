@@ -227,6 +227,9 @@ pub fn run(a: &Args) -> Result<()> {
         (None, Some(name)) => ensure_mo2_mod(a, name)?,
         (None, None) => bail!("pass --out <Data folder> or --mo2-mod <name>"),
     };
+    // Stages write into the output from the start (the tree report of the object stage comes
+    // before any LOD file when the terrain stage is off).
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
     // Inputs: the profile without earlier LOD output (the generated plugins are always left out,
     // see `profile::is_generated_lod_plugin`).
     let mut prof = a.profile.clone();
@@ -360,7 +363,7 @@ pub fn run(a: &Args) -> Result<()> {
                     own_output(&mut p, &out, &before)?;
                     c.rescan(&p);
                     if !a.json {
-                        println!("LOD models: {} generated for {} full models ({} from cache, {} without geometry), {} LOD models now", rep.made.len(), items.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len(), c.index.len());
+                        println!("LOD models: {} generated for {} full models ({} from cache, {} without geometry), {} LOD models now; {}", rep.made.len(), items.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len(), c.index.len(), rep.fit_summary());
                     }
                     event(a.json, "all", "lod-models", None, t.elapsed().as_millis());
                 }
