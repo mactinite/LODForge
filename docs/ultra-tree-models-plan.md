@@ -137,3 +137,13 @@ Fix: error-diffusion dithering of the coverage into on/off alpha (`CloudParams::
 `tree-models --cloud-soft` turns it off), which keeps both density and fine structure. 512 px
 tiles (`--cloud-max-tile 512`) look closest to the full tree at four times the texture size.
 Sheet: target/cloud-variants.png.
+
+In-game round 2 (2026-10-23): crowns drew as square, tiled patches (the quads inherited the leaf
+shader's Vertex_Alpha; fixed with DynDOLOD's billboard flags, 958238f). Then a full offline review
+of all 514 models with `tree-models --sheets` (22 contact pages, two reviewers) found: blotchy,
+straight-edged crowns on small up-scaled models (tile size now relative to the tree), darker
+broadleaf crowns (soft lighting with the diffuse as mask, as DynDOLOD's own crown models), doubled
+vanilla leaves (switch nodes), bark-blend cards projected off the trunk (kept 3D) - 9eefb6e.
+Verified in game at the user's boxy pine cluster (33988, 19251). Still open: fine twigs and roots
+(bare winter ash/elm/oak, reach cliff trees, Soul Cairn) break into specks, saplings thin out,
+glow (magic tree) is lost, some Reach and aspen crowns stay a little darker.
