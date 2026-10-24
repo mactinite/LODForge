@@ -68,9 +68,39 @@ pub struct CheckArgs {
     /// Folder with the `.statics.bin` files.
     #[arg(long)]
     pub dir: PathBuf,
+    /// Also print the default-season LOD4 instances whose model path contains this, as
+    /// `ref_coverage` reference lines (`<model> x y z rx ry rz scale`, degrees).
+    #[arg(long)]
+    pub dump: Option<String>,
+    /// Folder the dumped model paths are relative to (prefixed to them).
+    #[arg(long, default_value = "")]
+    pub model_root: String,
 }
 
 pub fn check(a: &CheckArgs) -> Result<()> {
+    if let Some(filter) = &a.dump {
+        let f = filter.to_ascii_lowercase();
+        for path in std::fs::read_dir(&a.dir)?.flatten().map(|e| e.path()) {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            if !name.ends_with(".statics.bin") || name.matches('.').count() != 2 {
+                continue;
+            }
+            let st = StaticsFile::from_bytes(&std::fs::read(&path)?)?;
+            for ((level, _, _), recs) in &st.blocks {
+                if *level != 4 {
+                    continue;
+                }
+                for r in recs {
+                    let m = &st.meshes[usize::from(r.mesh)].model;
+                    if m.contains(&f) {
+                        let d = r.angles_rad().map(f32::to_degrees);
+                        println!("{}{m} {} {} {} {} {} {} {}", a.model_root, r.pos[0], r.pos[1], r.pos[2], d[0], d[1], d[2], r.scale.to_f32());
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
     let mut names: Vec<PathBuf> = std::fs::read_dir(&a.dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".statics.bin")).collect();
     names.sort();
     let mut bad_total = 0usize;
