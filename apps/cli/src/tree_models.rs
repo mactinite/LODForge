@@ -51,6 +51,13 @@ pub struct Args {
     /// How the crown is made: `cloud` (default) or `prune` (TreeLODGen's pruned cards).
     #[arg(long, value_enum, default_value = "cloud")]
     pub crown: CrownMode,
+    /// Cloud crowns: largest tile side in pixels.
+    #[arg(long, default_value_t = 256)]
+    pub cloud_max_tile: u32,
+    /// Cloud crowns: keep the rendered soft coverage instead of dithering it into on/off alpha
+    /// (the game alpha-tests the crown, which cuts away soft thin foliage).
+    #[arg(long)]
+    pub cloud_soft: bool,
     /// With `--inspect`: render the full model and its generated levels side by side into
     /// `<dir>\<stem>.png` (TexGen's billboard camera, same scale).
     #[arg(long)]
@@ -203,7 +210,7 @@ fn crown_material(prep: &CloudPrep, diffuse: &str, normal: &str) -> lodforge_tre
 
 /// Renders the tiles, packs the crown textures and writes every level. Returns the files (Data-
 /// relative path, bytes) and the (crown, trunk) triangles per level.
-pub fn cloud_finish(gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Renderer, read: &dyn Fn(&str) -> Option<Vec<u8>>, prep: &CloudPrep, stem: &str, crc: u32) -> Result<(Vec<(String, Vec<u8>)>, Vec<(usize, usize)>), String> {
+pub fn cloud_finish(gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Renderer, read: &dyn Fn(&str) -> Option<Vec<u8>>, prep: &CloudPrep, stem: &str, crc: u32, cp: &lodforge_treemodel::cloud::CloudParams) -> Result<(Vec<(String, Vec<u8>)>, Vec<(usize, usize)>), String> {
     // Albedo only (ambient 1, no direct light): the game lights the crown through its normal map,
     // as it lights the real leaves; TexGen's lit billboard colour would be lit twice.
     let mut s = lodforge_texgen::Settings::default();
@@ -230,7 +237,12 @@ pub fn cloud_finish(gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Rendere
             .zip(&scenes)
             .map(|(t, sc)| (lodforge_texgen::Item { scene: sc, textures: &tex, scale: 1.0 }, lodforge_texgen::View { yaw_deg: 0.0, x0: t.a0, x1: t.a1, z0: t.b0, z1: t.b1, width: t.width, height: t.height }))
             .collect();
-        let imgs = lodforge_texgen::final_images(gpu, renderer, &views, &s, true);
+        let mut imgs = lodforge_texgen::final_images(gpu, renderer, &views, &s, true);
+        if cp.dither {
+            for ((img, _), t) in imgs.iter_mut().zip(&prep.tiles) {
+                lodforge_treemodel::cloud::dither_alpha(img, t.width);
+            }
+        }
         let sizes: Vec<(u32, u32)> = prep.tiles.iter().map(|t| (t.width, t.height)).collect();
         let (place, (aw, ah)) = lodforge_treemodel::cloud::pack(&sizes);
         let mut dif = vec![0u8; (aw * ah * 4) as usize];
@@ -281,7 +293,7 @@ pub fn cloud_finish(gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Rendere
 
 /// Generates the models of every candidate tree into `out` (`meshes\dyndolod\lod\trees\`).
 #[allow(clippy::too_many_arguments)]
-pub fn generate(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>, out: &Path, params: &[LevelParams], all: bool, only: &[String], crown: CrownMode) -> Result<Report> {
+pub fn generate(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>, out: &Path, params: &[LevelParams], all: bool, only: &[String], crown: CrownMode, cp: &lodforge_treemodel::cloud::CloudParams) -> Result<Report> {
     let folder = out.join("meshes").join(lodforge_treemodel::write::FOLDER);
     std::fs::create_dir_all(&folder)?;
     // An earlier run's files (Data-relative; bare names are models): removed, never "installed".
@@ -318,11 +330,10 @@ pub fn generate(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>
     }
     let textures = Textures::new(p);
     if crown == CrownMode::Cloud {
-        let cp = lodforge_treemodel::cloud::CloudParams::default();
         let preps: Vec<(String, u32, Result<CloudPrep, String>)> = todo
             .par_iter()
             .map(|(model, crc)| {
-                let prep = p.vfs.read(model).ok().flatten().ok_or_else(|| "mesh not readable".to_string()).and_then(|b| cloud_prep(&b, &|t| textures.get(t), params, &cp));
+                let prep = p.vfs.read(model).ok().flatten().ok_or_else(|| "mesh not readable".to_string()).and_then(|b| cloud_prep(&b, &|t| textures.get(t), params, cp));
                 (model.clone(), *crc, prep)
             })
             .collect();
@@ -331,7 +342,7 @@ pub fn generate(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>
         let read = |t: &str| p.vfs.read(t).ok().flatten();
         for (model, crc, prep) in preps {
             let stem = model.rsplit('\\').next().unwrap_or(&model).trim_end_matches(".nif").to_string();
-            match prep.and_then(|pr| cloud_finish(&gpu, &renderer, &read, &pr, &stem, crc)) {
+            match prep.and_then(|pr| cloud_finish(&gpu, &renderer, &read, &pr, &stem, crc, cp)) {
                 Ok((files, tris)) => {
                     let mut made = Made { model: model.clone(), files: Vec::new(), triangles: tris, bytes: 0, notes: Vec::new() };
                     for (path, data) in files {
@@ -382,7 +393,7 @@ pub fn generate(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>
     Ok(rep)
 }
 
-fn inspect(p: &Profile, models: &[String], render: Option<&Path>, params: &[LevelParams], crown: CrownMode) -> Result<()> {
+fn inspect(p: &Profile, models: &[String], render: Option<&Path>, params: &[LevelParams], crown: CrownMode, cp: &lodforge_treemodel::cloud::CloudParams) -> Result<()> {
     let textures = Textures::new(p);
     for m in models {
         let path = lodforge_dyndolod::bases::model_path(m);
@@ -414,10 +425,10 @@ fn inspect(p: &Profile, models: &[String], render: Option<&Path>, params: &[Leve
             let mut nifs = vec![lodforge_nif::parse(&bytes)?];
             let mut extra: HashMap<String, Vec<u8>> = HashMap::new();
             if crown == CrownMode::Cloud {
-                let prep = cloud_prep(&bytes, &|t| textures.get(t), params, &lodforge_treemodel::cloud::CloudParams::default()).map_err(anyhow::Error::msg)?;
+                let prep = cloud_prep(&bytes, &|t| textures.get(t), params, cp).map_err(anyhow::Error::msg)?;
                 let gpu = lodforge_gpu::Gpu::new()?;
                 let renderer = lodforge_texgen::Renderer::new(&gpu);
-                let (files, tris) = cloud_finish(&gpu, &renderer, &|t| p.vfs.read(t).ok().flatten(), &prep, stem, 0).map_err(anyhow::Error::msg)?;
+                let (files, tris) = cloud_finish(&gpu, &renderer, &|t| p.vfs.read(t).ok().flatten(), &prep, stem, 0, cp).map_err(anyhow::Error::msg)?;
                 println!("  cloud: {} planes; per level (crown, trunk) triangles {tris:?}", prep.tiles.len());
                 for (path, data) in files {
                     if path.ends_with(".nif") {
@@ -489,14 +500,15 @@ fn render_sheet(p: &Profile, nifs: &[lodforge_nif::Nif], png: &Path, extra: &Has
 pub fn run(a: &Args) -> Result<()> {
     let p = a.profile.open()?;
     let params = levels_arg(a.levels.as_deref())?;
+    let cp = lodforge_treemodel::cloud::CloudParams { max_tile: a.cloud_max_tile, dither: !a.cloud_soft, ..Default::default() };
     if !a.inspect.is_empty() {
-        return inspect(&p, &a.inspect, a.render.as_deref(), &params, a.crown);
+        return inspect(&p, &a.inspect, a.render.as_deref(), &params, a.crown, &cp);
     }
     let out = a.out.clone().context("--out or --inspect is needed")?;
     let dir = a.dyndolod_config.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
     let c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
     let t = std::time::Instant::now();
-    let rep = crate::dyndolod_build::with_resolver(&p, &c, |r| generate(&p, &c, r, &out, &params, a.all, &a.only, a.crown))?;
+    let rep = crate::dyndolod_build::with_resolver(&p, &c, |r| generate(&p, &c, r, &out, &params, a.all, &a.only, a.crown, &cp))?;
     println!("{} in {:.1} s", rep.summary(), t.elapsed().as_secs_f64());
     let mut notes: BTreeMap<String, usize> = BTreeMap::new();
     for m in &rep.made {

@@ -363,7 +363,7 @@ pub fn run(a: &Args) -> Result<()> {
                     let t = Instant::now();
                     begin(a.json, "all", "tree-models", None);
                     let all = a.dyn_opts.tree_models == crate::dyndolod_build::TreeModelsMode::All;
-                    match crate::dyndolod_build::with_resolver(&p, &c, |r| crate::tree_models::levels_arg(a.dyn_opts.tree_model_levels.as_deref()).and_then(|lv| crate::tree_models::generate(&p, &c, r, &out, &lv, all, &[], a.dyn_opts.tree_model_crown))) {
+                    match crate::dyndolod_build::with_resolver(&p, &c, |r| crate::tree_models::levels_arg(a.dyn_opts.tree_model_levels.as_deref()).and_then(|lv| crate::tree_models::generate(&p, &c, r, &out, &lv, all, &[], a.dyn_opts.tree_model_crown, &lodforge_treemodel::cloud::CloudParams::default()))) {
                         Ok(rep) => {
                             // LOD discovery and the object LOD stage read them through the VFS.
                             own_output(&mut p, &out, &before)?;

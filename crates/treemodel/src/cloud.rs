@@ -31,11 +31,14 @@ pub struct CloudParams {
     pub units_per_pixel: f32,
     pub min_tile: u32,
     pub max_tile: u32,
+    /// Turn the rendered soft coverage into on/off alpha by error diffusion ([dither_alpha]):
+    /// the game alpha-tests the crown, which cuts away foliage thinner than a texel.
+    pub dither: bool,
 }
 
 impl Default for CloudParams {
     fn default() -> Self {
-        CloudParams { yaws: vec![0.0, 45.0, 90.0, 135.0], vertical_slices: 3, horizontal_slices: 3, units_per_pixel: 4.0, min_tile: 16, max_tile: 256 }
+        CloudParams { yaws: vec![0.0, 45.0, 90.0, 135.0], vertical_slices: 3, horizontal_slices: 3, units_per_pixel: 4.0, min_tile: 16, max_tile: 256, dither: true }
     }
 }
 
@@ -254,6 +257,39 @@ pub fn quads(tiles: &[Tile], place: &[(u32, u32)], atlas: (u32, u32)) -> PartMes
     m
 }
 
+/// Floyd-Steinberg error diffusion of the alpha channel (serpentine) into 0 / 255: a region with
+/// coverage c keeps about c of its texels, spread out, so thin foliage survives the alpha test as
+/// a fine pattern instead of vanishing below the threshold while dense clusters stay solid.
+pub fn dither_alpha(rgba: &mut [u8], width: u32) {
+    let w = width as usize;
+    if w == 0 {
+        return;
+    }
+    let h = rgba.len() / 4 / w;
+    let mut err = vec![0.0f32; w * h];
+    for y in 0..h {
+        let ltr = y % 2 == 0;
+        for i in 0..w {
+            let x = if ltr { i } else { w - 1 - i };
+            let k = y * w + x;
+            let v = f32::from(rgba[k * 4 + 3]) / 255.0 + err[k];
+            let out = if v >= 0.5 { 1.0 } else { 0.0 };
+            rgba[k * 4 + 3] = if out > 0.0 { 255 } else { 0 };
+            let e = v - out;
+            let fwd = |dx: isize| if ltr { x as isize + dx } else { x as isize - dx };
+            let mut add = |xx: isize, yy: usize, f: f32| {
+                if xx >= 0 && (xx as usize) < w && yy < h {
+                    err[yy * w + xx as usize] += e * f;
+                }
+            };
+            add(fwd(1), y, 7.0 / 16.0);
+            add(fwd(-1), y + 1, 3.0 / 16.0);
+            add(x as isize, y + 1, 5.0 / 16.0);
+            add(fwd(1), y + 1, 1.0 / 16.0);
+        }
+    }
+}
+
 /// Shelf packing of tile sizes into a power-of-two atlas: positions and the atlas size.
 pub fn pack(sizes: &[(u32, u32)]) -> (Vec<(u32, u32)>, (u32, u32)) {
     let area: u64 = sizes.iter().map(|&(w, h)| u64::from(w) * u64::from(h)).sum();
@@ -286,6 +322,19 @@ pub fn pack(sizes: &[(u32, u32)]) -> (Vec<(u32, u32)>, (u32, u32)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dithering_keeps_the_coverage() {
+        let (w, h) = (64u32, 64u32);
+        let mut img = vec![0u8; (w * h * 4) as usize];
+        for px in img.chunks_exact_mut(4) {
+            px[3] = 77; // 30%
+        }
+        dither_alpha(&mut img, w);
+        let on = img.chunks_exact(4).filter(|p| p[3] == 255).count() as f32 / (w * h) as f32;
+        assert!((on - 77.0 / 255.0).abs() < 0.02, "{on}");
+        assert!(img.chunks_exact(4).all(|p| p[3] == 0 || p[3] == 255));
+    }
 
     #[test]
     fn frames_are_right_handed() {

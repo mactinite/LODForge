@@ -129,3 +129,11 @@ LOD4 with TreeLODGen's 400-triangle bark budget (prune: 3,725), LOD4 object mesh
 estimated (prune 6.2 GB); crown textures 565 MB before the object LOD atlas. Sheets: outline and
 density kept; crowns slightly darker than the full trees (no soft-light fill) and softer (256 px
 tiles). Next: a real Ultra build (atlas capacity, BTO sizes), then in game at the switch distance.
+
+Splotchy crowns (user, 2026-10-23): the tiles are supersampled (4x), but at 256 px a pine's
+needle sprays are thinner than a texel, so their coverage comes out soft (36% of covered texels
+reach alpha 128) and the game's alpha test cuts them away, leaving dense clusters as blotches.
+Fix: error-diffusion dithering of the coverage into on/off alpha (`CloudParams::dither`, default;
+`tree-models --cloud-soft` turns it off), which keeps both density and fine structure. 512 px
+tiles (`--cloud-max-tile 512`) look closest to the full tree at four times the texture size.
+Sheet: target/cloud-variants.png.
