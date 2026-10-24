@@ -57,6 +57,10 @@ struct Cli {
     /// thorough search) or `fast` (GPU, mode 6 only: blocky on gradients and foliage).
     #[arg(long, global = true, value_enum, default_value = "high")]
     bc7: Bc7Arg,
+    /// Where the `high` and `best` BC7 encoders run: `gpu` (default; a port of the CPU encoder
+    /// that writes the same blocks, ~10x faster) or `cpu`.
+    #[arg(long, global = true, value_enum, default_value = "gpu")]
+    bc7_device: Bc7Device,
     /// Billboard resolution multiplier (tree, trunk and grass billboards): 0.5 = half the pixels
     /// per side, 2 = double. 1 is TexGen's default (11 units per pixel, at most 1024 px).
     #[arg(long, global = true, default_value_t = 1.0)]
@@ -89,6 +93,12 @@ struct Cli {
 enum InstalledBillboards {
     Render,
     Keep,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Bc7Device {
+    Gpu,
+    Cpu,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -221,6 +231,7 @@ fn main() -> Result<()> {
         Bc7Arg::High => lodforge_gpu::Bc7Quality::High,
         Bc7Arg::Best => lodforge_gpu::Bc7Quality::Best,
     });
+    lodforge_gpu::bc7_gpu::set_default_gpu(cli.bc7_device == Bc7Device::Gpu);
     lodforge_texgen::set_billboard_scale(cli.billboard_scale);
     lodforge_texgen::render::set_supersample(cli.billboard_supersample);
     texgen_billboards::set_render_installed(cli.installed_billboards == InstalledBillboards::Render);
