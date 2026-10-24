@@ -15,7 +15,7 @@ use lodforge_dyndolod::bases::owner_key;
 use lodforge_dyndolod::export::{RefLine, tree_tilted};
 use lodforge_esp::Worldspace;
 use lodforge_instances::statics::{MESH_PASSTHRU, MESH_TREE, MESH_VERTEX_ALPHA, Mesh, StaticsFile};
-use lodforge_instances::trees::{TreeFile, TreeType};
+use lodforge_instances::trees::{MeshShape, TreeFile, TreeMesh, TreeType};
 use lodforge_instances::{Common, WriteOptions};
 
 use crate::dyndolod_build::{Config, SeasonExport};
@@ -47,10 +47,11 @@ pub struct Opts {
     /// path; empty = every model).
     #[arg(long, value_delimiter = ',', default_value = "passthru")]
     pub runtime_model_masks: Vec<String>,
-    /// Runtime: drop the runtime trees' 3D LOD models instead of writing them as instances
-    /// (impostors only).
+    /// Runtime: also write the runtime trees' 3D LOD models as per-block instances in
+    /// `.statics.bin` (off: the trees file's per-type mesh table, `TMSH`, is the near tier and the
+    /// tree records are the only placements).
     #[arg(long)]
-    pub runtime_no_tree_models: bool,
+    pub runtime_tree_statics: bool,
     /// Runtime: zstd level for the instance file sections (0 = uncompressed).
     #[arg(long, default_value_t = 0)]
     pub runtime_zstd: i32,
@@ -189,6 +190,7 @@ pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &Fo
     let mut file = TreeFile { common: Common { world: world.editor_id.clone(), season, generator: generator(), plugins: Vec::new(), params: format!("tree_max_tilt={tilt}") }, ..Default::default() };
     file.types = impostors.types.iter().map(|t| TreeType { name: t.name.clone(), model: t.model.clone(), model_crc32: t.model_crc32, ..Default::default() }).collect();
     let mut seen_base: HashSet<u32> = HashSet::new();
+    let mut lod4_counts: Vec<HashMap<String, usize>> = vec![HashMap::new(); file.types.len()];
     let mut no_impostor: HashMap<String, usize> = HashMap::new();
     let mut refs = HashSet::new();
     let mut kept = Kept::default();
@@ -222,6 +224,14 @@ pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &Fo
         let scale = if pl.has_scale { pl.scale } else { 1.0 };
         if file.add(pl.position, pl.rotation[2], scale, ty, plugin, local).is_ok() {
             refs.insert(l.ref_id);
+            *lod4_counts[usize::from(ty)].entry(l.columns[0].to_ascii_lowercase()).or_default() += 1;
+        }
+    }
+    // Each type's LOD4 column: the most used 3D model of its references, else the most used column.
+    for (t, counts) in file.types.iter_mut().zip(&lod4_counts) {
+        let best = |three_d: bool| counts.iter().filter(|(m, _)| !m.is_empty() && (!three_d || !m.ends_with(".dds"))).max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(m, _)| m.clone());
+        if let Some(m) = best(true).or_else(|| best(false)) {
+            t.lod4 = m;
         }
     }
     file.finish();
@@ -414,4 +424,96 @@ impl SeasonTrees {
         v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         v.into_iter().take(n).map(|(e, c)| format!("{e} x{c}")).collect::<Vec<_>>().join(", ")
     }
+}
+
+/// Texture paths by file name, for textures a model names under the wrong folder.
+#[derive(Default)]
+pub struct TextureIndex {
+    by_name: Option<HashMap<String, Vec<String>>>,
+}
+
+impl TextureIndex {
+    /// `path` if the load order has it, else the only texture with its file name, else `""`.
+    pub fn resolve(&mut self, p: &Profile, path: &str) -> String {
+        let path = path.replace('/', "\\").to_ascii_lowercase();
+        if path.is_empty() {
+            return path;
+        }
+        let path = if path.starts_with("textures\\") { path } else { format!("textures\\{path}") };
+        if p.vfs.exists(&path) {
+            return path;
+        }
+        let index = self.by_name.get_or_insert_with(|| {
+            let mut m: HashMap<String, Vec<String>> = HashMap::new();
+            for k in p.vfs.list_prefix("textures\\") {
+                let name = k.rsplit('\\').next().unwrap_or_default().to_string();
+                m.entry(name).or_default().push(k);
+            }
+            m
+        });
+        let name = path.rsplit('\\').next().unwrap_or_default();
+        match index.get(name).map(Vec::as_slice) {
+            Some([only]) => only.clone(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// Fills `file.meshes` (`TMSH`): each type's LOD4 3D model (its `lod4` column when that is a
+/// mesh) with bounds, triangles and per-shape resolved textures. `cache` keeps models across
+/// seasons and worldspaces.
+pub fn fill_meshes(p: &Profile, out: &Path, file: &mut TreeFile, cache: &mut HashMap<String, TreeMesh>, textures: &mut TextureIndex) {
+    file.meshes = file
+        .types
+        .iter()
+        .map(|t| {
+            let m = &t.lod4;
+            if m.is_empty() || !m.ends_with(".nif") {
+                return TreeMesh::default();
+            }
+            if let Some(c) = cache.get(m) {
+                return c.clone();
+            }
+            let mut mesh = load_tree_mesh(p, m, textures);
+            mesh.generated = !mesh.model.is_empty() && out.join(m.replace('\\', "/")).is_file();
+            cache.insert(m.clone(), mesh.clone());
+            mesh
+        })
+        .collect();
+}
+
+fn load_tree_mesh(p: &Profile, model: &str, textures: &mut TextureIndex) -> TreeMesh {
+    let Some(bytes) = p.vfs.read(model).ok().flatten() else { return TreeMesh::default() };
+    let Ok(lm) = lodforge_objlod::mesh::import(model, &bytes) else { return TreeMesh::default() };
+    if lm.parts.is_empty() {
+        return TreeMesh::default();
+    }
+    let mut out = TreeMesh { model: model.to_string(), passthru: model.contains("passthru"), ..Default::default() };
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for part in &lm.parts {
+        for v in &part.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+        out.triangles += part.triangles.len() as u32;
+        let (has_alpha, alpha_flags, alpha_threshold) = match part.alpha {
+            Some((f, t)) => (true, f, t),
+            None => (false, 0, 0),
+        };
+        out.shapes.push(MeshShape {
+            name: part.name.clone(),
+            diffuse: textures.resolve(p, &part.textures[0]),
+            normal: textures.resolve(p, &part.textures[1]),
+            has_alpha,
+            alpha_flags,
+            alpha_threshold,
+            vertex_colors: part.colors.is_some(),
+            triangles: part.triangles.len() as u32,
+        });
+    }
+    out.bounds = [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]];
+    out
 }

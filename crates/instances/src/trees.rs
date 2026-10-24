@@ -76,6 +76,8 @@ impl TreeRecord {
 pub struct TreeFile {
     pub common: Common,
     pub types: Vec<TreeType>,
+    /// `TMSH`: the near-tier LOD mesh per type (same order as `types`; empty: no chunk).
+    pub meshes: Vec<TreeMesh>,
     /// Per cell, sorted by hash once [`TreeFile::finish`] ran (the writer sorts too).
     pub cells: BTreeMap<(i16, i16), Vec<TreeRecord>>,
 }
@@ -131,6 +133,9 @@ impl TreeFile {
     pub fn to_bytes(&self, opts: WriteOptions) -> Result<Vec<u8>> {
         let mut chunks = self.common.chunks();
         chunks.push(self.type_chunk());
+        if let Some(m) = self.mesh_chunk() {
+            chunks.push(m);
+        }
         let sections = self
             .cells
             .iter()
@@ -169,6 +174,10 @@ impl TreeFile {
                 types.push(TreeType { tree_record: flags & 1 != 0, model_crc32, bounds, references, name, model, lod4, bases });
             }
         }
+        let meshes = match c.chunk(b"TMSH") {
+            Some(ch) => Self::read_meshes(&ch.data)?,
+            None => Vec::new(),
+        };
         let stride = c.header.record_size as usize;
         let mut cells = BTreeMap::new();
         for e in &c.index {
@@ -180,6 +189,93 @@ impl TreeFile {
             }
             cells.insert((e.x, e.y), v);
         }
-        Ok(TreeFile { common, types, cells })
+        Ok(TreeFile { common, types, meshes, cells })
+    }
+}
+
+/// One shape of a tree type's LOD mesh (`TMSH`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MeshShape {
+    pub name: String,
+    /// Diffuse and normal map, Data-relative, lower case, resolved against the load order
+    /// (`""` when the shape has none or it could not be found).
+    pub diffuse: String,
+    pub normal: String,
+    /// `NiAlphaProperty` flags and threshold (`has_alpha` false: no alpha property).
+    pub has_alpha: bool,
+    pub alpha_flags: u16,
+    pub alpha_threshold: u8,
+    pub vertex_colors: bool,
+    pub triangles: u32,
+}
+
+/// The near-tier mesh of one tree type (`TMSH` entry, same index as `TTYP`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TreeMesh {
+    /// LOD4 3D model, Data-relative, lower case; `""` when the type has none (billboard or no
+    /// LOD4 in object LOD).
+    pub model: String,
+    /// Model-space AABB of all shapes (min xyz, max xyz), node transforms applied.
+    pub bounds: [f32; 6],
+    pub triangles: u32,
+    /// The model came from LODForge's generated tree models (`meshes\lod\lodforge\...`).
+    pub generated: bool,
+    pub passthru: bool,
+    pub shapes: Vec<MeshShape>,
+}
+
+impl TreeFile {
+    fn mesh_chunk(&self) -> Option<Chunk> {
+        if self.meshes.is_empty() {
+            return None;
+        }
+        let mut b = Buf::default();
+        b.u32(self.meshes.len() as u32);
+        for m in &self.meshes {
+            let flags = u16::from(!m.model.is_empty()) | (u16::from(m.generated) << 1) | (u16::from(m.passthru) << 2);
+            b.u16(flags);
+            b.u16(m.shapes.len() as u16);
+            b.u32(m.triangles);
+            for v in m.bounds {
+                b.f32(v);
+            }
+            b.str(&m.model);
+            for s in &m.shapes {
+                b.u16(s.alpha_flags);
+                b.u8(s.alpha_threshold);
+                b.u8(u8::from(s.has_alpha) | (u8::from(s.vertex_colors) << 1));
+                b.u32(s.triangles);
+                b.str(&s.name);
+                b.str(&s.diffuse);
+                b.str(&s.normal);
+            }
+        }
+        Some(Chunk { tag: *b"TMSH", data: b.0 })
+    }
+
+    fn read_meshes(data: &[u8]) -> Result<Vec<TreeMesh>> {
+        let mut r = Cur::new(data);
+        let n = r.u32()?;
+        let mut out = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let flags = r.u16()?;
+            let ns = r.u16()?;
+            let triangles = r.u32()?;
+            let mut bounds = [0f32; 6];
+            for v in &mut bounds {
+                *v = r.f32()?;
+            }
+            let model = r.str()?;
+            let mut shapes = Vec::with_capacity(usize::from(ns));
+            for _ in 0..ns {
+                let alpha_flags = r.u16()?;
+                let alpha_threshold = r.u8()?;
+                let f = r.u8()?;
+                let triangles = r.u32()?;
+                shapes.push(MeshShape { has_alpha: f & 1 != 0, vertex_colors: f & 2 != 0, alpha_flags, alpha_threshold, triangles, name: r.str()?, diffuse: r.str()?, normal: r.str()? });
+            }
+            out.push(TreeMesh { model, bounds, triangles, generated: flags & 2 != 0, passthru: flags & 4 != 0, shapes });
+        }
+        Ok(out)
     }
 }

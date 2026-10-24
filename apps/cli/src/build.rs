@@ -419,6 +419,8 @@ pub fn run(a: &Args) -> Result<()> {
     }
     // `--runtime lodforge`: load-order form ids -> plugin names for the instance files.
     let form_names = a.rt.on().then(|| std::sync::Arc::new(crate::instances::FormNames::new(&p)));
+    let mut tree_mesh_cache: std::collections::HashMap<String, lodforge_instances::trees::TreeMesh> = std::collections::HashMap::new();
+    let mut tex_index = crate::instances::TextureIndex::default();
     for world in &worlds {
         let mut step = |stage: &str, season: Option<&str>, f: &mut dyn FnMut() -> Result<()>| {
             let t = Instant::now();
@@ -545,7 +547,16 @@ pub fn run(a: &Args) -> Result<()> {
                     let set = set.as_ref().unwrap_or(&empty);
                     let mut runtime_counts = std::collections::HashMap::new();
                     for (k, s) in we.seasons.iter().enumerate() {
-                        let t = crate::instances::select_trees(c, ws, s, names, set);
+                        let mut t = crate::instances::select_trees(c, ws, s, names, set);
+                        crate::instances::fill_meshes(&p, &out, &mut t.file, &mut tree_mesh_cache, &mut tex_index);
+                        if !a.json {
+                            let used: Vec<usize> = (0..t.file.types.len()).filter(|&i| t.file.types[i].references > 0).collect();
+                            let with = used.iter().filter(|&&i| !t.file.meshes[i].model.is_empty()).count();
+                            let refs_with: u32 = used.iter().filter(|&&i| !t.file.meshes[i].model.is_empty()).map(|&i| t.file.types[i].references).sum();
+                            let generated = used.iter().filter(|&&i| t.file.meshes[i].generated).count();
+                            let unresolved = used.iter().flat_map(|&i| &t.file.meshes[i].shapes).filter(|s| s.diffuse.is_empty()).count();
+                            println!("  near-tier meshes ({}): {with} of {} used types have a LOD4 3D model ({generated} generated), covering {refs_with} of {} trees; {unresolved} shapes without a diffuse", if t.file.common.season.is_empty() { "default" } else { &t.file.common.season }, used.len(), t.file.records());
+                        }
                         let (path, size) = crate::instances::write_trees(&out, &t, a.rt.write_options())?;
                         if !a.json {
                             println!("  runtime trees: {} references, {} types in {} cells; {} ({:.2} MB); kept in object LOD: {} tilted, {} large, {} child copies, {} in child-world bounds, {} without a plugin, {} without an impostor", t.file.records(), t.file.types.len(), t.file.cells.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6, t.kept.tilted, t.kept.large, t.kept.copies, t.kept.bounds, t.kept.no_plugin, t.kept.no_impostor);
@@ -673,7 +684,7 @@ pub fn run(a: &Args) -> Result<()> {
                 l.wait_meshes(world);
             }
             if let Some(names) = &form_names {
-                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: !a.rt.runtime_no_tree_models, min_copies: a.rt.runtime_min_copies, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, min_copies: a.rt.runtime_min_copies, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
             if a.rt.on() && !a.rt.runtime_no_grass {
