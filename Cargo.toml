@@ -26,6 +26,7 @@ lodforge-lodmodel = { path = "crates/lodmodel" }
 lodforge-treemodel = { path = "crates/treemodel" }
 lodforge-viewer = { path = "crates/viewer" }
 lodforge-instances = { path = "crates/instances" }
+lodforge-impostor = { path = "crates/impostor" }
 anyhow = "1"
 half = "2"
 bytemuck = { version = "1", features = ["derive"] }

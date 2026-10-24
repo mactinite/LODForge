@@ -26,6 +26,9 @@ struct Uniforms {
     spec2: [f32; 4],
     /// Emissive colour times multiple (own emit only).
     emit: [f32; 4],
+    /// Object normal + depth pass: x = the slab's near plane along the toward-camera axis
+    /// (`dot(p, toward)` there), y = 1 / slab length.
+    slab: [f32; 4],
 }
 
 /// Material flags in `Uniforms::params.w` (mirrored by the `FLAG_*` constants of
@@ -106,7 +109,8 @@ impl TexData {
 
 /// Orthographic view: image right = -X (camera on +Y looking at -Y) rotated by `yaw`
 /// degrees about Z, image up = +Z. `x0..x1` is the horizontal range in view units (left to
-/// right), `z0..z1` the vertical range.
+/// right), `z0..z1` the vertical range. With `basis` the camera axes are given instead of the
+/// yaw (which is then ignored): `x0..x1` runs along `basis.right`, `z0..z1` along `basis.up`.
 #[derive(Debug, Clone, Copy)]
 pub struct View {
     pub yaw_deg: f32,
@@ -116,6 +120,40 @@ pub struct View {
     pub z1: f32,
     pub width: u32,
     pub height: u32,
+    pub basis: Option<Basis>,
+}
+
+/// A general orthographic camera basis in model space (z up). `right`, `up` and `toward` (from
+/// the model toward the camera) are unit length, orthogonal and right-handed
+/// (`right x up = toward`), as the yaw views are.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Basis {
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub toward: [f32; 3],
+    /// Depth slab of [`Pass::ObjectNormalDepth`]: `(near, length)`, where `near` is
+    /// `dot(p, toward)` on the slab's near plane and depth 0..1 runs away from the camera over
+    /// `length` units. A length <= 0 uses the scene's own depth range.
+    pub slab: (f32, f32),
+}
+
+impl Basis {
+    /// The basis of a yaw view (no explicit slab).
+    pub fn from_yaw(yaw_deg: f32) -> Basis {
+        let (s, c) = yaw_deg.to_radians().sin_cos();
+        Basis { right: [-c, -s, 0.0], up: [0.0, 0.0, 1.0], toward: [-s, c, 0.0], slab: (0.0, 0.0) }
+    }
+}
+
+impl View {
+    /// The camera basis: `basis`, or the one of `yaw_deg`.
+    pub fn camera(&self) -> Basis {
+        self.basis.unwrap_or_else(|| Basis::from_yaw(self.yaw_deg))
+    }
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// Lighting of one billboard type (TexGen `*BillboardsDirect`, `Ambient`, light direction).
@@ -142,6 +180,23 @@ pub enum Pass {
     /// the viewer, as the game's normal maps (`billboard.wgsl` has the exact encoding);
     /// independent of the billboard's lighting (HD grass has direct 0 and still gets normals).
     Normal,
+    /// Impostor normal + depth: the shading normal in **model space** (normal map applied, turned
+    /// toward the viewer on back faces) and the depth across the view's slab ([`Basis::slab`]),
+    /// rendered to RGBA16F without MSAA. [`Renderer::render_many`] returns it as RGBA8:
+    /// RGB = normal * 0.5 + 0.5 (averaged over the covered subsamples, renormalised),
+    /// A = slab depth (0 near .. 255 far); texels with no coverage are (128, 128, 255, 255)
+    /// (up normal, far).
+    ObjectNormalDepth,
+}
+
+impl Pass {
+    fn code(self) -> f32 {
+        match self {
+            Pass::Diffuse => 0.0,
+            Pass::Normal => 1.0,
+            Pass::ObjectNormalDepth => 2.0,
+        }
+    }
 }
 
 /// TexGen's `MaxMultiSamples` default; capped by what the adapter supports.
@@ -185,6 +240,8 @@ pub struct Renderer {
     /// MSAA sample count of the render target.
     pub samples: u32,
     pipelines: [wgpu::RenderPipeline; 2],
+    /// The same for [`Pass::ObjectNormalDepth`] (RGBA16F target, one sample).
+    nd_pipelines: [wgpu::RenderPipeline; 2],
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     flat: wgpu::TextureView,
@@ -198,12 +255,6 @@ pub fn view_x(p: [f32; 3], yaw_deg: f32) -> f32 {
     let (s, c) = yaw_deg.to_radians().sin_cos();
     // yaw 0: view x = -X; yaw 90: view x = -Y (side view).
     -(p[0] * c + p[1] * s)
-}
-
-fn view_depth(p: [f32; 3], yaw_deg: f32) -> f32 {
-    let (s, c) = yaw_deg.to_radians().sin_cos();
-    // Toward the camera = larger.
-    p[1] * c - p[0] * s
 }
 
 fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -308,7 +359,7 @@ impl Renderer {
             ],
         });
         let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("billboard"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
-        let make = |cull_mode: Option<wgpu::Face>, front_face: wgpu::FrontFace| {
+        let make_for = |cull_mode: Option<wgpu::Face>, front_face: wgpu::FrontFace, format: wgpu::TextureFormat, samples: u32| {
             d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("billboard"),
                 layout: Some(&pl),
@@ -326,18 +377,20 @@ impl Renderer {
                     module: &module,
                     entry_point: Some("fs"),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
                 }),
                 primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode, front_face, ..Default::default() },
                 depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
-                multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
-                multiview: None,
+                multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },                multiview: None,
                 cache: None,
             })
         };
         // [0] two-sided, [1] back faces culled: TexGen culls shapes without the Double_Sided flag
         // (counter-clockwise front faces in this projection).
-        let pipelines = [make(None, wgpu::FrontFace::Ccw), make(Some(wgpu::Face::Back), wgpu::FrontFace::Ccw)];
+        let rgba8 = wgpu::TextureFormat::Rgba8Unorm;
+        let pipelines = [make_for(None, wgpu::FrontFace::Ccw, rgba8, samples), make_for(Some(wgpu::Face::Back), wgpu::FrontFace::Ccw, rgba8, samples)];
+        let f16 = wgpu::TextureFormat::Rgba16Float;
+        let nd_pipelines = [make_for(None, wgpu::FrontFace::Ccw, f16, 1), make_for(Some(wgpu::Face::Back), wgpu::FrontFace::Ccw, f16, 1)];
         let sampler = d.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("billboard"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -354,7 +407,7 @@ impl Renderer {
         // Missing normal map: flat (+z); missing glow map: black.
         let flat = solid(gpu, [128, 128, 255, 255]);
         let black = solid(gpu, [0, 0, 0, 255]);
-        Renderer { samples, pipelines, layout, sampler, flat, black, cache: Default::default() }
+        Renderer { samples, pipelines, nd_pipelines, layout, sampler, flat, black, cache: Default::default() }
     }
 
     /// Renders `scene` for `view` ([`Pass::Diffuse`]).
@@ -406,40 +459,45 @@ impl Renderer {
         let views = self.texture_views(gpu, jobs);
         let mut enc = d.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("billboards") });
         let mut readbacks = Vec::with_capacity(jobs.len());
+        // Vertex and index buffers per mesh, shared by every job that draws it (impostor bakes
+        // render one scene from hundreds of directions).
+        let mut geometry: HashMap<*const Mesh, std::rc::Rc<(wgpu::Buffer, wgpu::Buffer)>> = HashMap::new();
         for job in jobs {
             let (scene, view, light, kind) = (job.scene, job.view, job.light, job.pass);
+            let nd = kind == Pass::ObjectNormalDepth;
+            let (format, texel, samples) = if nd { (wgpu::TextureFormat::Rgba16Float, 8, 1) } else { (wgpu::TextureFormat::Rgba8Unorm, 4, self.samples) };
             let ss = supersample_for(view.width.max(1), view.height.max(1));
             let (w, h) = (view.width.max(1) * ss, view.height.max(1) * ss);
             let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
-            let msaa = (self.samples > 1).then(|| d.create_texture(&wgpu::TextureDescriptor { label: Some("msaa"), size, mip_level_count: 1, sample_count: self.samples, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] }));
-            let resolve = d.create_texture(&wgpu::TextureDescriptor { label: Some("resolve"), size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
-            let depth = d.create_texture(&wgpu::TextureDescriptor { label: Some("depth"), size, mip_level_count: 1, sample_count: self.samples, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
+            let msaa = (samples > 1).then(|| d.create_texture(&wgpu::TextureDescriptor { label: Some("msaa"), size, mip_level_count: 1, sample_count: samples, dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] }));
+            let resolve = d.create_texture(&wgpu::TextureDescriptor { label: Some("resolve"), size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
+            let depth = d.create_texture(&wgpu::TextureDescriptor { label: Some("depth"), size, mip_level_count: 1, sample_count: samples, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
             let (mv, rv, dv) = (msaa.as_ref().map(|m| m.create_view(&Default::default())), resolve.create_view(&Default::default()), depth.create_view(&Default::default()));
 
-            // Depth range over the whole scene.
+            // Camera axes; depth range over the whole scene along the toward-camera axis.
+            let cam = view.camera();
             let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
             for m in &scene.meshes {
                 for p in &m.positions {
-                    let z = view_depth(*p, view.yaw_deg);
+                    let z = dot3(*p, cam.toward);
                     dmin = dmin.min(z);
                     dmax = dmax.max(z);
                 }
             }
             let dspan = (dmax - dmin).max(1.0);
-            let (s, c) = view.yaw_deg.to_radians().sin_cos();
             let sx = 2.0 / (view.x1 - view.x0);
             let sz = 2.0 / (view.z1 - view.z0);
-            // clip x = (view_x - x0) * sx - 1, view_x = -(X c + Y s)
-            let rx = [-c * sx, -s * sx, 0.0, -view.x0 * sx - 1.0];
-            let ry = [0.0, 0.0, sz, -view.z0 * sz - 1.0];
-            // depth: 0 nearest (largest view depth) .. 1 farthest
-            let rz = [s / dspan, -c / dspan, 0.0, dmax / dspan];
-            // Toward the camera (the direction of increasing view depth).
-            let eye = [-s, c, 0.0, light.direct];
+            let (r, up, t) = (cam.right, cam.up, cam.toward);
+            // clip x = (dot(p, right) - x0) * sx - 1; clip y likewise along up.
+            let rx = [r[0] * sx, r[1] * sx, r[2] * sx, -view.x0 * sx - 1.0];
+            let ry = [up[0] * sz, up[1] * sz, up[2] * sz, -view.z0 * sz - 1.0];
+            // depth: 0 nearest (largest dot(p, toward)) .. 1 farthest
+            let rz = [-t[0] / dspan, -t[1] / dspan, -t[2] / dspan, dmax / dspan];
+            let eye = [t[0], t[1], t[2], light.direct];
+            let slab = if cam.slab.1 > 0.0 { [cam.slab.0, 1.0 / cam.slab.1, 0.0, 0.0] } else { [dmax, 1.0 / dspan, 0.0, 0.0] };
 
             struct Draw {
-                vb: wgpu::Buffer,
-                ib: wgpu::Buffer,
+                geo: std::rc::Rc<(wgpu::Buffer, wgpu::Buffer)>,
                 count: u32,
                 bind: wgpu::BindGroup,
                 two_sided: bool,
@@ -449,12 +507,18 @@ impl Renderer {
                 let Some(tv) = views.get(&m.diffuse) else { continue };
                 let nv = views.get(&m.normal).unwrap_or(&self.flat);
                 let gv = views.get(&m.glow).unwrap_or(&self.black);
-                let zero = [0.0; 3];
-                let verts: Vec<Vertex> = (0..m.positions.len())
-                    .map(|i| Vertex { pos: m.positions[i], uv: m.uvs.get(i).copied().unwrap_or_default(), n: m.normals[i], t: m.tangents.get(i).copied().unwrap_or(zero), b: m.bitangents.get(i).copied().unwrap_or(zero), c: m.colors[i] })
-                    .collect();
-                let vb = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX });
-                let ib = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&m.indices), usage: wgpu::BufferUsages::INDEX });
+                let geo = geometry
+                    .entry(m as *const Mesh)
+                    .or_insert_with(|| {
+                        let zero = [0.0; 3];
+                        let verts: Vec<Vertex> = (0..m.positions.len())
+                            .map(|i| Vertex { pos: m.positions[i], uv: m.uvs.get(i).copied().unwrap_or_default(), n: m.normals[i], t: m.tangents.get(i).copied().unwrap_or(zero), b: m.bitangents.get(i).copied().unwrap_or(zero), c: m.colors[i] })
+                            .collect();
+                        let vb = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX });
+                        let ib = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&m.indices), usage: wgpu::BufferUsages::INDEX });
+                        std::rc::Rc::new((vb, ib))
+                    })
+                    .clone();
                 let (spec, spec2, emit, flags) = material(m, job.textures);
                 let u = Uniforms {
                     rx,
@@ -462,10 +526,11 @@ impl Renderer {
                     rz,
                     light: [light.dir[0], light.dir[1], light.dir[2], light.ambient],
                     eye,
-                    params: [m.alpha_test.map(|t| f32::from(t) / 255.0).unwrap_or(-1.0), if kind == Pass::Normal { 1.0 } else { 0.0 }, light.pbr_scale, flags as f32],
+                    params: [m.alpha_test.map(|t| f32::from(t) / 255.0).unwrap_or(-1.0), kind.code(), light.pbr_scale, flags as f32],
                     spec,
                     spec2: [spec2[0], spec2[1], spec2[2], light.normal_pull],
                     emit,
+                    slab,
                 };
                 let ub = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&u), usage: wgpu::BufferUsages::UNIFORM });
                 let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -479,10 +544,10 @@ impl Renderer {
                         wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(gv) },
                     ],
                 });
-                draws.push(Draw { vb, ib, count: m.indices.len() as u32, bind, two_sided: m.double_sided });
+                draws.push(Draw { geo, count: m.indices.len() as u32, bind, two_sided: m.double_sided });
             }
 
-            let row = (w * 4).div_ceil(256) * 256;
+            let row = (w * texel).div_ceil(256) * 256;
             let readback = d.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: u64::from(row * h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
             {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -495,11 +560,12 @@ impl Renderer {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                let pipelines = if nd { &self.nd_pipelines } else { &self.pipelines };
                 for dr in &draws {
-                    pass.set_pipeline(&self.pipelines[usize::from(!dr.two_sided)]);
+                    pass.set_pipeline(&pipelines[usize::from(!dr.two_sided)]);
                     pass.set_bind_group(0, &dr.bind, &[]);
-                    pass.set_vertex_buffer(0, dr.vb.slice(..));
-                    pass.set_index_buffer(dr.ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(0, dr.geo.0.slice(..));
+                    pass.set_index_buffer(dr.geo.1.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..dr.count, 0, 0..1);
                 }
             }
@@ -508,7 +574,7 @@ impl Renderer {
                 wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
                 size,
             );
-            readbacks.push((readback, row, w, h, ss));
+            readbacks.push((readback, row, w, h, ss, nd));
         }
         q.submit([enc.finish()]);
         let (tx, rx_) = std::sync::mpsc::channel();
@@ -524,17 +590,65 @@ impl Renderer {
         }
         readbacks
             .iter()
-            .map(|(buf, row, w, h, ss)| {
+            .map(|(buf, row, w, h, ss, nd)| {
                 let data = buf.slice(..).get_mapped_range();
-                let mut out = vec![0u8; (w * h * 4) as usize];
+                let texel = if *nd { 8 } else { 4 };
+                let line = *w as usize * texel;
+                let mut out = vec![0u8; line * *h as usize];
                 for y in 0..*h as usize {
                     // Row 0 of the texture is the top of the image (clip y = +1).
-                    out[y * *w as usize * 4..(y + 1) * *w as usize * 4].copy_from_slice(&data[y * *row as usize..y * *row as usize + *w as usize * 4]);
+                    out[y * line..(y + 1) * line].copy_from_slice(&data[y * *row as usize..y * *row as usize + line]);
                 }
-                downsample(&out, *w, *h, *ss)
+                if *nd {
+                    let half: Vec<u16> = out.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+                    downsample_normal_depth(&half, *w, *h, *ss)
+                } else {
+                    downsample(&out, *w, *h, *ss)
+                }
             })
             .collect()
     }
+}
+
+/// [`Pass::ObjectNormalDepth`] readback (RGBA16F: model-space normal, slab depth; cleared to
+/// zero) averaged over `ss` x `ss` blocks to RGBA8 (see [`Pass::ObjectNormalDepth`]). A subsample
+/// counts as covered when its normal is not the cleared zero vector.
+pub fn downsample_normal_depth(px: &[u16], w: u32, h: u32, ss: u32) -> Vec<u8> {
+    let ss = ss.max(1);
+    let (ow, oh) = (w / ss, h / ss);
+    let f = |v: u16| half::f16::from_bits(v).to_f32();
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut out = vec![0u8; (ow * oh * 4) as usize];
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let (mut n, mut depth, mut hits) = ([0f32; 3], 0f32, 0u32);
+            for y in oy * ss..(oy + 1) * ss {
+                for x in ox * ss..(ox + 1) * ss {
+                    let i = ((y * w + x) * 4) as usize;
+                    let v = [f(px[i]), f(px[i + 1]), f(px[i + 2])];
+                    if v[0] * v[0] + v[1] * v[1] + v[2] * v[2] < 0.25 {
+                        continue;
+                    }
+                    for k in 0..3 {
+                        n[k] += v[k];
+                    }
+                    depth += f(px[i + 3]);
+                    hits += 1;
+                }
+            }
+            let o = ((oy * ow + ox) * 4) as usize;
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if hits == 0 || l < 1e-6 {
+                out[o..o + 4].copy_from_slice(&[128, 128, 255, 255]);
+                continue;
+            }
+            for k in 0..3 {
+                out[o + k] = q(n[k] / l * 0.5 + 0.5);
+            }
+            out[o + 3] = q(depth / hits as f32);
+        }
+    }
+    out
 }
 
 /// Averages `ss` x `ss` blocks of a supersampled render, as an MSAA resolve does: alpha is the

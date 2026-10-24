@@ -13,7 +13,7 @@ fn common(world: &str, season: &str) -> crate::Common {
 fn trees() -> TreeFile {
     let mut f = TreeFile { common: common("Tamriel", ""), ..Default::default() };
     let p = f.common.plugin_index("Skyrim.esm");
-    f.types.push(TreeType { base_plugin: p, tree_record: true, base_form: 0x6F7DC, model_crc32: 0xDEADBEEF, bounds: [-300, -300, -20, 300, 300, 1800], references: 0, model: r"meshes\landscape\trees\treepineforest01.nif".into(), lod4: r"meshes\dyndolod\lod\trees\treepineforest01passthru_lod.nif".into() });
+    f.types.push(TreeType { tree_record: true, bases: vec![(p, 0x6F7DC)], name: "treepineforest01_1234abcd".into(), model_crc32: 0xDEADBEEF, bounds: [-300, -300, -20, 300, 300, 1800], references: 0, model: r"meshes\landscape\trees\treepineforest01.nif".into(), lod4: r"meshes\dyndolod\lod\trees\treepineforest01passthru_lod.nif".into() });
     for i in 0..50u32 {
         let x = -6000.0 + i as f32 * 397.25;
         f.add([x, 1234.5 + i as f32, 100.0 + i as f32], i as f32 * 0.3 - 3.0, 0.8 + i as f32 / 100.0, 0, if i % 3 == 0 { "Skyrim.esm" } else { "Mod.esl" }, 0x800 + i).unwrap();
@@ -215,7 +215,7 @@ fn cgid_conversion() {
 #[test]
 fn golden_trees_bytes() {
     let mut f = TreeFile { common: crate::Common { world: "W".into(), season: String::new(), generator: "g".into(), plugins: Vec::new(), params: String::new() }, ..Default::default() };
-    f.types.push(TreeType { base_plugin: 0, tree_record: true, base_form: 0x10, model_crc32: 0x1234_5678, bounds: [-1, -2, -3, 4, 5, 6], references: 0, model: "m".into(), lod4: String::new() });
+    f.types.push(TreeType { tree_record: true, bases: vec![(0, 0x10)], name: "m_0".into(), model_crc32: 0x1234_5678, bounds: [-1, -2, -3, 4, 5, 6], references: 0, model: "m".into(), lod4: String::new() });
     f.common.plugin_index("Skyrim.esm");
     f.add([4096.0 + 1.0, -0.5, 10.0], std::f32::consts::PI, 1.0, 0, "Skyrim.esm", 0x0001_2345).unwrap();
     let bytes = f.to_bytes(WriteOptions { zstd: None, crc: true }).unwrap();
@@ -224,4 +224,4 @@ fn golden_trees_bytes() {
     assert_eq!(hex, expect, "\n{hex}");
 }
 
-const GOLDEN_TREES: &str = "4c4654520100000040000000000000001800000001000000bc000000000000004000000000000000640000000100ffff0100ffff0a15d923010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502500000001000000000001001000000078563412fffffefffdff0400050006000100000001006d00000000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a40000000000000018000000180000000100000074a1d2c5";
+const GOLDEN_TREES: &str = "4c4654520100000040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";

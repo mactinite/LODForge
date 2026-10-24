@@ -110,22 +110,26 @@ lists only the plugins some record or type uses, in load order at build time.
 **`PARM`** (all files): `str text`, `key=value` lines separated by `\n` (build parameters for
 diagnostics, e.g. `min_copies=8`). Never needed to read the data.
 
-**`TTYP`** (trees): the tree types. `u32 count`, then per type:
+**`TTYP`** (trees): the tree types. **They are the worldspace's impostor types, one entry per
+`types[i]` of `textures\LODForge\Impostors\<World>\impostors.json`, in the same order**
+(docs/runtime/impostors.md): a record's `type` is directly the impostor type index, and every
+season file of the worldspace carries the same table (one impostor set covers all seasons).
+`u32 count`, then per type:
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | u16 | base_plugin (`PLUG` index of the base record's defining plugin) |
-| 2 | u16 | flags: bit 0 the base is `TREE` (else a `STAT` with the has-tree-LOD flag) |
-| 4 | u32 | base_form (local form id of the base) |
-| 8 | u32 | model_crc32 (CRC-32 of the full model file bytes as the load order provides it; 0 if unreadable) |
-| 12 | i16[6] | bounds: the base's `OBND` (x1, y1, z1, x2, y2, z2), unscaled |
-| 24 | u32 | references (number of records of this type in the file) |
-| 28 | str | model (full model, Data-relative, lower case: `meshes\landscape\trees\treepineforest01.nif`) |
-| | str | lod4 (the LOD4 column the object LOD would have used: a 3D LOD model path, a billboard `.dds`, or `""`) |
+| 0 | u32 | model_crc32 (CRC-32 of the rendered model file; = `impostors.json` `model_crc32`) |
+| 4 | i16[6] | bounds: `OBND` of the type's first base used in this file (x1, y1, z1, x2, y2, z2), unscaled; zeros when no base of the type is used here |
+| 16 | u32 | references (number of records of this type in the file) |
+| 20 | u16 | base_count |
+| 22 | u16 | flags: bit 0 some base is a `TREE` record (else `STAT`s with the has-tree-LOD flag) |
+| 24 | str | name (= `impostors.json` `types[i].name`, e.g. `treepineforest01_1a2b3c4d`; check it to detect a mismatched impostor set) |
+| | str | model (the rendered model, = `impostors.json` `model`) |
+| | str | lod4 (the LOD4 column the object LOD would have used for the first reference: a 3D LOD model, a billboard `.dds`, or `""`) |
+| | (u16, u32)[base_count] | bases drawn with this type in this file: `PLUG` index, local form id |
 
-Type indices are file-local (a season file has its own table). **Join key with the impostor
-manifest:** `(model, model_crc32)`. Two bases with the same model are separate types (they can
-differ in `OBND` and season swaps) but share an impostor.
+A type with `references = 0` exists only to keep the indices aligned with the impostor set.
+Trees whose base has no baked impostor type are not in the file; they stay in object LOD.
 
 **`MESH`** (statics): `u32 count`, then per mesh:
 
@@ -206,7 +210,7 @@ swaps), that the export would give object or tree LOD, i.e. not deleted, not ini
 not behind an enable parent (unless DynDOLOD's `xesplod` list allows the parent), not ignored by
 EditorID, `mod_world_ignore` or a reference rule, with a rule that gives them some LOD; **and not**
 tilted more than `TreeLODMaxTilt` on x or y, not a large reference, not a child-worldspace copy and
-not inside a child worldspace's tree object-LOD bounds. Those stay in object LOD (their `.bto`
+not inside a child worldspace's tree object-LOD bounds, **and its base has a baked impostor type**. Those stay in object LOD (their `.bto`
 shapes are unchanged). Trees that DynDOLOD handles as dynamic LOD (enable-parent trees) are not in
 the file.
 
@@ -219,7 +223,7 @@ Section payload: `record_count` records of 24 bytes, sorted by `hash` ascending.
 | 4 | f32 | z (world) |
 | 8 | u16 | yaw (angle encoding of the reference's z rotation) |
 | 10 | f16 | scale (the reference's `XSCL`, 1.0 without one) |
-| 12 | u16 | type (`TTYP` index) |
+| 12 | u16 | type (`TTYP` index = impostor type index in `impostors.json`) |
 | 14 | u16 | plugin (`PLUG` index of the plugin that defines the reference form) |
 | 16 | u32 | form (local form id of the reference) |
 | 20 | u32 | hash (`ref_hash(PLUG[plugin], form)`) |

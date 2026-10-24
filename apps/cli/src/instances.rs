@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use lodforge_dyndolod::assign::is_tree;
-use lodforge_dyndolod::bases::{model_path, owner_key};
+use lodforge_dyndolod::bases::owner_key;
 use lodforge_dyndolod::export::{RefLine, tree_tilted};
 use lodforge_esp::Worldspace;
 use lodforge_instances::statics::{MESH_PASSTHRU, MESH_TREE, MESH_VERTEX_ALPHA, Mesh, StaticsFile};
@@ -115,6 +115,8 @@ pub struct Kept {
     pub copies: usize,
     pub bounds: usize,
     pub no_plugin: usize,
+    /// The base has no baked impostor type.
+    pub no_impostor: usize,
 }
 
 /// The trees of one season export.
@@ -134,12 +136,13 @@ impl SeasonTrees {
 
 /// Selects the trees of one season export the runtime draws (instance-formats.md section 5).
 /// `world` includes child worldspace copies, as the export saw it.
-pub fn select_trees(p: &Profile, c: &Config, world: &Worldspace, s: &SeasonExport, names: &FormNames, crc: &mut HashMap<String, u32>) -> SeasonTrees {
+pub fn select_trees(c: &Config, world: &Worldspace, s: &SeasonExport, names: &FormNames, impostors: &crate::impostors::SetReport) -> SeasonTrees {
     let bounds = crate::dyndolod_build::tree_object_bounds(c, &world.editor_id);
     let tilt: f64 = c.num("TreeLODMaxTilt", 30.0);
     let season = s.season.map(|x| x.code().to_string()).unwrap_or_default();
     let mut file = TreeFile { common: Common { world: world.editor_id.clone(), season, generator: generator(), plugins: Vec::new(), params: format!("tree_max_tilt={tilt}") }, ..Default::default() };
-    let mut type_of: HashMap<u32, u16> = HashMap::new();
+    file.types = impostors.types.iter().map(|t| TreeType { name: t.name.clone(), model: t.model.clone(), model_crc32: t.model_crc32, ..Default::default() }).collect();
+    let mut seen_base: HashSet<u32> = HashSet::new();
     let mut refs = HashSet::new();
     let mut kept = Kept::default();
     for l in &s.lines {
@@ -169,18 +172,23 @@ pub fn select_trees(p: &Profile, c: &Config, world: &Worldspace, s: &SeasonExpor
             kept.no_plugin += 1;
             continue;
         };
-        let ty = match type_of.get(&l.base) {
-            Some(&t) => t,
-            None => {
-                let model = model_path(&b.model);
-                let model_crc32 = *crc.entry(model.clone()).or_insert_with(|| p.vfs.read(&model).ok().flatten().map(|d| crc32fast::hash(&d)).unwrap_or(0));
-                let (bp, bf) = names.split(l.base).map(|(n, f)| (file.common.plugin_index(n), f)).unwrap_or((0xFFFF, l.base));
-                file.types.push(TreeType { base_plugin: bp, tree_record: &b.signature == b"TREE", base_form: bf, model_crc32, bounds: b.bounds, references: 0, model, lod4: l.columns[0].to_ascii_lowercase() });
-                let t = (file.types.len() - 1) as u16;
-                type_of.insert(l.base, t);
-                t
-            }
+        // The tree's type is its base's impostor type (the impostor set's index); bases without a
+        // baked impostor stay in object LOD.
+        let Some(&ti) = impostors.base_index.get(&l.base) else {
+            kept.no_impostor += 1;
+            continue;
         };
+        let ty = ti as u16;
+        if seen_base.insert(l.base) {
+            let bp = names.split(l.base).map(|(n, f)| (file.common.plugin_index(n), f)).unwrap_or((0xFFFF, l.base));
+            let t = &mut file.types[usize::from(ty)];
+            if t.bases.is_empty() {
+                t.bounds = b.bounds;
+                t.lod4 = l.columns[0].to_ascii_lowercase();
+            }
+            t.bases.push(bp);
+            t.tree_record |= &b.signature == b"TREE";
+        }
         let scale = if pl.has_scale { pl.scale } else { 1.0 };
         if file.add(pl.position, pl.rotation[2], scale, ty, plugin, local).is_ok() {
             refs.insert(l.ref_id);

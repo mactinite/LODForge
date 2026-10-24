@@ -118,6 +118,12 @@ pub struct Args {
     pub materials: Materials,
     #[command(flatten)]
     pub rt: crate::instances::Opts,
+    /// Also bake hemi-octahedral tree impostors for the LODForge runtime, per worldspace under
+    /// `textures\LODForge\Impostors\<World>\` (docs/runtime/impostors.md).
+    #[arg(long)]
+    pub impostors: bool,
+    #[command(flatten)]
+    pub impostor_opts: crate::impostors::Opts,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
@@ -425,6 +431,15 @@ pub fn run(a: &Args) -> Result<()> {
                 }
             }
         };
+        // Impostors first: in runtime mode the trees files name the impostor set's type indices.
+        let mut impostor_set: Option<crate::impostors::SetReport> = None;
+        if a.impostors || a.rt.on() {
+            let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
+            step("impostors", None, &mut || {
+                impostor_set = Some(crate::impostors::build_stage(&p, &dyndolod, &out, world, &a.seasons, &a.impostor_opts)?);
+                Ok(())
+            });
+        }
         if !a.no_objects && dyn_mode {
             let Some(c) = &dyn_cfg else { continue };
             let Some(ws) = dyn_worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(world)) else { continue };
@@ -455,12 +470,13 @@ pub fn run(a: &Args) -> Result<()> {
                     // Runtime mode: the trees the LODForge Runtime draws, per season.
                     let mut runtime_counts = std::collections::HashMap::new();
                     if let Some(names) = &form_names {
-                        let mut crc = std::collections::HashMap::new();
+                        let empty = crate::impostors::SetReport::default();
+                        let set = impostor_set.as_ref().unwrap_or(&empty);
                         for (k, s) in we.seasons.iter().enumerate() {
-                            let t = crate::instances::select_trees(&p, c, &with, s, names, &mut crc);
+                            let t = crate::instances::select_trees(c, &with, s, names, set);
                             let (path, size) = crate::instances::write_trees(&out, &t, a.rt.write_options())?;
                             if !a.json {
-                                println!("  runtime trees: {} references, {} types in {} cells; {} ({:.2} MB); kept in object LOD: {} tilted, {} large, {} child copies, {} in child-world bounds, {} without a plugin", t.file.records(), t.file.types.len(), t.file.cells.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6, t.kept.tilted, t.kept.large, t.kept.copies, t.kept.bounds, t.kept.no_plugin);
+                                println!("  runtime trees: {} references, {} types in {} cells; {} ({:.2} MB); kept in object LOD: {} tilted, {} large, {} child copies, {} in child-world bounds, {} without a plugin, {} without an impostor", t.file.records(), t.file.types.len(), t.file.cells.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6, t.kept.tilted, t.kept.large, t.kept.copies, t.kept.bounds, t.kept.no_plugin, t.kept.no_impostor);
                             }
                             if k == 0 {
                                 runtime_counts = crate::instances::count_by_base(&s.lines, &t.refs);

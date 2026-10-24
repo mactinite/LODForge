@@ -10,18 +10,25 @@ use crate::{Error, Result};
 
 pub const EXT: &str = "trees.bin";
 
-/// One tree type (`TTYP` entry).
+/// One tree type (`TTYP` entry): an impostor type of the worldspace's impostor set, at the same
+/// index as in its `impostors.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TreeType {
-    pub base_plugin: u16,
-    /// The base is a `TREE` record (else a `STAT` with the has-tree-LOD flag).
+    /// Some base of this type is a `TREE` record (else all are `STAT`s with the has-tree-LOD flag).
     pub tree_record: bool,
-    pub base_form: u32,
+    /// CRC-32 of the rendered model file.
     pub model_crc32: u32,
+    /// `OBND` of the first base in this file (zero when no base of the type is used here).
     pub bounds: [i16; 6],
     pub references: u32,
+    /// The impostor type name (`impostors.json` `types[i].name`): the join key.
+    pub name: String,
+    /// Rendered model (`impostors.json` `model`).
     pub model: String,
+    /// LOD4 column the object LOD would have used for the first reference.
     pub lod4: String,
+    /// Bases drawn with this type in this file: (`PLUG` index, local form id).
+    pub bases: Vec<(u16, u32)>,
 }
 
 /// One record as stored.
@@ -103,16 +110,20 @@ impl TreeFile {
         let mut b = Buf::default();
         b.u32(self.types.len() as u32);
         for t in &self.types {
-            b.u16(t.base_plugin);
-            b.u16(u16::from(t.tree_record));
-            b.u32(t.base_form);
             b.u32(t.model_crc32);
             for v in t.bounds {
                 b.i16(v);
             }
             b.u32(t.references);
+            b.u16(t.bases.len() as u16);
+            b.u16(u16::from(t.tree_record));
+            b.str(&t.name);
             b.str(&t.model);
             b.str(&t.lod4);
+            for &(p, f) in &t.bases {
+                b.u16(p);
+                b.u32(f);
+            }
         }
         Chunk { tag: *b"TTYP", data: b.0 }
     }
@@ -145,15 +156,17 @@ impl TreeFile {
             let mut r = Cur::new(&ch.data);
             let n = r.u32()?;
             for _ in 0..n {
-                let base_plugin = r.u16()?;
-                let flags = r.u16()?;
-                let base_form = r.u32()?;
                 let model_crc32 = r.u32()?;
                 let mut bounds = [0i16; 6];
                 for v in &mut bounds {
                     *v = r.i16()?;
                 }
-                types.push(TreeType { base_plugin, tree_record: flags & 1 != 0, base_form, model_crc32, bounds, references: r.u32()?, model: r.str()?, lod4: r.str()? });
+                let references = r.u32()?;
+                let nb = usize::from(r.u16()?);
+                let flags = r.u16()?;
+                let (name, model, lod4) = (r.str()?, r.str()?, r.str()?);
+                let bases = (0..nb).map(|_| Ok((r.u16()?, r.u32()?))).collect::<Result<Vec<_>>>()?;
+                types.push(TreeType { tree_record: flags & 1 != 0, model_crc32, bounds, references, name, model, lod4, bases });
             }
         }
         let stride = c.header.record_size as usize;

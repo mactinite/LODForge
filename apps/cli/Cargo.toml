@@ -31,6 +31,7 @@ lodforge-viewer.workspace = true
 lodforge-instances.workspace = true
 crc32fast = "1"
 zstd = { version = "0.13", default-features = false }
+lodforge-impostor.workspace = true
 mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]

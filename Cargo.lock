@@ -2582,6 +2582,7 @@ dependencies = [
  "lodforge-esp",
  "lodforge-gpu",
  "lodforge-grass",
+ "lodforge-impostor",
  "lodforge-instances",
  "lodforge-lodmodel",
  "lodforge-nif",
@@ -2681,6 +2682,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodforge-impostor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glam",
+ "lodforge-dds",
+ "lodforge-gpu",
+ "lodforge-texgen",
+ "lz4_flex",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lodforge-instances"
 version = "0.1.0"
 dependencies = [
@@ -2748,6 +2764,7 @@ name = "lodforge-texgen"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "half",
  "lodforge-dds",
  "lodforge-gpu",
  "lodforge-nif",
@@ -2792,6 +2809,7 @@ dependencies = [
  "glam",
  "lodforge-dds",
  "lodforge-gpu",
+ "lodforge-impostor",
  "lodforge-nif",
  "png 0.17.16",
  "pollster",

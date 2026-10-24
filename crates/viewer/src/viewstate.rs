@@ -28,6 +28,9 @@ pub struct Layers {
     pub grass: bool,
     /// Classic tree LOD (`.btt`).
     pub trees: bool,
+    /// LODForge runtime impostors (preview; not part of `all`, it would double the trees).
+    #[serde(default)]
+    pub impostors: bool,
     /// Only shapes flagged as large references.
     pub large_refs_only: bool,
 }
@@ -41,6 +44,7 @@ impl Default for Layers {
             tree_billboards: true,
             grass: true,
             trees: true,
+            impostors: false,
             large_refs_only: false,
         }
     }
@@ -69,6 +73,7 @@ impl Layers {
             tree_billboards: false,
             grass: false,
             trees: false,
+            impostors: false,
             large_refs_only: false,
         };
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
@@ -80,6 +85,7 @@ impl Layers {
                 "tree_billboards" | "tree-billboards" | "billboards" => l.tree_billboards = true,
                 "grass" => l.grass = true,
                 "trees" => l.trees = true,
+                "impostors" => l.impostors = true,
                 "large_refs" | "large-refs" | "largerefs" => l.large_refs_only = true,
                 _ => {}
             }
@@ -273,6 +279,14 @@ pub fn build_frame<'a>(
             if !t.instances.is_empty() && !s.layers.large_refs_only {
                 frame.trees = Some((&t.buffer, t.instances.len() as u32, &t.atlas.bind_group));
                 stats.trees = t.instances.len() as u32;
+            }
+        }
+    }
+    if s.layers.impostors && !s.layers.large_refs_only {
+        if let Some(t) = &scene.impostors {
+            if t.count > 0 {
+                frame.impostors = Some((&t.buffer, t.pages.iter().map(|(r, bg)| (r.clone(), &bg.bind_group)).collect()));
+                stats.trees += t.count;
             }
         }
     }

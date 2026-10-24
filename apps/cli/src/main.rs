@@ -25,6 +25,7 @@ mod tree_report;
 mod tree_models;
 mod inspect;
 mod glow_atlas;
+mod impostors;
 mod object_atlas;
 mod object_atlas_plan;
 mod pbr_linear;
@@ -177,6 +178,8 @@ enum Command {
     GrassBillboards(texgen_billboards::GrassArgs),
     /// TexGen stitched object-LOD textures (mini atlases, _n, PBR twins) from the DynDOLOD rules.
     TexgenStitched(texgen_stitched::Args),
+    /// Hemi-octahedral tree impostor atlases + manifests for the LODForge runtime.
+    Impostors(impostors::Args),
     /// Billboard tree LOD (.lst/.btt + atlas) from the load order.
     TreeLod(tree_lod::Args),
     /// Everything xLODGen does (terrain, objects, trees; all worldspaces and seasons) in one run.
@@ -258,6 +261,7 @@ fn main() -> Result<()> {
         Command::ObjectLod(a) => object_lod::run(&a),
         Command::ObjectExport(a) => object_export::run(&a),
         Command::TreeLod(a) => tree_lod::run(&a),
+        Command::Impostors(a) => impostors::run(&a),
         Command::Build(a) => build::run(&a),
         Command::View(a) => view::run(&a),
         Command::Info(a) => info::run(&a),
