@@ -403,33 +403,45 @@ pub fn bto_stats(a: &StatsArgs) -> Result<()> {
             Some((parts[1].parse().ok()?, e.path()))
         })
         .collect();
-    let per: Vec<(i32, u64, usize, usize)> = files
+    type PerFile = (i32, u64, usize, usize, Vec<(String, usize)>);
+    let per: Vec<PerFile> = files
         .par_iter()
         .map(|(level, path)| {
             let bytes = std::fs::read(path).unwrap_or_default();
-            let (mut shapes, mut tris) = (0usize, 0usize);
+            let (mut shapes, mut tris, mut named) = (0usize, 0usize, Vec::new());
             if let Ok(nif) = lodforge_nif::parse(&bytes) {
                 for b in &nif.blocks {
                     if let lodforge_nif::Block::TriShape(s) = b {
                         shapes += 1;
                         tris += s.triangles.len();
+                        named.push((s.av.net.name.clone().unwrap_or_default(), s.triangles.len()));
                     }
                 }
             }
-            (*level, bytes.len() as u64, shapes, tris)
+            (*level, bytes.len() as u64, shapes, tris, named)
         })
         .collect();
     let mut levels: std::collections::BTreeMap<i32, (usize, u64, usize, usize)> = std::collections::BTreeMap::new();
-    for (l, b, s, t) in per {
+    // Per level and shape name (the material class: obj, objSnow, objSnowHD-LargeRef, ...).
+    let mut names: std::collections::BTreeMap<(i32, String), (usize, usize)> = std::collections::BTreeMap::new();
+    for (l, b, s, t, named) in per {
         let e = levels.entry(l).or_default();
         e.0 += 1;
         e.1 += b;
         e.2 += s;
         e.3 += t;
+        for (n, tr) in named {
+            let e = names.entry((l, n)).or_default();
+            e.0 += 1;
+            e.1 += tr;
+        }
     }
     println!("{} object LOD{}:", a.world, a.season.as_deref().map(|s| format!(" [{s}]")).unwrap_or_default());
     for (l, (n, b, s, t)) in &levels {
         println!("  LOD{l:<2}: {n:>5} files, {:>8.1} MB, {s:>7} shapes, {t:>10} triangles, {:.1} shapes/file", *b as f64 / 1e6, *s as f64 / (*n).max(1) as f64);
+        let mut v: Vec<(&String, &(usize, usize))> = names.iter().filter(|((lv, _), _)| lv == l).map(|((_, n), c)| (n, c)).collect();
+        v.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        println!("    by shape name: {}", v.iter().map(|(n, (s, t))| format!("{n} {s}/{:.2}M", *t as f64 / 1e6)).collect::<Vec<_>>().join(", "));
     }
     Ok(())
 }
