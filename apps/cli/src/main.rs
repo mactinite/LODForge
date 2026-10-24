@@ -224,7 +224,25 @@ enum Command {
     DdsScan { dir: PathBuf },
 }
 
+/// Opts the process out of Windows power throttling (EcoQoS): when the window that started us is
+/// in the background, Windows otherwise runs our threads at low QoS (E-cores, low clocks, few
+/// cores), several times slower for CPU-bound stages. Scheduling only; outputs are unchanged.
+/// `LODFORGE_NO_HIGH_QOS` (any value) leaves the system default, for comparisons.
+#[cfg(windows)]
+fn high_qos() {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation};
+    if std::env::var_os("LODFORGE_NO_HIGH_QOS").is_some() {
+        return;
+    }
+    let state = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED, StateMask: 0 };
+    unsafe {
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state as *const _ as *const _, std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32);
+    }
+}
+
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    high_qos();
     let cli = Cli::parse();
     lodforge_gpu::bc7_cpu::set_default_quality(match cli.bc7 {
         Bc7Arg::Fast => lodforge_gpu::Bc7Quality::Fast,
