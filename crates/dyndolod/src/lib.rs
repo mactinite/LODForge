@@ -19,4 +19,5 @@ pub mod largerefs;
 pub mod dynplugins;
 pub mod occlusion;
 pub mod childworld;
+pub mod overlay;
 pub mod sidefiles;

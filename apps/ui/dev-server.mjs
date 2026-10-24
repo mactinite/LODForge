@@ -1,4 +1,4 @@
-// Static server for previewing dist/ in a browser (the mock backend in app.js stands in for Tauri).
+// Static server for previewing dist/ in a browser (the mock backend in web/src/backend.ts stands in for Tauri).
 // Usage: node apps/ui/dev-server.mjs [port]
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";

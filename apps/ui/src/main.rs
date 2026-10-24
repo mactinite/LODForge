@@ -169,7 +169,8 @@ impl NoWindow for Command {
 }
 
 #[tauri::command]
-async fn profile_info(instance: String, profile: String) -> Result<serde_json::Value, String> {
+async fn profile_info(current: State<'_, Current>, instance: String, profile: String) -> Result<serde_json::Value, String> {
+    *current.0.lock().unwrap() = Some(PathBuf::from(&instance));
     let out = command().args(["info", "--json", "--instance", &instance, "--profile", &profile]).output().map_err(|e| format!("running {}: {e}", cli().display()))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
@@ -179,149 +180,58 @@ async fn profile_info(instance: String, profile: String) -> Result<serde_json::V
     serde_json::from_str(line).map_err(|e| e.to_string())
 }
 
-#[derive(Deserialize)]
-struct BuildRequest {
-    instance: String,
-    profile: String,
-    worlds: Vec<String>,
-    seasons: Vec<String>,
-    terrain: bool,
-    objects: bool,
-    trees: bool,
-    /// Render tree billboards first (`build --texgen`) instead of relying on installed ones.
-    #[serde(default)]
-    texgen: bool,
-    /// The UI only builds DynDOLOD style (`build --mode dyndolod`); anything but `dyndolod` is refused.
-    #[serde(default)]
-    mode: Option<String>,
-    /// DynDOLOD rule preset (Low, Medium, High).
-    #[serde(default)]
-    preset: Option<String>,
-    /// DynDOLOD.esm/.esp and the DLL NG data files (`--no-plugins` when false).
-    #[serde(default = "yes")]
-    plugins: bool,
-    /// Occlusion.esp (`--no-occlusion` when false).
-    #[serde(default = "yes")]
-    occlusion: bool,
-    /// `pbr` (Community Shaders with PBR) or `standard` (non-PBR: ENB complex material, parallax or
-    /// vanilla): `build --materials`.
-    #[serde(default)]
-    materials: Option<String>,
-    /// Grass LOD: `off`, `bto` (grass in object LOD) or `go` (Grass Optimizations meshes).
-    #[serde(default)]
-    grass: Option<String>,
-    /// `auto` or `cache` (with `bto`; both read the NGIO cache).
-    #[serde(default)]
-    grass_source: Option<String>,
-    #[serde(default)]
-    grass_density: Option<f32>,
-    /// BC7 encoder: `fast`, `high` or `best` (`--bc7`; the CLI default is `high`).
-    #[serde(default)]
-    bc7: Option<String>,
-    /// Terrain texture resampling: `hq` or `xlodgen` (`--terrain-filter`).
-    #[serde(default)]
-    terrain_filter: Option<String>,
-    /// LOD32 map detail: `step` or `golden` (`--lod32`).
-    #[serde(default)]
-    lod32: Option<String>,
-    /// Stitched LOD texture tone: `flat` or `dyndolod` (`--lod-texture-tone`).
-    #[serde(default)]
-    lod_texture_tone: Option<String>,
-    /// Billboard resolution multiplier (`--billboard-scale`).
-    #[serde(default)]
-    billboard_scale: Option<f32>,
-    /// Object LOD atlas tile cap for LOD textures (`--atlas-max-tile`; full textures get a
-    /// quarter, `--atlas-full-max-tile`).
-    #[serde(default)]
-    atlas_max_tile: Option<u32>,
-    mo2_mod: Option<String>,
-    out: Option<String>,
-    enable: bool,
+/// The flags `lodforge build --help` lists, read once: `start_build` refuses anything else.
+fn build_flags() -> Result<&'static std::collections::HashSet<String>, String> {
+    static FLAGS: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    if let Some(f) = FLAGS.get() {
+        return Ok(f);
+    }
+    let out = command().args(["build", "--help"]).output().map_err(|e| format!("running {}: {e}", cli().display()))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut set = std::collections::HashSet::new();
+    for word in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        if word.len() > 2 && word.starts_with("--") {
+            set.insert(word.to_string());
+        }
+    }
+    if set.is_empty() {
+        return Err("lodforge build --help listed no flags".into());
+    }
+    Ok(FLAGS.get_or_init(|| set))
 }
 
-fn yes() -> bool {
-    true
+/// Checks a `build` command line from the frontend: `build` first, every `--flag` one the CLI
+/// knows, DynDOLOD style only.
+fn check_build_args(args: &[String], known: &std::collections::HashSet<String>) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("build") {
+        return Err("the command must start with `build`".into());
+    }
+    for (i, a) in args.iter().enumerate().skip(1) {
+        if a.starts_with("--") {
+            let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+            if !known.contains(flag) {
+                return Err(format!("unknown build option {flag}"));
+            }
+            if flag == "--mode" && args.get(i + 1).map(String::as_str) != Some("dyndolod") {
+                return Err("the UI builds DynDOLOD style only (--mode dyndolod)".into());
+            }
+        }
+    }
+    Ok(())
 }
 
+/// Runs `lodforge <args>` (a `build --json ...` command line from the frontend's option catalog)
+/// and forwards its output lines as `build-line` / `build-error` events.
 #[tauri::command]
-fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -> Result<(), String> {
+fn start_build(window: Window, running: State<'_, Running>, args: Vec<String>) -> Result<(), String> {
     let mut guard = running.0.lock().unwrap();
     if guard.is_some() {
         return Err("a build is already running".into());
     }
-    if let Some(m) = req.mode.as_deref().filter(|m| *m != "dyndolod") {
-        return Err(format!("unsupported LOD style {m:?}; the UI builds DynDOLOD style only"));
-    }
+    check_build_args(&args, build_flags()?)?;
+    log(&format!("build {args:?}"));
     let mut c = command();
-    c.args(["build", "--json", "--instance", &req.instance, "--profile", &req.profile]);
-    if !req.worlds.is_empty() {
-        c.args(["--worlds", &req.worlds.join(",")]);
-    }
-    if !req.seasons.is_empty() {
-        c.args(["--seasons", &req.seasons.join(",")]);
-    }
-    for (on, flag) in [(req.terrain, "--no-terrain"), (req.objects, "--no-objects"), (req.trees, "--no-trees")] {
-        if !on {
-            c.arg(flag);
-        }
-    }
-    if req.texgen {
-        c.arg("--texgen");
-    }
-    c.args(["--mode", "dyndolod"]);
-    if let Some(preset) = &req.preset {
-        c.args(["--preset", preset]);
-    }
-    if !req.plugins {
-        c.arg("--no-plugins");
-    }
-    if !req.occlusion {
-        c.arg("--no-occlusion");
-    }
-    if let Some(m) = &req.materials {
-        c.args(["--materials", m]);
-    }
-    if let Some(q) = &req.bc7 {
-        c.args(["--bc7", q]);
-    }
-    if let Some(f) = &req.terrain_filter {
-        c.args(["--terrain-filter", f]);
-    }
-    if let Some(v) = &req.lod32 {
-        c.args(["--lod32", v]);
-    }
-    if let Some(v) = &req.lod_texture_tone {
-        c.args(["--lod-texture-tone", v]);
-    }
-    if let Some(k) = req.billboard_scale {
-        c.args(["--billboard-scale", &k.to_string()]);
-    }
-    if let Some(t) = req.atlas_max_tile {
-        c.args(["--atlas-max-tile", &t.to_string(), "--atlas-full-max-tile", &(t / 4).max(64).to_string()]);
-    }
-    if let Some(g) = req.grass.as_deref().filter(|g| *g != "off") {
-        c.args(["--grass", g]);
-        if g == "bto" {
-            if let Some(src) = &req.grass_source {
-                c.args(["--grass-source", src]);
-            }
-            if let Some(d) = req.grass_density {
-                c.args(["--grass-density", &d.to_string()]);
-            }
-        }
-    }
-    match (&req.mo2_mod, &req.out) {
-        (Some(m), _) => {
-            c.args(["--mo2-mod", m]);
-            if req.enable {
-                c.arg("--enable");
-            }
-        }
-        (None, Some(o)) => {
-            c.args(["--out", o]);
-        }
-        _ => return Err("choose an MO2 mod name or an output folder".into()),
-    }
+    c.args(&args);
     let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("running {}: {e}", cli().display()))?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -339,6 +249,197 @@ fn start_build(window: Window, running: State<'_, Running>, req: BuildRequest) -
         }
     });
     Ok(())
+}
+
+/// The instance the frontend last scanned (`profile_info`); config files are read from it.
+#[derive(Default)]
+struct Current(Mutex<Option<PathBuf>>);
+
+const OVERLAY_MOD: &str = "LODForge Config";
+
+fn instance_of(current: &State<'_, Current>) -> Result<PathBuf, String> {
+    current.0.lock().unwrap().clone().ok_or_else(|| "scan an instance first".to_string())
+}
+
+/// DynDOLOD's `Edit Scripts\DynDOLOD` folder in the instance.
+fn dyndolod_dir(instance: &Path) -> PathBuf {
+    instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD")
+}
+
+/// The overlay folder the CLI reads first (lodforge_dyndolod::overlay).
+fn overlay_dir(instance: &Path) -> PathBuf {
+    instance.join("mods").join(OVERLAY_MOD).join("DynDOLOD")
+}
+
+/// Format id for the frontend's table editors (configFormats.ts), from the file name.
+fn config_format(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if n.starts_with("rules\\") {
+        "rules"
+    } else if n.contains("mod_world_ignore") {
+        "mod_world_ignore"
+    } else if n.contains("childworldfull") || n.contains("xesplod") {
+        "plugin_formid"
+    } else if n.contains("childworldmatches") {
+        "childworld_matches"
+    } else if n.contains("mesh_crc32") {
+        "mesh_crc"
+    } else if n.contains("worldspace_ignore") {
+        "plugin_formid"
+    } else if n.contains("misnamed") || n.contains("default_lod") {
+        "path_list"
+    } else if n.contains("mesh_replace") {
+        "mesh_replace"
+    } else if n.contains("texgen_copy") {
+        "texture_copy"
+    } else if n.contains("texgen_billboards") || n.contains("required_billboards") {
+        "texgen_billboards"
+    } else if n.ends_with(".ini") {
+        "ini"
+    } else {
+        "text"
+    }
+}
+
+/// A config name from the frontend: a relative path below the DynDOLOD folder, in `Configs` or
+/// `Rules` (or DynDOLOD_SSE.ini), with no `..`.
+fn check_config_name(name: &str) -> Result<(), String> {
+    let n = name.replace('/', "\\");
+    let lower = n.to_ascii_lowercase();
+    let ok_dir = lower.starts_with("configs\\") || lower.starts_with("rules\\") || lower == "dyndolod_sse.ini";
+    let ok_ext = lower.ends_with(".txt") || lower.ends_with(".ini");
+    if !ok_dir || !ok_ext || n.split('\\').any(|p| p == ".." || p.is_empty()) || n.contains(':') {
+        return Err(format!("not a DynDOLOD config file: {name}"));
+    }
+    Ok(())
+}
+
+/// Whether the LODForge build reads this file (the others are DynDOLOD/TexGen-only).
+fn config_used(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with("rules\\")
+        || n == "dyndolod_sse.ini"
+        || ["mod_world_ignore", "childworldfull", "childworld_", "childworldmatches", "mesh_crc32", "xesplod", "misnamed", "flat_normals"].iter().any(|k| n.contains(&format!("dyndolod_sse_{k}")))
+}
+
+#[derive(Serialize)]
+struct ConfigFile {
+    name: String,
+    format: &'static str,
+    source: &'static str,
+    size: u64,
+    used: bool,
+}
+
+/// Every config file LODForge reads: DynDOLOD's `Configs\*.txt|ini`, `Rules\*.ini` and
+/// DynDOLOD_SSE.ini, merged with the overlay's copies (case-insensitive names).
+#[tauri::command]
+fn config_files(current: State<'_, Current>) -> Result<Vec<ConfigFile>, String> {
+    let instance = instance_of(&current)?;
+    let (dd, ov) = (dyndolod_dir(&instance), overlay_dir(&instance));
+    let mut by_name: std::collections::BTreeMap<String, ConfigFile> = std::collections::BTreeMap::new();
+    for (root, source) in [(&dd, "dyndolod"), (&ov, "overlay")] {
+        let mut add = |rel: String, path: &Path| {
+            // Only Skyrim SE's files (DynDOLOD also ships Enderal, Fallout 4 and TES5 ones).
+            let file = rel.rsplit('\\').next().unwrap_or(&rel).to_ascii_lowercase();
+            if check_config_name(&rel).is_err() || !file.starts_with("dyndolod_sse") {
+                return;
+            }
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            by_name.insert(rel.to_ascii_lowercase(), ConfigFile { format: config_format(&rel), used: config_used(&rel), name: rel, source, size });
+        };
+        for sub in ["Configs", "Rules"] {
+            if let Ok(rd) = std::fs::read_dir(root.join(sub)) {
+                for e in rd.flatten().filter(|e| e.path().is_file()) {
+                    add(format!("{sub}\\{}", e.file_name().to_string_lossy()), &e.path());
+                }
+            }
+        }
+        let ini = root.join("DynDOLOD_SSE.ini");
+        if ini.is_file() {
+            add("DynDOLOD_SSE.ini".into(), &ini);
+        }
+    }
+    if by_name.is_empty() {
+        return Err(format!("no DynDOLOD config files in {}", dd.display()));
+    }
+    Ok(by_name.into_values().collect())
+}
+
+/// The file in use for `name`: the overlay's copy, else DynDOLOD's (case-insensitive lookup).
+fn resolve_config(instance: &Path, name: &str) -> Option<PathBuf> {
+    for root in [overlay_dir(instance), dyndolod_dir(instance)] {
+        let p = root.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+        let (dir, file) = match name.rsplit_once('\\') {
+            Some((d, f)) => (root.join(d), f),
+            None => (root.clone(), name),
+        };
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            if let Some(e) = rd.flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(file)) {
+                return Some(e.path());
+            }
+        }
+    }
+    None
+}
+
+/// Config text, decoded as UTF-8 or else Latin-1 (DynDOLOD's files are ANSI).
+#[tauri::command]
+fn read_config(current: State<'_, Current>, name: String) -> Result<String, String> {
+    check_config_name(&name)?;
+    let instance = instance_of(&current)?;
+    let p = resolve_config(&instance, &name.replace('/', "\\")).ok_or_else(|| format!("{name} not found"))?;
+    let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(s) => s.trim_start_matches('\u{feff}').to_string(),
+        Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+    })
+}
+
+/// Saves an edited copy into the LODForge Config mod (created with a meta.ini on first save).
+#[tauri::command]
+fn write_config(current: State<'_, Current>, name: String, text: String) -> Result<(), String> {
+    check_config_name(&name)?;
+    let instance = instance_of(&current)?;
+    let p = overlay_dir(&instance).join(name.replace('/', "\\"));
+    std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| format!("{}: {e}", p.display()))?;
+    let meta = instance.join("mods").join(OVERLAY_MOD).join("meta.ini");
+    if !meta.exists() {
+        let _ = std::fs::write(&meta, "[General]\r\nmodid=0\r\nversion=\r\ncomments=Edited DynDOLOD config files from the LODForge UI. LODForge reads these first; DynDOLOD itself does not.\r\n");
+    }
+    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    log(&format!("saved {}", p.display()));
+    Ok(())
+}
+
+/// Deletes the overlay's copy, so DynDOLOD's file is used again.
+#[tauri::command]
+fn reset_config(current: State<'_, Current>, name: String) -> Result<(), String> {
+    check_config_name(&name)?;
+    let instance = instance_of(&current)?;
+    let p = overlay_dir(&instance).join(name.replace('/', "\\"));
+    if p.is_file() {
+        std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(())
+}
+
+/// A report the build wrote into its output (`LODForge_TreeReport_<World>.csv`).
+#[tauri::command]
+fn read_report(instance: String, out: Option<String>, mo2_mod: Option<String>, name: String) -> Result<String, String> {
+    if name.contains(['\\', '/', ':']) || !name.starts_with("LODForge_") {
+        return Err(format!("not a LODForge report: {name}"));
+    }
+    let dir = match (&mo2_mod, &out) {
+        (Some(m), _) => Path::new(&instance).join("mods").join(m),
+        (None, Some(o)) => PathBuf::from(o),
+        _ => return Err("no output folder".into()),
+    };
+    let p = dir.join(&name);
+    std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))
 }
 
 /// Polled by the frontend: Some(exit code) once the build process has exited.
@@ -469,15 +570,16 @@ fn main() {
     }
     tauri::Builder::default()
         .manage(Running::default())
+        .manage(Current::default())
         .manage(args)
-        .invoke_handler(tauri::generate_handler![launch_args, list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build, open_viewer, quit])
+        .invoke_handler(tauri::generate_handler![launch_args, list_profiles, mo2_running, profile_info, start_build, build_status, cancel_build, open_viewer, quit, config_files, read_config, write_config, reset_config, read_report])
         .run(tauri::generate_context!())
         .expect("error while running LODForge UI");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::LaunchArgs;
+    use super::{check_build_args, check_config_name, config_format, LaunchArgs};
 
     fn parse(a: &[&str]) -> LaunchArgs {
         LaunchArgs::parse(a.iter().map(|s| s.to_string()))
@@ -490,5 +592,24 @@ mod tests {
         assert_eq!(a.profile.as_deref(), Some("LODForge"));
         assert!(parse(&[]).is_empty());
         assert!(parse(&["--instance", "", "--stray"]).is_empty());
+    }
+
+    #[test]
+    fn build_args_and_config_names() {
+        let known: std::collections::HashSet<String> = ["--json", "--mode", "--instance"].iter().map(|s| s.to_string()).collect();
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(check_build_args(&a(&["build", "--json", "--mode", "dyndolod", "--instance", "D:/x"]), &known).is_ok());
+        assert!(check_build_args(&a(&["info", "--json"]), &known).is_err());
+        assert!(check_build_args(&a(&["build", "--evil"]), &known).is_err());
+        assert!(check_build_args(&a(&["build", "--mode", "xlodgen"]), &known).is_err());
+        assert!(check_config_name(r"Configs\DynDOLOD_SSE_mod_world_ignore.txt").is_ok());
+        assert!(check_config_name("DynDOLOD_SSE.ini").is_ok());
+        assert!(check_config_name(r"Configs\..\..\x.txt").is_err());
+        assert!(check_config_name(r"C:\x.ini").is_err());
+        assert_eq!(config_format(r"Rules\DynDOLOD_SSE_High.ini"), "rules");
+        assert_eq!(config_format(r"Configs\DynDOLOD_SSE_xesplod.txt"), "plugin_formid");
+        assert!(super::config_used(r"Configs\DynDOLOD_SSE_childworld_MarkarthWorld.ini"));
+        assert!(super::config_used(r"Configs\DynDOLOD_SSE_ChildworldMatches.txt"));
+        assert!(!super::config_used(r"Configs\DynDOLOD_SSE_TexGen_copy_skyrimesm.txt"));
     }
 }

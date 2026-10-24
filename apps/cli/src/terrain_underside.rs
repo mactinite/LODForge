@@ -50,7 +50,7 @@ pub struct Args {
 /// The export lines DynDOLOD adds for a worldspace from `DynDOLOD_SSE.ini` (`MinX=` ...,
 /// `IgnoreHide=`), plus the quality.
 fn ini_lines(dir: &Path, world: &str) -> (String, Option<f32>) {
-    let Ok(ini) = lodforge_dyndolod::ini::Ini::read(&dir.join("DynDOLOD_SSE.ini")) else {
+    let Ok(ini) = lodforge_dyndolod::ini::Ini::read(&lodforge_dyndolod::overlay::path(dir, "DynDOLOD_SSE.ini")) else {
         return (String::new(), None);
     };
     let get = |k: &str| {

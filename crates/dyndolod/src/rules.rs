@@ -230,6 +230,15 @@ pub struct RuleSource<'a> {
 impl RuleSource<'_> {
     /// (display path, content) of a rule file, matched case-insensitively.
     fn open(&self, name: &str) -> Option<(String, String)> {
+        // The LODForge Config overlay's copy first (crate::overlay).
+        if let Some(o) = crate::overlay::current() {
+            let p = o.join("Rules").join(name);
+            if let Some(p) = if p.is_file() { Some(p) } else { find_ci(&o.join("Rules"), name) } {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    return Some((p.to_string_lossy().replace('/', "\\"), crate::ini::decode(&bytes)));
+                }
+            }
+        }
         if let Some(t) = (self.data_override)(&format!("dyndolod\\{name}")) {
             return Some((format!("Data\\DynDOLOD\\{name}"), t));
         }

@@ -102,7 +102,9 @@ fn config_key(plugin: &str) -> String {
 /// Lines of a DynDOLOD config file for `plugin`, from `Data\DynDOLOD\` (VFS) or else `Configs\`.
 pub(crate) fn config_lines(p: &crate::profile::Profile, dyndolod: &std::path::Path, prefix: &str, plugin: &str) -> Vec<String> {
     let name = format!("{prefix}{}.txt", config_key(plugin));
-    let text = p.vfs.read(&format!("dyndolod\\{}", name.to_ascii_lowercase())).ok().flatten().or_else(|| std::fs::read(dyndolod.join(r"Edit Scripts\DynDOLOD\Configs").join(&name)).ok());
+    // The LODForge Config overlay's copy first, then Data\DynDOLOD\ (VFS), then DynDOLOD's Configs.
+    let overlay = lodforge_dyndolod::overlay::current().map(|o| o.join("Configs").join(&name)).filter(|f| f.is_file()).and_then(|f| std::fs::read(f).ok());
+    let text = overlay.or_else(|| p.vfs.read(&format!("dyndolod\\{}", name.to_ascii_lowercase())).ok().flatten()).or_else(|| std::fs::read(dyndolod.join(r"Edit Scripts\DynDOLOD\Configs").join(&name)).ok());
     text.map(|b| String::from_utf8_lossy(&b).lines().map(str::to_string).collect()).unwrap_or_default()
 }
 

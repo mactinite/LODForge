@@ -143,7 +143,7 @@ pub struct Opts {
 /// `Bounds` (SW x, SW y, NE x, NE y) and `NoCellsWithNAVM` of a child worldspace from
 /// `Configs\DynDOLOD_SSE_childworld_<Child>.ini`, section `[<Parent>]`.
 pub fn child_config(c: &Config, child: &str, parent: &str) -> (Option<(i32, i32, i32, i32)>, bool) {
-    let Ok(ini) = Ini::read(&c.dir.join("Configs").join(format!("DynDOLOD_SSE_childworld_{child}.ini"))) else { return (None, false) };
+    let Ok(ini) = Ini::read(&lodforge_dyndolod::overlay::path(&c.dir, &format!(r"Configs\DynDOLOD_SSE_childworld_{child}.ini"))) else { return (None, false) };
     let v: Vec<i32> = ini.get(parent, "Bounds").unwrap_or_default().split(',').filter_map(|s| s.trim().parse().ok()).collect();
     ((v.len() >= 4).then(|| (v[0], v[1], v[2], v[3])), ini.get(parent, "NoCellsWithNAVM").is_some_and(|s| s.trim() == "1"))
 }
@@ -199,8 +199,9 @@ impl Config {
         let data_override = |path: &str| p.vfs.read(path).ok().flatten().map(|b| lodforge_dyndolod::ini::decode(&b));
         let src = RuleSource { rules_dir: dir.join("Rules"), data_override: &data_override };
         let rules = rules::build_rules(&src, "SSE", preset, !static_lod, &p.plugin_names);
-        let mesh_crc = std::fs::read(dir.join(r"Configs\DynDOLOD_SSE_mesh_crc32.txt")).map(|b| lodforge_dyndolod::lodmodels::MeshCrcTable::parse(&String::from_utf8_lossy(&b))).unwrap_or_default();
-        let ini = Ini::read(&dir.join("DynDOLOD_SSE.ini")).with_context(|| format!("reading {}", dir.join("DynDOLOD_SSE.ini").display()))?;
+        let mesh_crc = std::fs::read(lodforge_dyndolod::overlay::path(dir, r"Configs\DynDOLOD_SSE_mesh_crc32.txt")).map(|b| lodforge_dyndolod::lodmodels::MeshCrcTable::parse(&String::from_utf8_lossy(&b))).unwrap_or_default();
+        let ini_path = lodforge_dyndolod::overlay::path(dir, "DynDOLOD_SSE.ini");
+        let ini = Ini::read(&ini_path).with_context(|| format!("reading {}", ini_path.display()))?;
         let cfg = |k: &str| ini.get("DynDOLOD", k).unwrap_or("").to_string();
         let list = |k: &str| -> Vec<String> { cfg(k).split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect() };
         let (index, mesh_paths) = lod_index(p, &ini, dir);
@@ -209,7 +210,7 @@ impl Config {
         let bases = lodforge_dyndolod::bases::read_bases(lo)?;
         let materials = lodforge_dyndolod::bases::read_materials(lo)?;
         let owners = lodforge_dyndolod::bases::owners(lo);
-        let xesp_lod = std::fs::read(dir.join("Configs").join("DynDOLOD_SSE_xesplod.txt")).map(|b| lodforge_dyndolod::bases::read_form_list(lo, &lodforge_dyndolod::ini::decode(&b))).unwrap_or_default();
+        let xesp_lod = std::fs::read(lodforge_dyndolod::overlay::path(dir, r"Configs\DynDOLOD_SSE_xesplod.txt")).map(|b| lodforge_dyndolod::bases::read_form_list(lo, &lodforge_dyndolod::ini::decode(&b))).unwrap_or_default();
         let edids: HashMap<String, u32> = bases.values().map(|b| (b.editor_id.to_ascii_lowercase(), b.form_id)).collect();
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
@@ -238,7 +239,7 @@ fn lod_index(p: &Profile, ini: &Ini, dir: &Path) -> (LodIndex, usize) {
     let cfg = |k: &str| ini.get("DynDOLOD", k).unwrap_or("").to_string();
     let folders: Vec<String> = (1..=5).map(|i| cfg(&format!("Folder{i}"))).filter(|f| !f.is_empty()).collect();
     let ignore: Vec<String> = cfg("IgnoreLODMesh").split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect();
-    let misnamed: HashSet<String> = std::fs::read(dir.join(r"Configs\DynDOLOD_SSE_misnamed.txt"))
+    let misnamed: HashSet<String> = std::fs::read(lodforge_dyndolod::overlay::path(dir, r"Configs\DynDOLOD_SSE_misnamed.txt"))
         .map(|b| lodforge_dyndolod::ini::decode(&b).lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty() && !l.starts_with("//")).collect())
         .unwrap_or_default();
     let meshes = p.vfs.list_prefix("meshes\\");
@@ -271,7 +272,7 @@ pub fn with_resolver<R>(p: &Profile, c: &Config, f: impl FnOnce(&Resolver<'_>) -
 /// `FlatLODHeightVariance`, and an empty last field, numbers in Delphi's `FloatToStr` form.
 pub fn flat_textures(p: &Profile, c: &Config, r: &Resolver<'_>) -> Vec<String> {
     let _ = p;
-    let normals = c.dir.join("configs").join("DynDOLOD_SSE_flat_normals.txt");
+    let normals = lodforge_dyndolod::overlay::path(&c.dir, r"Configs\DynDOLOD_SSE_flat_normals.txt");
     let normals = normals.display().to_string().replace('/', "\\").to_ascii_lowercase();
     let normals = [normals.as_str(); 4].join(";");
     let glow = {
@@ -345,19 +346,18 @@ pub fn tree_object_bounds(c: &Config, world: &str) -> Vec<(i32, i32, i32, i32)> 
 
 /// `TreeLODMaxTilt` from `DynDOLOD_SSE.ini` in `dir` (default 30).
 pub fn tree_max_tilt(dir: &Path) -> f64 {
-    Ini::read(&dir.join("DynDOLOD_SSE.ini")).ok().and_then(|i| i.get("DynDOLOD", "TreeLODMaxTilt").and_then(|v| v.trim().parse().ok())).unwrap_or(30.0)
+    Ini::read(&lodforge_dyndolod::overlay::path(dir, "DynDOLOD_SSE.ini")).ok().and_then(|i| i.get("DynDOLOD", "TreeLODMaxTilt").and_then(|v| v.trim().parse().ok())).unwrap_or(30.0)
 }
 
 /// [`tree_object_bounds`] from a configuration folder.
 pub fn tree_object_bounds_in(dir: &Path, world: &str) -> Vec<(i32, i32, i32, i32)> {
     let mut bounds = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir.join("Configs")) else { return bounds };
-    for e in rd.flatten() {
-        let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+    for path in lodforge_dyndolod::overlay::list(dir, "Configs") {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if !(name.starts_with("dyndolod_sse_childworld_") && name.ends_with(".ini")) {
             continue;
         }
-        let Ok(ini) = Ini::read(&e.path()) else { continue };
+        let Ok(ini) = Ini::read(&path) else { continue };
         let scan_parent = ini.get(world, "ScanParent").is_some_and(|v| v.trim() == "1");
         if !scan_parent && let Some(b) = ini.get(world, "Bounds") {
             let v: Vec<i32> = b.split(',').filter_map(|s| s.trim().parse().ok()).collect();
@@ -959,7 +959,7 @@ pub fn complex_grass_flat(c: &Config, flat: &str) -> String {
     let template = if template.is_empty() || template.eq_ignore_ascii_case("internal") { "DynDOLOD_flat_4x2alt1_lod.nif".to_string() } else { template };
     let lower = |p: &std::path::Path| p.display().to_string().replace('/', "\\").to_ascii_lowercase();
     let template = lower(&c.dir.join(template));
-    let normals = lower(&c.dir.join("configs").join("DynDOLOD_SSE_flat_normals.txt"));
+    let normals = lower(&lodforge_dyndolod::overlay::path(&c.dir, r"Configs\DynDOLOD_SSE_flat_normals.txt"));
     let f = lodforge_dyndolod::export::float_to_str;
     let vc = f(c.num("FlatLODWithNormalMapVertexColor", 0.5));
     let variance = f(c.num("FlatLODColorVariance", 0.1));

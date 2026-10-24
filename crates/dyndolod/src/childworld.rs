@@ -65,7 +65,7 @@ impl ModWorldIgnore {
     }
 
     pub fn read(dir: &Path) -> ModWorldIgnore {
-        std::fs::read(dir.join("Configs").join("DynDOLOD_SSE_mod_world_ignore.txt")).map(|b| ModWorldIgnore::parse(&decode(&b))).unwrap_or_default()
+        std::fs::read(crate::overlay::path(dir, r"Configs\DynDOLOD_SSE_mod_world_ignore.txt")).map(|b| ModWorldIgnore::parse(&decode(&b))).unwrap_or_default()
     }
 
     /// The plugins (lower-case) whose references are ignored in worldspace `world` (EditorID).
@@ -119,7 +119,7 @@ fn rot_key(p: &Placement) -> [i64; 3] {
 
 /// References (`plugin` lower-case, object id) of `Configs\DynDOLOD_SSE_childworldfull.txt`.
 pub fn full_model_refs(dir: &Path) -> HashSet<(String, u32)> {
-    let Ok(b) = std::fs::read(dir.join("Configs").join("DynDOLOD_SSE_childworldfull.txt")) else { return HashSet::new() };
+    let Ok(b) = std::fs::read(crate::overlay::path(dir, r"Configs\DynDOLOD_SSE_childworldfull.txt")) else { return HashSet::new() };
     decode(&b)
         .lines()
         .filter(|l| !l.trim_start().starts_with(';'))
@@ -141,7 +141,7 @@ pub fn is_copy(id: u32) -> bool {
 /// Reads `Configs\DynDOLOD_SSE_childworld_<child>.ini`, section `[<parent>]`; `None` when the
 /// file or section is missing or a `NoScan...IfPluginExists` plugin is loaded.
 pub fn settings(dir: &Path, child: &str, parent: &str, preset: &str, plugins: &[String]) -> Option<ChildSettings> {
-    let ini = Ini::read(&dir.join("Configs").join(format!("DynDOLOD_SSE_childworld_{child}.ini"))).ok()?;
+    let ini = Ini::read(&crate::overlay::path(dir, &format!(r"Configs\DynDOLOD_SSE_childworld_{child}.ini"))).ok()?;
     let get = |k: &str| ini.get(parent, k).map(str::trim);
     get("ScanChild")?;
     let loaded: HashSet<String> = plugins.iter().map(|p| p.to_ascii_lowercase()).collect();
@@ -158,7 +158,7 @@ pub fn settings(dir: &Path, child: &str, parent: &str, preset: &str, plugins: &[
 /// (`plugin` lower-case, object id) -> parent sides.
 pub fn known_matches(dir: &Path) -> HashMap<(String, u32), Vec<(String, u32)>> {
     let mut out: HashMap<(String, u32), Vec<(String, u32)>> = HashMap::new();
-    let Ok(b) = std::fs::read(dir.join("Configs").join("DynDOLOD_SSE_ChildworldMatches.txt")) else { return out };
+    let Ok(b) = std::fs::read(crate::overlay::path(dir, r"Configs\DynDOLOD_SSE_ChildworldMatches.txt")) else { return out };
     for l in decode(&b).lines().filter(|l| !l.trim_start().starts_with(';')) {
         let p: Vec<&str> = l.splitn(5, ';').collect();
         if p.len() < 4 {

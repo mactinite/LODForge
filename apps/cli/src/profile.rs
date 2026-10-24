@@ -51,6 +51,10 @@ pub fn open(instance: &Path, profile: &str, game: &Path) -> Result<Profile> {
 
 /// Opens a profile without the named mods (loose files and their plugins' archives) and plugins.
 pub fn open_filtered(instance: &Path, profile: &str, game: &Path, exclude_mods: &[String], exclude_plugins: &[String]) -> Result<Profile> {
+    // Edited DynDOLOD config files from the UI (lodforge_dyndolod::overlay), unless excluded.
+    let overlay = lodforge_dyndolod::overlay::for_instance(instance);
+    let excluded = exclude_mods.iter().any(|m| m.eq_ignore_ascii_case(lodforge_dyndolod::overlay::MOD_NAME));
+    lodforge_dyndolod::overlay::set((overlay.is_dir() && !excluded).then_some(overlay));
     let layout = Mo2Layout::portable(instance, profile, &game.join("Data"));
 
     let t = Instant::now();
