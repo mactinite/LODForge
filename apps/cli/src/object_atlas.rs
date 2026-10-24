@@ -211,42 +211,11 @@ pub fn billboard_density() -> f32 {
     f32::from_bits(BILLBOARD_DENSITY.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Opaque share of conifer billboards (`--conifer-density`, see [is_conifer_billboard]). In game
-/// (skyrim-cs-base 2026-10-23) a broadleaf billboard such as `oaktall03` matched its full tree at
-/// the switch distance, while pines turned from a dark solid cone into a lighter, see-through
-/// tree, so conifers get their own value.
-static CONIFER_DENSITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f40_0000); // 0.75
-
-pub fn set_conifer_density(d: f32) {
-    CONIFER_DENSITY.store(d.clamp(0.1, 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn conifer_density() -> f32 {
-    f32::from_bits(CONIFER_DENSITY.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-/// Name parts of conifer billboards (vanilla `treepineforest*`, Ulvenwald `*spruce`, `*juniper`,
-/// ...). The billboard's shape does not separate them: pines range from 0.22 to 2.16 width per
-/// height, and aspens and slim oaks fall inside that range.
-const CONIFER_NAMES: [&str; 8] = ["pine", "spruce", "juniper", "conifer", "cedar", "hemlock", "larch", "cypress"];
-
-/// Whether a tree billboard's file name (not its plugin folder) names a conifer.
-pub fn is_conifer_billboard(texture: &str) -> bool {
-    let t = texture.to_ascii_lowercase().replace('/', "\\");
-    let name = t.rsplit('\\').next().unwrap_or(&t);
-    CONIFER_NAMES.iter().any(|k| name.contains(k))
-}
-
-/// Density for an atlas texture: 1 for anything but tree billboards, [conifer_density] for
-/// conifers, [billboard_density] for the rest.
+/// Density for an atlas texture: [billboard_density] for tree billboards, 1 for the rest.
+/// (A separate conifer density, 0.75, compensated for solid-looking pine billboards until their
+/// alpha was dithered; removed 2026-10-24.)
 pub fn density_for(texture: &str) -> f32 {
-    if !is_tree_billboard(texture) {
-        1.0
-    } else if is_conifer_billboard(texture) {
-        conifer_density()
-    } else {
-        billboard_density()
-    }
+    if is_tree_billboard(texture) { billboard_density() } else { 1.0 }
 }
 
 /// Dither tree billboard alpha (`--billboard-soft` turns it off): every mip level of a billboard
@@ -749,18 +718,11 @@ mod tests {
     }
 
     #[test]
-    fn conifers_are_named() {
-        assert!(is_conifer_billboard(r"textures\terrain\lodgen\skyrim.esm\treepineforest01_0006f7dc.dds"));
-        assert!(is_conifer_billboard(r"textures\terrain\lodgen\ulvenwald.esp\ancientspruce01_00012345.dds"));
-        assert!(is_conifer_billboard(r"textures\terrain\lodgen\ulvenwald.esp\kmediumjuniper_00012345.dds"));
-        assert!(!is_conifer_billboard(r"textures\terrain\lodgen\ulvenwald.esp\oaktall03_000a3263.dds"));
-        assert!(!is_conifer_billboard(r"textures\terrain\lodgen\seasonal landscapes.esp\treeaspen01_00012345.dds"));
-        // The plugin folder does not count.
-        assert!(!is_conifer_billboard(r"textures\terrain\lodgen\pinemod.esp\oak01_00012345.dds"));
-        set_conifer_density(0.7);
+    fn density_applies_to_tree_billboards_only() {
+        set_billboard_density(0.7);
         assert_eq!(density_for(r"textures\terrain\lodgen\skyrim.esm\treepineforest01_0006f7dc.dds"), 0.7);
         assert_eq!(density_for(r"textures\lod\pinebranch_lod.dds"), 1.0);
-        set_conifer_density(0.75);
+        set_billboard_density(1.0);
     }
 
     #[test]

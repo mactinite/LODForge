@@ -178,8 +178,7 @@ pub fn atlas_dds(p: &Profile, t: &TreeLod, gpu: &Gpu) -> Result<Option<Vec<u8>>>
         // padding or a neighbouring billboard.
         chains.push(crate::object_atlas::TileChain::new(s.x, s.y, tw, th, &px, mips, lodforge_dds::mips::MipKind::Color, lodforge_dds::mips::Edge::Clamp));
         tiles.push((s.x, s.y, tw, th));
-        // Every tree LOD billboard is a tree; the name decides conifer or not.
-        density.push(if crate::object_atlas::is_conifer_billboard(&tree.billboard) { crate::object_atlas::conifer_density() } else { crate::object_atlas::billboard_density() });
+        density.push(crate::object_atlas::billboard_density());
     }
     let mut levels = crate::object_atlas::assemble(w, h, mips, [0, 0, 0, 0], &chains);
     let dither = vec![crate::object_atlas::billboard_dither(); tiles.len()];

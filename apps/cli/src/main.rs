@@ -77,11 +77,6 @@ struct Cli {
     /// the full trees; below 1 lets light through the crowns so the switch shows less.
     #[arg(long, global = true, default_value_t = 1.0)]
     billboard_density: f32,
-    /// Opaque share of conifer billboards (pine, spruce, juniper ... in the billboard's name),
-    /// which read darker and denser than their full trees; other trees use --billboard-density.
-    /// 0.75 matched the full pines at the switch distance in game (skyrim-cs-base 2026-10-23).
-    #[arg(long, global = true, default_value_t = 0.75)]
-    conifer_density: f32,
     /// Keep tree billboards' rescaled soft alpha instead of dithering it into on/off alpha.
     #[arg(long, global = true)]
     billboard_soft: bool,
@@ -230,7 +225,6 @@ fn main() -> Result<()> {
     lodforge_texgen::render::set_supersample(cli.billboard_supersample);
     texgen_billboards::set_render_installed(cli.installed_billboards == InstalledBillboards::Render);
     object_atlas::set_billboard_density(cli.billboard_density);
-    object_atlas::set_conifer_density(cli.conifer_density);
     object_atlas::set_billboard_dither(!cli.billboard_soft);
     match cli.command {
         Command::Inspect { profile, json } => inspect::run(&profile, json),
