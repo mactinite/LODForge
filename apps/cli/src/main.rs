@@ -18,6 +18,7 @@ mod occlusion;
 mod build;
 mod info;
 mod instances;
+mod runtime_trees;
 mod grass_far;
 mod lod_models;
 mod lod_sources;
@@ -198,6 +199,8 @@ enum Command {
     RuntimeGrass(grass_far::Args),
     /// Shapes (draws) and triangles of a worldspace's object LOD files per level.
     BtoStats(instances::StatsArgs),
+    /// Rewrites only the trees files of a `build --runtime lodforge` output (export + existing impostor sets).
+    RuntimeTrees(runtime_trees::Args),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
     TreeModels(tree_models::Args),
     /// LOD models generated from full models where DynDOLOD's rules want LOD and none is installed.
@@ -269,6 +272,7 @@ fn main() -> Result<()> {
         Command::TreeReport(a) => tree_report::run(&a),
         Command::RuntimeGrass(a) => grass_far::run(&a),
         Command::BtoStats(a) => instances::bto_stats(&a),
+        Command::RuntimeTrees(a) => runtime_trees::run(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),
         Command::PluginDump(a) => plugin_dump::run(&a),

@@ -115,6 +115,7 @@ struct TypeJob {
 }
 
 /// Per-type result for the report.
+#[derive(Default)]
 pub struct TypeReport {
     pub name: String,
     pub model: String,

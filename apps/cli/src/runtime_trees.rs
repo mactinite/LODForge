@@ -1,0 +1,114 @@
+//! `lodforge runtime-trees`: rewrites only the trees files (`<World>[.<SEASON>].trees.bin`) of an
+//! earlier `build --runtime lodforge` output, from a fresh DynDOLOD-mode export and the impostor
+//! sets already in that output (`textures\LODForge\Impostors\<World>\impostors.json`). No texgen,
+//! impostor bake, object LOD or occlusion runs, so it takes minutes, not a full build.
+//!
+//! The profile must show the earlier output (its generated LOD models and billboards decide the
+//! export's LOD4 columns, as in the build), e.g. a profile with that mod enabled.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+
+use crate::profile::ProfileArgs;
+
+#[derive(clap::Args)]
+pub struct Args {
+    #[command(flatten)]
+    pub profile: ProfileArgs,
+    /// The earlier build output (Data folder or MO2 mod folder) with the impostor sets.
+    #[arg(long)]
+    pub data: PathBuf,
+    /// Where to write `SKSE\Plugins\LODForgeRuntime\*.trees.bin` (default: `--data`).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Worldspaces; default: every worldspace with an impostor set in `--data`.
+    #[arg(long, value_delimiter = ',')]
+    pub worlds: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub seasons: Vec<String>,
+    #[arg(long, default_value = "High")]
+    pub preset: String,
+    #[arg(long, default_value = "Low")]
+    pub child_parent: String,
+    /// zstd level for the sections (0 = uncompressed).
+    #[arg(long, default_value_t = 3)]
+    pub zstd: i32,
+}
+
+/// An impostor set read back from `impostors.json` as the trees selection needs it.
+pub fn set_from_index(p: &crate::profile::Profile, path: &std::path::Path) -> Result<crate::impostors::SetReport> {
+    let index: lodforge_impostor::manifest::Index = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)?;
+    let mut set = crate::impostors::SetReport::default();
+    for (i, t) in index.types.iter().enumerate() {
+        for b in &t.bases {
+            if let Ok(local) = u32::from_str_radix(&b.form_id, 16)
+                && let Some(id) = lodforge_dyndolod::bases::global_id(&p.load_order, &b.plugin, local)
+            {
+                set.base_index.insert(id, i as u32);
+            }
+        }
+        set.types.push(crate::impostors::TypeReport { name: t.name.clone(), model: t.model.clone(), model_crc32: u32::from_str_radix(&t.model_crc32, 16).unwrap_or(0), ..Default::default() });
+    }
+    Ok(set)
+}
+
+pub fn run(a: &Args) -> Result<()> {
+    let t0 = Instant::now();
+    let p = a.profile.open()?;
+    let out = a.out.clone().unwrap_or_else(|| a.data.clone());
+    let sets_dir = a.data.join("textures").join("LODForge").join("Impostors");
+    let worlds: Vec<String> = if a.worlds.is_empty() {
+        let mut v: Vec<String> = std::fs::read_dir(&sets_dir).with_context(|| format!("listing {}", sets_dir.display()))?.flatten().filter(|e| e.path().join("impostors.json").is_file()).filter_map(|e| e.file_name().to_str().map(str::to_string)).collect();
+        v.sort();
+        v
+    } else {
+        a.worlds.clone()
+    };
+    let dir = a.profile.instance.join("tools").join("DynDOLOD").join("Edit Scripts").join("DynDOLOD");
+    let mut c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
+    c.ultra = true;
+    let all = lodforge_esp::scan_worldspaces(&p.load_order)?;
+    let seasons: Vec<lodforge_seasons::Season> = a.seasons.iter().filter_map(|s| crate::object_export::season_from_code(s)).collect();
+    let names = crate::instances::FormNames::new(&p);
+    let write = lodforge_instances::WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true };
+    let mut mesh_cache = HashMap::new();
+    let mut textures = crate::instances::TextureIndex::default();
+    for world in &worlds {
+        let t = Instant::now();
+        let Some(ws) = all.iter().find(|w| w.editor_id.eq_ignore_ascii_case(world)) else {
+            println!("{world}: not in the load order, skipped");
+            continue;
+        };
+        let set = set_from_index(&p, &sets_dir.join(world).join("impostors.json"))?;
+        let h = crate::dyndolod_build::header(&p, &c, ws, "", &a.profile.game_dir().join("Data"), "");
+        let we = crate::dyndolod_build::with_resolver(&p, &c, |r| -> Result<_> {
+            let copies = crate::child_copies::for_world(&p, &c, r, &all, ws, &a.child_parent);
+            crate::dyndolod_build::export_world(&p, &c, r, ws, &seasons, &h, &copies)
+        })?;
+        for s in &we.seasons {
+            let mut st = crate::instances::select_trees(&c, ws, s, &names, &set);
+            crate::instances::fill_meshes(&p, &a.data, &mut st.file, &mut mesh_cache, &mut textures);
+            let (path, size) = crate::instances::write_trees(&out, &st, write)?;
+            let used: Vec<usize> = (0..st.file.types.len()).filter(|&i| st.file.types[i].references > 0).collect();
+            let with: Vec<&usize> = used.iter().filter(|&&i| !st.file.meshes[i].model.is_empty()).collect();
+            let refs_with: u32 = with.iter().map(|&&i| st.file.types[i].references).sum();
+            let generated = with.iter().filter(|&&&i| st.file.meshes[i].generated).count();
+            let unresolved = with.iter().flat_map(|&&i| &st.file.meshes[i].shapes).filter(|s| s.diffuse.is_empty()).count();
+            println!(
+                "  {}: {} trees, {} without an impostor; near-tier meshes for {} of {} used types ({generated} generated), {refs_with} trees; {unresolved} shapes without a diffuse; {:.2} MB",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+                st.file.records(),
+                st.kept.no_impostor,
+                with.len(),
+                used.len(),
+                size as f64 / 1e6
+            );
+        }
+        println!("{world} done in {:.1} s", t.elapsed().as_secs_f64());
+    }
+    println!("runtime-trees finished in {:.1} s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
