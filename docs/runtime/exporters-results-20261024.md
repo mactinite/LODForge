@@ -83,3 +83,18 @@ trees are no longer merged. Far grass is the only new stage.
   is open.
 - The atlas still holds the billboards of runtime trees (unused in `.bto` now); harmless, could be
   dropped later.
+
+## Update 10:35: static mesh pack with snow/ash and VC variants (format v1.5)
+
+Full cs-base build (15 worlds x 5 seasons, no terrain, plugins + occlusion) in 722 s, swapped
+into `mods\LODForge Output (runtime)` with the far-grass `.lfg` (G1 test data).
+
+| Tamriel `.bto` (default season) | Before static instancing | After |
+|---|---|---|
+| LOD4 shapes / triangles / MB | 7,379 / 9.03 M / 402 | 1,248 / 0.55 M / 31 |
+| LOD8 | 2,233 / 3.97 M | 715 / 0.48 M |
+| LOD16 | 860 / 1.52 M | 417 / 0.44 M |
+
+Packs: `StaticMeshes.bin` 2,264 meshes, 1.43 M triangles in 23,698 clusters, 8 pages (plain, snow,
+snowHD, ash) 275 MB + 110 MB buffers; `TreeMeshes.bin` 489 meshes, 7 pages 291 MB + 59 MB.
+Static instance records (default season, all levels): Tamriel 94,054, all worlds about 125 k.
