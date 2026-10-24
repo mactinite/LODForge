@@ -140,6 +140,9 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
             // The rule as it would apply if every model level existed.
             let Some(rule) = select_mask_rule(&c.rules, &below, false, &|l| !matches!(l, Level::Billboard(_) | Level::None)) else { continue };
             let lod = r.resolve(b);
+            if std::env::var("LODFORGE_PLAN_TRACE").is_ok_and(|t| edid.contains(&t.to_ascii_lowercase())) {
+                eprintln!("plan-trace {} {model} rule {:?} lod {:?} scale {scale}", b.editor_id, rule.levels, lod.levels);
+            }
             let ext = [0, 1, 2].map(|k| f32::from(b.bounds[k + 3]) - f32::from(b.bounds[k]));
             let size = ext.iter().copied().fold(0.0f32, f32::max) * scale;
             let mut need = HashSet::new();

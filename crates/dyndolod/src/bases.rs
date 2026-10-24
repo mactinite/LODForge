@@ -150,9 +150,30 @@ pub fn read_materials(lo: &LoadOrder) -> lodforge_esp::Result<HashMap<u32, Strin
     Ok(out)
 }
 
-/// Data-relative model path with a `meshes\` prefix (lower-case).
+/// Data-relative model path with a `meshes\` prefix (lower-case). A leading `...\meshes\` is cut
+/// back to `meshes\` only where `meshes` is a whole folder name: mod folders that merely end in
+/// "meshes" (JK's College of Winterhold's `XJKCoWMeshes\`) are part of the path.
 pub fn model_path(model: &str) -> String {
     let m = model.replace('/', "\\").to_ascii_lowercase();
     let m = m.trim_start_matches('\\');
-    if let Some(p) = m.find("meshes\\") { m[p..].to_string() } else { format!("meshes\\{m}") }
+    let at = if m.starts_with("meshes\\") { Some(0) } else { m.find("\\meshes\\").map(|p| p + 1) };
+    match at {
+        Some(p) => m[p..].to_string(),
+        None => format!("meshes\\{m}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_path;
+
+    #[test]
+    fn model_path_keeps_folders_ending_in_meshes() {
+        assert_eq!(model_path(r"XJKCoWMeshes\Architecture\Exterior\XJKCoWArchFreeSlimShort.nif"), r"meshes\xjkcowmeshes\architecture\exterior\xjkcowarchfreeslimshort.nif");
+        assert_eq!(model_path(r"Architecture\Winterhold\WinterholdPit01.nif"), r"meshes\architecture\winterhold\winterholdpit01.nif");
+        assert_eq!(model_path(r"Meshes\Clutter\Barrel01.nif"), r"meshes\clutter\barrel01.nif");
+        assert_eq!(model_path(r"\meshes\clutter\barrel01.nif"), r"meshes\clutter\barrel01.nif");
+        assert_eq!(model_path(r"Data\Meshes\Clutter\Barrel01.nif"), r"meshes\clutter\barrel01.nif");
+        assert_eq!(model_path("Data/Meshes/XJKCoWMeshes/Arch.nif"), r"meshes\xjkcowmeshes\arch.nif");
+    }
 }

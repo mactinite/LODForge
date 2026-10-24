@@ -91,6 +91,18 @@ pub fn run(a: &Args) -> Result<()> {
     let worlds = lodforge_esp::scan_worldspaces(lo)?;
     let all_worlds = worlds.clone();
     let world = worlds.into_iter().find(|w| w.editor_id.eq_ignore_ascii_case(&a.world)).with_context(|| format!("worldspace {} not found", a.world))?;
+    // Diagnostics: every reference inside a world box `x0,y0,x1,y1[,zmin]` with its base, whether
+    // or not it gets object LOD.
+    if let Ok(b) = std::env::var("LODFORGE_REFBOX") {
+        let v: Vec<f32> = b.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let zmin = v.get(4).copied().unwrap_or(f32::NEG_INFINITY);
+        let mut list: Vec<(&u32, &lodforge_esp::Placement)> = world.refs.iter().filter(|(_, r)| r.position[0] >= v[0] && r.position[1] >= v[1] && r.position[0] <= v[2] && r.position[1] <= v[3] && r.position[2] >= zmin).collect();
+        list.sort_by(|a, b| a.1.position[2].total_cmp(&b.1.position[2]));
+        for (id, r) in list {
+            let base = bases.get(&r.base);
+            println!("  refbox {id:08X} pos {:.0},{:.0},{:.0} rot {:.1} scale {} flags {:08X} plugin {} base {:08X} {} model {}", r.position[0], r.position[1], r.position[2], r.rotation[2].to_degrees(), r.scale, r.flags, p.plugin_names[r.plugin as usize], r.base, base.map_or("?", |b| b.editor_id.as_str()), base.map_or("", |b| b.model.as_str()));
+        }
+    }
     if let Ok(ids) = std::env::var("LODFORGE_REFS") {
         for id in ids.split(',').filter_map(|s| u32::from_str_radix(s.trim(), 16).ok()) {
             if let Some(state) = c.reference_states.get(&id) {
