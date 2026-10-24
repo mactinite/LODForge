@@ -156,9 +156,13 @@ pub(crate) fn begin(json: bool, world: &str, stage: &str, season: Option<&str>) 
     }
 }
 
+pub(crate) static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 pub(crate) fn event(json: bool, world: &str, stage: &str, season: Option<&str>, ms: u128) {
     if json {
-        println!("{{\"event\":\"stage\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{},\"ms\":{ms}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()));
+        let (bs, bpx, bn) = lodforge_gpu::bc7_stats::snapshot();
+        let t = START.get_or_init(Instant::now).elapsed().as_millis();
+        println!("{{\"event\":\"stage\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{},\"ms\":{ms},\"t\":{t},\"bc7_s\":{bs:.2},\"bc7_mpx\":{},\"bc7_calls\":{bn}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()), bpx / 1_000_000);
     } else {
         println!("== {world} {stage}{} done in {ms} ms", season.map(|s| format!(" [{s}]")).unwrap_or_default());
     }
@@ -217,6 +221,7 @@ fn ensure_mo2_mod(a: &Args, name: &str) -> Result<PathBuf> {
 
 pub fn run(a: &Args) -> Result<()> {
     let total = Instant::now();
+    START.get_or_init(Instant::now);
     let out = match (&a.out, &a.mo2_mod) {
         (Some(o), _) => o.clone(),
         (None, Some(name)) => ensure_mo2_mod(a, name)?,

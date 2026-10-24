@@ -55,12 +55,12 @@ pub fn default_quality() -> Bc7Quality {
 /// Block rows per parallel band.
 const BAND_BLOCK_ROWS: usize = 8;
 
-/// BC7 blocks (16 bytes per 4x4 block, row-major) of one RGBA8 image.
-pub fn encode(img: &RgbaImage<'_>, quality: Bc7Quality) -> Vec<u8> {
+/// The image padded to whole blocks by repeating the last column and row: (blocks x, blocks y,
+/// RGBA8 of (bx * 4) x (by * 4) pixels).
+pub(crate) fn padded<'a>(img: &'a RgbaImage<'_>) -> (usize, usize, std::borrow::Cow<'a, [u8]>) {
     let (w, h) = (img.width.max(1), img.height.max(1));
     let (bx, by) = (w.div_ceil(4) as usize, h.div_ceil(4) as usize);
     let (pw, ph) = (bx * 4, by * 4);
-    // Pad to whole blocks by repeating the last column and row.
     let padded: std::borrow::Cow<[u8]> = if (pw, ph) == (w as usize, h as usize) {
         std::borrow::Cow::Borrowed(img.rgba)
     } else {
@@ -75,13 +75,25 @@ pub fn encode(img: &RgbaImage<'_>, quality: Bc7Quality) -> Vec<u8> {
         }
         std::borrow::Cow::Owned(p)
     };
-    let opaque = padded.chunks_exact(4).all(|p| p[3] == 255);
-    let settings = match (quality, opaque) {
+    (bx, by, padded)
+}
+
+/// The ISPC profile for a quality and whether every pixel is opaque.
+pub(crate) fn settings(quality: Bc7Quality, opaque: bool) -> bc7::EncodeSettings {
+    match (quality, opaque) {
         (Bc7Quality::Best, true) => bc7::opaque_basic_settings(),
         (Bc7Quality::Best, false) => bc7::alpha_basic_settings(),
         (_, true) => bc7::opaque_very_fast_settings(),
         (_, false) => bc7::alpha_very_fast_settings(),
-    };
+    }
+}
+
+/// BC7 blocks (16 bytes per 4x4 block, row-major) of one RGBA8 image.
+pub fn encode(img: &RgbaImage<'_>, quality: Bc7Quality) -> Vec<u8> {
+    let (bx, by, padded) = padded(img);
+    let pw = bx * 4;
+    let opaque = padded.chunks_exact(4).all(|p| p[3] == 255);
+    let settings = settings(quality, opaque);
     let mut out = vec![0u8; bx * by * 16];
     let row_bytes = pw * 4;
     out.par_chunks_mut(bx * 16 * BAND_BLOCK_ROWS).enumerate().for_each(|(band, blocks)| {

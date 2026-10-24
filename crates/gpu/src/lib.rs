@@ -4,6 +4,10 @@
 //! GPU compute via wgpu (D3D12/Vulkan on Windows): BC7 encoding and terrain LOD baking.
 
 pub mod bc7_cpu;
+pub mod bc7_gpu;
+mod bc7_tables;
+#[doc(hidden)]
+pub mod bc7_ref;
 pub mod terrain_spec;
 
 pub use bc7_cpu::Bc7Quality;
@@ -50,6 +54,9 @@ pub struct Gpu {
     pub(crate) level_h: wgpu::ComputePipeline,
     pub(crate) level_v: wgpu::ComputePipeline,
     pub(crate) level_copy: wgpu::ComputePipeline,
+    pub(crate) bc7_ispc: bc7_gpu::Bc7Ispc,
+    /// Whether [Gpu::encode_bc7] runs the multi-mode encoders on the GPU ([Gpu::encode_bc7_ispc]).
+    bc7_on_gpu: std::sync::atomic::AtomicBool,
     /// [Bc7Quality] as u8: which encoder [Gpu::encode_bc7] uses.
     bc7_quality: std::sync::atomic::AtomicU8,
 }
@@ -124,7 +131,8 @@ impl Gpu {
             })
         };
         let (level_h, level_v, level_copy) = (level_entry("level_h"), level_entry("level_v"), level_entry("level_copy"));
-        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy, bc7_quality: std::sync::atomic::AtomicU8::new(bc7_cpu::default_quality().as_u8()) })
+        let bc7_ispc = bc7_gpu::Bc7Ispc::new(&device);
+        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy, bc7_ispc, bc7_on_gpu: std::sync::atomic::AtomicBool::new(bc7_gpu::default_gpu()), bc7_quality: std::sync::atomic::AtomicU8::new(bc7_cpu::default_quality().as_u8()) })
     }
 
     /// Chooses the BC7 encoder for later [Gpu::encode_bc7] calls (default [Bc7Quality::High]).
@@ -136,12 +144,24 @@ impl Gpu {
         Bc7Quality::from_u8(self.bc7_quality.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// Runs the multi-mode encoders of [Gpu::encode_bc7] on the GPU instead of the CPU.
+    pub fn set_bc7_on_gpu(&self, on: bool) {
+        self.bc7_on_gpu.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn bc7_on_gpu(&self) -> bool {
+        self.bc7_on_gpu.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// BC7 encodes RGBA8 images; returns each image's block data (16 bytes per 4x4 block,
     /// row-major), ready to follow a DDS header. [Bc7Quality::Fast] uses the GPU mode-6 encoder,
-    /// the others the multi-mode CPU encoder ([bc7_cpu]).
+    /// the others the multi-mode ISPC encoder, on the CPU ([bc7_cpu]) or, with
+    /// [Gpu::set_bc7_on_gpu], its GPU port ([Gpu::encode_bc7_ispc]).
     pub fn encode_bc7(&self, images: &[RgbaImage<'_>]) -> Result<Vec<Vec<u8>>> {
+        let _t = bc7_stats::Timer::new(images);
         match self.bc7_quality() {
             Bc7Quality::Fast => self.encode_bc7_mode6(images),
+            q if self.bc7_on_gpu() => self.encode_bc7_ispc(images, q),
             q => {
                 use rayon::prelude::*;
                 Ok(images.par_iter().map(|img| bc7_cpu::encode(img, q)).collect())
@@ -294,5 +314,29 @@ mod tests {
         let dec = lodforge_dds::decode(&dds, &info, 0).unwrap();
         let last = &dec.rgba[dec.rgba.len() - 4..];
         assert!(last.iter().zip([200u8, 100, 50, 255]).all(|(a, b)| (i32::from(*a) - i32::from(b)).abs() <= 2), "{last:?}");
+    }
+}
+
+/// Perf instrumentation (scratch): time inside `encode_bc7`, summed over callers, and pixels.
+pub mod bc7_stats {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static NS: AtomicU64 = AtomicU64::new(0);
+    pub static PX: AtomicU64 = AtomicU64::new(0);
+    pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    pub struct Timer(std::time::Instant);
+    impl Timer {
+        pub fn new(images: &[crate::RgbaImage<'_>]) -> Timer {
+            PX.fetch_add(images.iter().map(|i| u64::from(i.width) * u64::from(i.height)).sum(), Relaxed);
+            CALLS.fetch_add(1, Relaxed);
+            Timer(std::time::Instant::now())
+        }
+    }
+    impl Drop for Timer {
+        fn drop(&mut self) {
+            NS.fetch_add(self.0.elapsed().as_nanos() as u64, Relaxed);
+        }
+    }
+    pub fn snapshot() -> (f64, u64, u64) {
+        (NS.load(Relaxed) as f64 / 1e9, PX.load(Relaxed), CALLS.load(Relaxed))
     }
 }
