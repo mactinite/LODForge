@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use crate::{Error, Result};
 
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 2;
+pub const MINOR: u16 = 3;
 pub const HEADER_SIZE: usize = 64;
 pub const INDEX_ENTRY: usize = 32;
 pub const FLAG_ZSTD: u8 = 1;
@@ -17,6 +17,7 @@ pub enum Kind {
     Trees,
     Statics,
     Grass,
+    MeshPack,
 }
 
 impl Kind {
@@ -25,6 +26,7 @@ impl Kind {
             Kind::Trees => *b"LFTR",
             Kind::Statics => *b"LFST",
             Kind::Grass => *b"LFGR",
+            Kind::MeshPack => *b"LFMP",
         }
     }
 
@@ -33,6 +35,7 @@ impl Kind {
             Kind::Trees => 24,
             Kind::Statics => 32,
             Kind::Grass => 10,
+            Kind::MeshPack => 28,
         }
     }
 
@@ -41,6 +44,7 @@ impl Kind {
             b"LFTR" => Some(Kind::Trees),
             b"LFST" => Some(Kind::Statics),
             b"LFGR" => Some(Kind::Grass),
+            b"LFMP" => Some(Kind::MeshPack),
             _ => None,
         }
     }

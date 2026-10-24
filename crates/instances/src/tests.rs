@@ -60,7 +60,7 @@ fn rejects_other_major_and_kind() {
     let mut bytes = trees().to_bytes(WriteOptions::default()).unwrap();
     assert!(StaticsFile::from_bytes(&bytes).is_err());
     bytes[4] = 2;
-    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 2))));
+    assert!(matches!(TreeFile::from_bytes(&bytes), Err(crate::Error::Version(2, 3))));
 }
 
 #[test]
@@ -224,12 +224,13 @@ fn golden_trees_bytes() {
     assert_eq!(hex, expect, "\n{hex}");
 }
 
-const GOLDEN_TREES: &str = "4c4654520100020040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
+const GOLDEN_TREES: &str = "4c4654520100030040000000000000001800000001000000c0000000000000004000000000000000680000000100ffff0100ffff7952ff7e010000000000000057524c44080000000100570000010067504c554710000000010000000a00536b7972696d2e65736d5041524d0200000000000000545459502c0000000100000078563412fffffefffdff040005000600010000000100010003006d5f3001006d00000000100000001000f8ff000020410080003c000000004523010056e57d990100ffff00000000a80000000000000018000000180000000100000074a1d2c5";
 
 #[test]
 fn tree_meshes_round_trip() {
     use crate::trees::{MeshShape, TreeMesh};
     let mut f = trees();
+    f.pack_meshes = vec![7];
     f.meshes = vec![TreeMesh { model: r"meshes\lod\lodforge\trees\treepineforest01_lod.nif".into(), bounds: [-1.0, -2.0, 0.0, 1.0, 2.0, 900.0], triangles: 420, generated: true, passthru: false, shapes: vec![MeshShape { name: "crown".into(), diffuse: r"textures\landscape\trees\pine.dds".into(), normal: r"textures\landscape\trees\pine_n.dds".into(), has_alpha: true, alpha_flags: 4844, alpha_threshold: 128, vertex_colors: true, triangles: 400 }, MeshShape { name: "trunk".into(), triangles: 20, ..Default::default() }] }];
     let bytes = f.to_bytes(WriteOptions { zstd: Some(3), crc: true }).unwrap();
     let back = TreeFile::from_bytes(&bytes).unwrap();

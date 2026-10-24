@@ -488,6 +488,16 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                     let Some(mut rgba) = load_tile(vfs, d, e.width, e.height, MipKind::Color) else {
                         return (None, chain(&flat(), MipKind::Normal), None);
                     };
+                    // `=tNNN` (tree mesh pack): the shape alpha-tests at NNN; remap alpha so that
+                    // NNN lands on the page's 128 (piecewise linear, 0 and 255 kept).
+                    if let Some(t) = e.texture.split_once("=t").and_then(|(_, t)| t.parse::<u8>().ok()).filter(|&t| t != 128 && t > 0 && t < 255) {
+                        let t = f32::from(t);
+                        for px in rgba.chunks_exact_mut(4) {
+                            let a = f32::from(px[3]);
+                            let r = if a < t { a * 128.0 / t } else { 128.0 + (a - t) * 127.0 / (255.0 - t) };
+                            px[3] = r.round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
                     // Far-LOD bake matching: the planner's per-diffuse RGB factors.
                     if let Some(t) = layout.tones.get(&d.to_lowercase()) {
                         for px in rgba.chunks_exact_mut(4) {

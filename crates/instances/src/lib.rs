@@ -9,6 +9,7 @@
 pub mod container;
 pub mod grass;
 pub mod hash;
+pub mod meshpack;
 pub mod statics;
 pub mod trees;
 

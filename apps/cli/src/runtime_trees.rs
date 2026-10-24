@@ -45,6 +45,12 @@ pub struct Args {
     pub dyndolod: Option<PathBuf>,
     #[command(flatten)]
     pub impostor_opts: crate::impostors::Opts,
+    /// Skip the near-tier mesh pack (`TreeMeshes.bin` + tree atlas pages).
+    #[arg(long)]
+    pub no_pack: bool,
+    /// Largest tree atlas tile per source texture.
+    #[arg(long, default_value_t = 512)]
+    pub tree_atlas_tile: u32,
 }
 
 /// An impostor set read back from `impostors.json` as the trees selection needs it.
@@ -123,6 +129,10 @@ pub fn run(a: &Args) -> Result<()> {
             );
         }
         println!("{world} done in {:.1} s", t.elapsed().as_secs_f64());
+    }
+    if !a.no_pack {
+        let rep = crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings { tile_cap: a.tree_atlas_tile, ..Default::default() }, write)?;
+        println!("{}", rep.summary());
     }
     println!("runtime-trees finished in {:.1} s", t0.elapsed().as_secs_f64());
     Ok(())

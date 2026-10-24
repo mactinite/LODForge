@@ -1,6 +1,6 @@
-# LODForge Runtime instance formats (v1.2)
+# LODForge Runtime instance formats (v1.3)
 
-Status: **v1.2, 2026-10-24** (1.0 and 1.1 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
+Status: **v1.3, 2026-10-24** (1.0-1.2 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
 Runtime SKSE plugin. This document is the contract between the two; when the code and this
 document disagree, the document wins and the code is a bug. Changes follow the versioning rules in
 section 2.
@@ -67,9 +67,9 @@ round-trip tests and the test vectors in section 8 pin the byte layout.
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | u8[4] | magic | `LFTR`, `LFST` or `LFGR` (ASCII) |
+| 0 | u8[4] | magic | `LFTR`, `LFST`, `LFGR` or `LFMP` (ASCII) |
 | 4 | u16 | major | 1 |
-| 6 | u16 | minor | 2 |
+| 6 | u16 | minor | 3 |
 | 8 | u32 | header_size | 64 |
 | 12 | u32 | flags | bit 0: at least one section is zstd-compressed. Other bits 0. |
 | 16 | u32 | record_size | 24 (trees), 32 (statics), 10 (grass) |
@@ -160,6 +160,11 @@ Shape:
 The model is transformed exactly like the impostor (section 1, `R = Rz(-yaw)`, uniform scale);
 the tree models are authored at reference scale 1 around the trunk base, like the full tree.
 `TMSH` is absent when no type has a mesh.
+
+**`TMPK`** (trees, since 1.3): `u32 count` (= `TTYP` count), then per type a `u32`: the index of
+the type's merged near-tier mesh in `TreeMeshes.bin` (section 7a), `0xFFFFFFFF` when it has none.
+Present when the build wrote a mesh pack; the runtime then draws the near tier from the pack and
+uses `TMSH` only for diagnostics.
 
 **`MESH`** (statics): `u32 count`, then per mesh:
 
@@ -346,6 +351,78 @@ world `x = half[0] + 12*trunc(cell_x/12)*4096` and likewise `y`; `z = half[2]`; 
 `r` (row-major, stored in the order `r0 r1 r2 r7 r3 r4 r5 r8 r6`) gives `n = (r2, r5, r8)` and
 `yaw = atan2(r3, r0)`; `h = half[13]`.
 
+
+## 7a. Tree mesh pack (`LFMP`, `TreeMeshes.bin`, since 1.3)
+
+`SKSE\Plugins\LODForgeRuntime\TreeMeshes.bin`: one file per build, shared by every worldspace and
+season. It holds every near-tier tree model of the build's trees files (`TMSH`) merged for
+GPU-driven drawing: one vertex buffer, one index buffer and a table of fixed-size clusters, all
+models' textures on a few shared atlas pages. The runtime uploads the three buffers once and
+draws every visible (tree instance x cluster) pair of one page with one indirect draw (vertex
+pulling: `vertex = vertices[indices[cluster.first_index + 3 * tri + corner]]`).
+
+Trees files link to it with `TMPK` (section 3.2): record `type` -> `TMPK[type]` = mesh index.
+
+### Container use
+
+Same container as the other files (`magic = "LFMP"`, `record_size = 28` = the vertex size).
+Meta chunks: `WRLD` (world and season empty), `PLUG` (empty), `PARM` (`tile_cap`, `page`,
+`alpha_threshold`), `MPPG`, `MPMS`. Exactly three sections, all with `x = y = 0`; the index
+entry's `level` names the stream:
+
+| level | Stream | Element | `record_count` |
+|---|---|---|---|
+| 1 | vertices | 28 bytes | vertex count |
+| 2 | indices | u32, absolute vertex index | `3 * 64 * cluster count` |
+| 3 | clusters | 40 bytes | cluster count |
+
+**`MPPG`** (pages): `u32 count`, then per page: `u32 width`, `u32 height`, `u16 mips`,
+`u8 alpha_threshold` (128: draw where `albedo.a >= 128/255`), `u8` reserved, `str albedo`,
+`str normal` (Data-relative DDS, BC7 with full mips; pages are `textures\lodforge\treeatlas\
+treeatlas_alpha[NN].dds` and `..._n.dds`). Albedo RGB is the source diffuse (sRGB), A its alpha
+remapped so that the shape's own alpha-test threshold lands on 128 (shapes with another
+threshold get their own tile), with coverage-preserving mips and the average colour under the
+cut-out (the object LOD page renderer). Normal pages hold the source normal maps
+(tangent space, as the source), flat where a shape has none.
+
+**`MPMS`** (meshes): `u32 count`, then per mesh: `u32 first_cluster`, `u32 cluster_count`,
+`u32 first_vertex`, `u32 vertex_count`, `u32 triangles` (real), `f32 bounds[6]` (model-space
+AABB), `str model` (the `TMSH` model it was made from).
+
+### Vertex (28 bytes)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | f32[3] | position, model space (the tree's own space; the instance transform of section 1 applies) |
+| 12 | u32 | normal: 10:10:10 unorm of `n * 0.5 + 0.5` (bits 0-9 x, 10-19 y, 20-29 z), bits 30-31 zero |
+| 16 | u32 | tangent: same packing; bits 30-31 = 1 when the bitangent is `cross(n, t)`, 0 when it is `-cross(n, t)` |
+| 20 | u16[2] | uv on the page, unorm16 (`uv = v / 65535`), already inside the texture's tile with a half-texel inset |
+| 24 | u8[4] | vertex colour RGBA (opaque white when the source shape has none) |
+
+### Cluster (40 bytes)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u32 | first_index: its `3 * 64` indices start here (always `3 * 64 * cluster number`) |
+| 4 | u32 | first_vertex of its mesh |
+| 8 | u32 | mesh |
+| 12 | u16 | page (`MPPG` index) |
+| 14 | u8 | triangles: real ones (1..64); the rest of the 64 are degenerate (all three corners the same vertex) |
+| 15 | u8 | flags, 0 |
+| 16 | f32[3] | AABB min, model space |
+| 28 | f32[3] | AABB max |
+
+A mesh's clusters are contiguous, grouped by page, and within a page ordered along a Morton curve
+of the triangle centroids, so each cluster is spatially compact (good AABBs for culling).
+
+### How models are merged
+
+Each `TMSH` model is loaded with node transforms applied; every shape whose UVs leave one texture
+repeat is re-cut along integer UV lines (the object LOD ReUV), its texture placed on a page tile
+(largest source mip that fits `tile_cap`, default 512 px), its UVs remapped into the tile, and
+all shapes of the model merged into one mesh (one alpha mode: alpha test at 128 on every page).
+Shapes without a texture are dropped.
+
 ## 8. Test vectors
 
 ```
@@ -375,6 +452,8 @@ kinds, raw and zstd.
 
 ## History
 
+- **1.3** (2026-10-24): `TreeMeshes.bin` (`LFMP`, section 7a): the near-tier models merged onto
+  shared atlas pages and cut into 64-triangle clusters; `TMPK` chunk in trees files. Additive.
 - **1.2** (2026-10-24): new `TMSH` chunk in trees files (the near-tier LOD4 tree mesh per type);
   `TTYP.lod4` is the most used 3D model of the type; runtime trees are no longer written to
   `.statics.bin` by default. Purely additive for readers of 1.1.

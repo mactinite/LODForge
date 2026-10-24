@@ -78,6 +78,8 @@ pub struct TreeFile {
     pub types: Vec<TreeType>,
     /// `TMSH`: the near-tier LOD mesh per type (same order as `types`; empty: no chunk).
     pub meshes: Vec<TreeMesh>,
+    /// `TMPK`: per type, its mesh index in `TreeMeshes.bin` (`meshpack::NO_MESH` for none); empty: no chunk.
+    pub pack_meshes: Vec<u32>,
     /// Per cell, sorted by hash once [`TreeFile::finish`] ran (the writer sorts too).
     pub cells: BTreeMap<(i16, i16), Vec<TreeRecord>>,
 }
@@ -136,6 +138,14 @@ impl TreeFile {
         if let Some(m) = self.mesh_chunk() {
             chunks.push(m);
         }
+        if !self.pack_meshes.is_empty() {
+            let mut b = Buf::default();
+            b.u32(self.pack_meshes.len() as u32);
+            for &m in &self.pack_meshes {
+                b.u32(m);
+            }
+            chunks.push(Chunk { tag: *b"TMPK", data: b.0 });
+        }
         let sections = self
             .cells
             .iter()
@@ -174,6 +184,14 @@ impl TreeFile {
                 types.push(TreeType { tree_record: flags & 1 != 0, model_crc32, bounds, references, name, model, lod4, bases });
             }
         }
+        let pack_meshes = match c.chunk(b"TMPK") {
+            Some(ch) => {
+                let mut r = Cur::new(&ch.data);
+                let n = r.u32()?;
+                (0..n).map(|_| r.u32()).collect::<Result<Vec<_>>>()?
+            }
+            None => Vec::new(),
+        };
         let meshes = match c.chunk(b"TMSH") {
             Some(ch) => Self::read_meshes(&ch.data)?,
             None => Vec::new(),
@@ -189,7 +207,7 @@ impl TreeFile {
             }
             cells.insert((e.x, e.y), v);
         }
-        Ok(TreeFile { common, types, meshes, cells })
+        Ok(TreeFile { common, types, meshes, pack_meshes, cells })
     }
 }
 

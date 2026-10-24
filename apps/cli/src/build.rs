@@ -767,6 +767,23 @@ pub fn run(a: &Args) -> Result<()> {
             }
         }
     }
+    if a.rt.on() {
+        // The near-tier mesh pack of every worldspace's trees files (shared atlas + clusters).
+        let t = Instant::now();
+        begin(a.json, "all", "tree-pack", None);
+        match crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings::default(), a.rt.write_options()) {
+            Ok(rep) => {
+                if !a.json {
+                    println!("  {}", rep.summary());
+                }
+                event(a.json, "all", "tree-pack", None, t.elapsed().as_millis());
+            }
+            Err(e) => {
+                eprintln!("tree-pack: {e:#}");
+                failed.push(format!("tree-pack: {e}"));
+            }
+        }
+    }
     if a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Go {
         // Grass LOD meshes are per grass model, not per worldspace.
         let t = Instant::now();
