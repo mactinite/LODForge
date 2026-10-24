@@ -250,6 +250,8 @@ pub fn quads(tiles: &[Tile], place: &[(u32, u32)], atlas: (u32, u32)) -> PartMes
             m.normals.push(t.n);
             m.tangents.push(t.v.map(|c| -c));
             m.bitangents.push(t.u);
+            // White, as DynDOLOD's billboard and passthru shapes carry (Vertex_Colors).
+            m.colors.push([255, 255, 255, 255]);
         }
         m.triangles.push([base, base + 1, base + 2]);
         m.triangles.push([base, base + 2, base + 3]);

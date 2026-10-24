@@ -10,6 +10,17 @@ fn main() {
         let (mut t, mut v, mut s) = (0usize, 0usize, 0usize);
         for b in &nif.blocks {
             if let lodforge_nif::Block::TriShape(sh) = b {
+                if std::env::var_os("NIF_DETAIL").is_some() {
+                    let alpha = sh.alpha_property.and_then(|r| match nif.blocks.get(r as usize) {
+                        Some(lodforge_nif::Block::Alpha { flags, threshold, .. }) => Some((*flags, *threshold)),
+                        _ => None,
+                    });
+                    let shader = sh.shader_property.and_then(|r| match nif.blocks.get(r as usize) {
+                        Some(lodforge_nif::Block::LightingShader(l)) => Some((l.shader_type, l.flags1, l.flags2)),
+                        _ => None,
+                    });
+                    println!("    {:?} tris {} alpha {:?} shader {:?}", sh.av.net.name, sh.triangles.len(), alpha.map(|(f, t)| format!("{f:#06x}/{t}")), shader.map(|(ty, f1, f2)| format!("type {ty} f1 {f1:#010x} f2 {f2:#010x}")));
+                }
                 t += sh.triangles.len();
                 v += sh.positions.len();
                 s += 1;

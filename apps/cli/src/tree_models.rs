@@ -195,9 +195,12 @@ fn crown_material(prep: &CloudPrep, diffuse: &str, normal: &str) -> lodforge_tre
     lodforge_treemodel::write::plain_lod_shader(&mut shader, &mut dummy);
     shader.shader_type = 0;
     shader.extra = lodforge_nif::LightingExtra::None;
-    shader.flags1 &= !(0x2 | 0x1000); // skinned, model-space normals
-    shader.flags2 |= 0x10; // double-sided
-    shader.flags2 &= !(0x20 | 0x2000_0000 | (0x7 << 25)); // vertex colours, tree anim, soft/rim/back lighting
+    // The flags of DynDOLOD's tree billboards and passthru shapes in object LOD (golden Ultra run):
+    // ZBuffer_Test only; ZBuffer_Write, Double_Sided and Vertex_Colors (white vertex colours on the
+    // quads). The source leaf shader's other flags (Vertex_Alpha, which takes alpha from vertex
+    // colours the quads did not have, among them) left the crowns unclipped squares in game.
+    shader.flags1 = 0x8000_0000;
+    shader.flags2 = 0x31;
     shader.net = lodforge_nif::ObjectNet { name: shader.net.name.clone(), ..Default::default() };
     let alpha = src
         .and_then(|s| match s.alpha_property.and_then(|r| prep.nif.blocks.get(r as usize)) {
