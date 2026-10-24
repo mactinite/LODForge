@@ -371,6 +371,20 @@ fn load(p: &Profile, j: &TypeJob) -> Result<Loaded> {
     let nif = lodforge_nif::parse_all_geometry(&bytes).map_err(|e| anyhow::anyhow!("{}: {e}", j.model))?;
     let mut scene = Scene::from_nif(&nif);
     lodforge_texgen::resolve_textures(&mut scene, |t| p.vfs.exists(t));
+    // A diffuse the model names under a folder that does not hold it (Freak's Floral Fields'
+    // deadshrub01.nif names textures\landscape\grass\deadshrub01.dds and ships
+    // textures\plants\deadshrub01.dds): the only VFS texture with that file name, if exactly one.
+    for m in &mut scene.meshes {
+        if m.diffuse.is_empty() || p.vfs.exists(&m.diffuse) {
+            continue;
+        }
+        let name = format!("\\{}", m.diffuse.rsplit(['\\', '/']).next().unwrap_or_default().to_ascii_lowercase());
+        let found: Vec<String> = p.vfs.list_prefix("textures\\").into_iter().filter(|k| k.ends_with(&name)).collect();
+        if let [only] = found.as_slice() {
+            println!("  {}: texture {} not found, using {only}", j.model, m.diffuse);
+            m.diffuse = only.clone();
+        }
+    }
     let mut tex_bytes: Vec<(String, Vec<u8>)> = Vec::new();
     for m in &scene.meshes {
         for path in [&m.diffuse, &m.normal, &m.glow] {
