@@ -36,6 +36,15 @@ pub struct Args {
     /// zstd level for the sections (0 = uncompressed).
     #[arg(long, default_value_t = 3)]
     pub zstd: i32,
+    /// Re-bake the impostor sets into `--out` first (every runtime tree base, as `build
+    /// --runtime lodforge` does) instead of reading the ones in `--data`.
+    #[arg(long)]
+    pub bake: bool,
+    /// DynDOLOD folder for the bake (`_static` replacements); default `<instance>\tools\DynDOLOD`.
+    #[arg(long)]
+    pub dyndolod: Option<PathBuf>,
+    #[command(flatten)]
+    pub impostor_opts: crate::impostors::Opts,
 }
 
 /// An impostor set read back from `impostors.json` as the trees selection needs it.
@@ -82,12 +91,18 @@ pub fn run(a: &Args) -> Result<()> {
             println!("{world}: not in the load order, skipped");
             continue;
         };
-        let set = set_from_index(&p, &sets_dir.join(world).join("impostors.json"))?;
         let h = crate::dyndolod_build::header(&p, &c, ws, "", &a.profile.game_dir().join("Data"), "");
         let we = crate::dyndolod_build::with_resolver(&p, &c, |r| -> Result<_> {
             let copies = crate::child_copies::for_world(&p, &c, r, &all, ws, &a.child_parent);
             crate::dyndolod_build::export_world(&p, &c, r, ws, &seasons, &h, &copies)
         })?;
+        let set = if a.bake {
+            let bases = crate::instances::runtime_bases(&c, ws, &we.seasons);
+            let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join("tools").join("DynDOLOD"));
+            crate::impostors::build_stage(&p, &dyndolod, &out, world, &a.seasons, &a.impostor_opts, &bases)?
+        } else {
+            set_from_index(&p, &sets_dir.join(world).join("impostors.json"))?
+        };
         for s in &we.seasons {
             let mut st = crate::instances::select_trees(&c, ws, s, &names, &set);
             crate::instances::fill_meshes(&p, &a.data, &mut st.file, &mut mesh_cache, &mut textures);
