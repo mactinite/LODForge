@@ -19,6 +19,7 @@ mod build;
 mod info;
 mod instances;
 mod runtime_trees;
+mod strip_statics;
 mod grass_far;
 mod lod_models;
 mod lod_sources;
@@ -201,6 +202,8 @@ enum Command {
     BtoStats(instances::StatsArgs),
     /// Rewrites only the trees files of a `build --runtime lodforge` output (export + existing impostor sets).
     RuntimeTrees(runtime_trees::Args),
+    /// Removes from .statics.bin files the instances of references the matching .trees.bin draws.
+    RuntimeStripStatics(strip_statics::Args),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
     TreeModels(tree_models::Args),
     /// LOD models generated from full models where DynDOLOD's rules want LOD and none is installed.
@@ -273,6 +276,7 @@ fn main() -> Result<()> {
         Command::RuntimeGrass(a) => grass_far::run(&a),
         Command::BtoStats(a) => instances::bto_stats(&a),
         Command::RuntimeTrees(a) => runtime_trees::run(&a),
+        Command::RuntimeStripStatics(a) => strip_statics::run(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),
         Command::PluginDump(a) => plugin_dump::run(&a),
