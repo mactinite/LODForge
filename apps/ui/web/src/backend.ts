@@ -91,6 +91,10 @@ const mock = (() => {
         case "read_report":
           return r(treeReport);
         case "start_build": {
+          // Same check as main.rs check_build_args.
+          const a = (args.args as string[]) ?? [];
+          if (a[0] !== "build") throw "the command must start with `build`";
+          if (a.some((x, i) => x === "--mode" && a[i + 1] !== "dyndolod")) throw "the UI builds DynDOLOD style only (--mode dyndolod)";
           polls = 0;
           const stages: [string, string, string | null, number][] = [
             ["Tamriel", "terrain-meshes", null, 3600], ["all", "texgen", null, 20000], ["all", "tree-models", null, 105000],

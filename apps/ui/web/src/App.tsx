@@ -47,7 +47,7 @@ export function App() {
       return;
     }
     try {
-      await build.start(command.slice(1));
+      await build.start(command);
       setShowBuild(true);
     } catch (e) {
       notifications.show({ color: "red", title: "Build did not start", message: String(e) });
