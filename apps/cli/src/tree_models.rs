@@ -193,8 +193,66 @@ pub fn cloud_prep(bytes: &[u8], textures: &dyn Fn(&str) -> Option<Arc<AlphaImage
     // Leaves untouched (keep 1), bark reduced per level.
     let full: Vec<LevelParams> = params.iter().map(|l| LevelParams { keep: 1.0, area: 1.0, crown_floor: 0, ..*l }).collect();
     let levels = lodforge_treemodel::levels::build(&nif, &shapes, &parts, &full);
-    let crown: Vec<&lodforge_treemodel::levels::LevelPart> = levels.first().map(|l| l.parts.iter().filter(|p| p.kind == Kind::Crown).collect()).unwrap_or_default();
+    let mut crown: Vec<&lodforge_treemodel::levels::LevelPart> = levels.first().map(|l| l.parts.iter().filter(|p| p.kind == Kind::Crown).collect()).unwrap_or_default();
+    // The full bark goes into the slices too: the 3D trunk keeps only its budget, which drops the
+    // branches, roots and twigs that hold the leaves (bare winter trees became floating specks).
+    // In the slices they stay attached; the 3D trunk covers the main stem.
+    let full_bark_params = [LevelParams { keep: 1.0, area: 1.0, crown_floor: 0, bark_tris: usize::MAX / 4, ..params[0] }];
+    let full_bark = lodforge_treemodel::levels::build(&nif, &shapes, &parts, &full_bark_params);
+    // Only the bark the 3D trunk lost (farther than a few percent of the tree's height from it);
+    // the main stems drawn into the slices as well ghosted beside the 3D trunk.
+    let mut lost: Vec<lodforge_treemodel::levels::LevelPart> = Vec::new();
+    if cp.bark_in_slices && !crown.is_empty() {
+        let kept: Vec<[f32; 3]> = levels[0]
+            .parts
+            .iter()
+            .filter(|p| p.kind == Kind::Trunk)
+            .flat_map(|p| {
+                let pos: Vec<[f32; 3]> = p.mesh.positions.iter().map(|q| p.xf.point(*q)).collect();
+                let mut pts = pos.clone();
+                for tri in &p.mesh.triangles {
+                    let [a, b, c] = tri.map(|i| pos[i as usize]);
+                    pts.push([(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0]);
+                    for (x, y) in [(a, b), (b, c), (c, a)] {
+                        pts.push([(x[0] + y[0]) / 2.0, (x[1] + y[1]) / 2.0, (x[2] + y[2]) / 2.0]);
+                    }
+                }
+                pts
+            })
+            .collect();
+        let zs = || full_bark[0].parts.iter().flat_map(|p| p.mesh.positions.iter().map(|q| p.xf.point(*q)[2]));
+        let height = zs().fold(f32::NEG_INFINITY, f32::max) - zs().fold(f32::INFINITY, f32::min);
+        let r = (height * 0.03).max(15.0);
+        let cell = |q: [f32; 3]| q.map(|v| (v / r).floor() as i32);
+        let mut grid: HashMap<[i32; 3], Vec<[f32; 3]>> = HashMap::new();
+        for q in &kept {
+            grid.entry(cell(*q)).or_default().push(*q);
+        }
+        let near = |q: [f32; 3]| {
+            let c = cell(q);
+            (-1..=1).any(|dx| (-1..=1).any(|dy| (-1..=1).any(|dz| grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).is_some_and(|v| v.iter().any(|k| (k[0] - q[0]).powi(2) + (k[1] - q[1]).powi(2) + (k[2] - q[2]).powi(2) < r * r)))))
+        };
+        for p in full_bark[0].parts.iter().filter(|p| p.kind == Kind::Trunk) {
+            let mut m = p.mesh.clone();
+            m.triangles.retain(|tri| {
+                let [a, b, c] = tri.map(|i| p.xf.point(p.mesh.positions[i as usize]));
+                !near([(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0])
+            });
+            m.delete_unreferenced();
+            if !m.triangles.is_empty() {
+                lost.push(lodforge_treemodel::levels::LevelPart { mesh: m, ..p.clone() });
+            }
+        }
+        crown.extend(lost.iter());
+    }
     let tiles = lodforge_treemodel::cloud::plan(&nif, &shapes, &crown, cp);
+    if std::env::var_os("LODFORGE_CLOUD_DEBUG").is_some() {
+        let total: usize = crown.iter().map(|p| p.mesh.triangle_count()).sum();
+        eprintln!("cloud: {} crown tris in {} parts -> {} tiles holding {} tris", total, crown.len(), tiles.len(), tiles.iter().map(|t| t.triangles).sum::<usize>());
+        for t in &tiles {
+            eprintln!("  n {:?} d {:.0} a {:.0}..{:.0} b {:.0}..{:.0} {}x{} tris {}", t.n.map(|v| (v * 100.0).round() / 100.0), t.d, t.a0, t.a1, t.b0, t.b1, t.width, t.height, t.triangles);
+        }
+    }
     let crown_shape = crown.first().map(|p| p.shape);
     let trunks = levels.iter().map(|l| l.parts.iter().filter(|p| p.kind == Kind::Trunk).cloned().collect()).collect();
     Ok(CloudPrep { nif, shapes, trunks, tiles, crown_shape, crown_source: sum(Kind::Crown) })

@@ -3,8 +3,9 @@
 //! method, after Décoret et al., "Billboard Clouds for Extreme Model Simplification" (SIGGRAPH
 //! 2003); not part of TreeLODGen.
 //!
-//! 1. **Orientations.** Each leaf triangle (model space, transforms baked) goes to the orientation
-//!    its card faces most: [`CloudParams::yaws`] vertical directions plus the horizontal one.
+//! 1. **Orientations.** Each leaf triangle (model space, transforms baked) goes to the vertical
+//!    orientation ([`CloudParams::yaws`]) its card faces most, or to the horizontal one when the
+//!    card is nearly flat ([`CloudParams::horizontal_min`]).
 //!    A projected leaf then shows and hides with the view angle like the card it stands for.
 //! 2. **Slices.** Per orientation the leaves are split by their distance along the normal into
 //!    [`CloudParams::vertical_slices`] (or horizontal) equal slabs; each non-empty slab is one
@@ -33,6 +34,11 @@ pub struct CloudParams {
     /// 50-pixel tiles (blotchy, straight-edged crowns in game).
     pub min_tile: u32,
     pub max_tile: u32,
+    /// Smallest |normal . up| of a leaf triangle that goes to a horizontal slice (cos of its tilt
+    /// from flat; 0.85 = within about 32 degrees).
+    pub horizontal_min: f32,
+    /// Render the full bark (branches, roots, twigs) into the slices as well as the leaves.
+    pub bark_in_slices: bool,
     /// Turn the rendered soft coverage into on/off alpha by error diffusion ([dither_alpha]):
     /// the game alpha-tests the crown, which cuts away foliage thinner than a texel.
     pub dither: bool,
@@ -40,7 +46,7 @@ pub struct CloudParams {
 
 impl Default for CloudParams {
     fn default() -> Self {
-        CloudParams { yaws: vec![0.0, 45.0, 90.0, 135.0], vertical_slices: 3, horizontal_slices: 3, min_tile: 16, max_tile: 256, dither: true }
+        CloudParams { yaws: vec![0.0, 45.0, 90.0, 135.0], vertical_slices: 3, horizontal_slices: 3, min_tile: 16, max_tile: 256, horizontal_min: 0.85, bark_in_slices: true, dither: true }
     }
 }
 
@@ -124,8 +130,29 @@ pub fn plan(src: &Nif, shapes: &[SourceShape], crown: &[&LevelPart], p: &CloudPa
         for (ti, t) in lp.mesh.triangles.iter().enumerate() {
             let [a, b, c] = t.map(|i| pos[i as usize]);
             let fnormal = normalize(cross([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]));
-            let o = (0..fr.len()).max_by(|&i, &j| dot(fnormal, fr[i].2).abs().partial_cmp(&dot(fnormal, fr[j].2).abs()).unwrap()).unwrap();
+            // Horizontal slices only take nearly flat cards: LOD trees are seen from the side,
+            // where a horizontal quad is edge-on, while a tilted real card still shows (an alder
+            // sapling lost half its crown to the horizontal slices). Everything else goes to the
+            // vertical orientation it faces most.
+            let horizontal = fr.len() - 1;
+            let o = if fnormal[2].abs() >= p.horizontal_min {
+                horizontal
+            } else {
+                (0..horizontal).max_by(|&i, &j| dot(fnormal, fr[i].2).abs().partial_cmp(&dot(fnormal, fr[j].2).abs()).unwrap()).unwrap_or(horizontal)
+            };
             let centroid = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0];
+            if lp.kind == crate::split::Kind::Trunk {
+                // Bark (a cylinder): assigned to one orientation by facing, each slice got only
+                // the strip of a branch that faces it and branches broke into dotted lines.
+                // The two vertical orientations it faces most; each slice then holds the faces
+                // within 45 degrees, so a branch reads whole without four ghost copies.
+                let mut by: Vec<usize> = (0..horizontal).collect();
+                by.sort_by(|&i, &j| dot(fnormal, fr[j].2).abs().partial_cmp(&dot(fnormal, fr[i].2).abs()).unwrap());
+                for &vo in by.iter().take(2) {
+                    per[vo].push(Leaf { part: pi, tri: ti, dist: dot(centroid, fr[vo].2) });
+                }
+                continue;
+            }
             per[o].push(Leaf { part: pi, tri: ti, dist: dot(centroid, fr[o].2) });
         }
     }
