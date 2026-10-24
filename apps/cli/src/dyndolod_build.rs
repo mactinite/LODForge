@@ -97,6 +97,17 @@ pub struct Opts {
     /// at LOD4) and its billboard otherwise, and empty tree LOD lists).
     #[arg(long, value_enum, default_value = "classic")]
     pub tree_lod: TreeLodMode,
+    /// With `--tree-lod ultra`: generate 3D tree LOD models for the trees big enough for them
+    /// (TreeLODGen's method, docs/ultra-tree-models-plan.md) into the output before the export, so
+    /// those trees get a 3D model where the preset asks for one. `generate` skips trees with an
+    /// installed CRC-named 3D model, `all` replaces those too; `off` (default) uses installed
+    /// models only.
+    #[arg(long, value_enum, default_value = "off")]
+    pub tree_models: TreeModelsMode,
+    /// Level budgets of generated tree models, `keep:area:bark:floor[:max_scale]` for
+    /// LOD4,LOD8,LOD16 (see `lodforge tree-models --levels`).
+    #[arg(long)]
+    pub tree_model_levels: Option<String>,
     /// Grass placements for `--grass bto`: always the NGIO grass cache (precache in game with NGIO).
     /// Cells without a cache file get no grass (one warning per worldspace); nothing is generated
     /// from the load order any more. Kept so existing command lines keep working.
@@ -965,6 +976,15 @@ pub fn complex_grass_flat(c: &Config, flat: &str) -> String {
         out.push_str("\r\n");
     }
     out
+}
+
+/// Generated 3D tree LOD models (see `Opts::tree_models`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum TreeModelsMode {
+    #[default]
+    Off,
+    Generate,
+    All,
 }
 
 /// Where trees get their LOD (see `Opts::tree_lod`).

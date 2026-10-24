@@ -70,8 +70,17 @@ floors 2500 / 1000 / 400.
    (2,515 / 998 / 399); 15-32 ms per tree for all three levels. The spruces are about three times
    TreeLODGen's "typical pine" (1,740 crown triangles at LOD4), so object LOD size needs watching
    in milestone 5; a lighter preset (TreeLODGen's Light: keep 0.3 / 0.1 / 0.04) is the first knob.
-4. **Write and integrate** - NIF writer clone semantics (shader, texture set, alpha, vertex
-   format), file naming, build integration, tree report source.
+4. **Write and integrate** - done 2026-10-23: `write.rs`, `lodforge tree-models --out`,
+   `build --tree-lod ultra --tree-models generate|all` (off by default),
+   `--tree-model-levels`, `tree-models --inspect ... --render <dir>` (full model and levels side
+   by side). cs-base: 514 of 524 candidate models in 7 s; every candidate tree (46,167
+   references, 38%) gets 3D at LOD4.
+   **Size problem:** with TreeLODGen's defaults (about 3,700 triangles per placed tree) Tamriel's
+   LOD4 object meshes grow from 388 MB to 6.4 GB (31 GB with four seasons). DynDOLOD's hand-made
+   passthru models average about 670 triangles. Estimates per season: medium budget (1,534 per
+   tree) 2.6 GB, light (714) 1.2 GB; but pruning that far leaves pines as bare twigs. Pruning keeps
+   fewer of the same leaf cards: the outline holds, the crown thins. Next: a crown method that keeps
+   the silhouette and density at a fraction of the triangles (see "Crown alternatives").
 5. **Verify** - `lodforge view` on generated models; in game: the Whiterun oak and pine spots at
    the switch distance (frames on both sides of a cell boundary, as for billboard density),
    object LOD sizes, load time and frame rate. Optional: compare with TreeLODGen's own output on
@@ -87,3 +96,19 @@ floors 2500 / 1000 / 400.
 - Shape-local spaces: welding, Morton box, outline and simplifier welding all run before the
   transform bake; getting this wrong scales crowns wrongly (Ulvenwald scales on nodes).
 - NIF clone fidelity: the writer must keep the source vertex format and shader blocks exactly.
+
+## Crown alternatives (2026-10-23)
+
+Requirement (user): a lower-poly tree with the same silhouette and density, not the same tree
+with less foliage. Leaf cards are already two triangles each, so fewer triangles means fewer,
+larger cards with new textures that show many leaves each:
+
+1. **Billboard cloud crown** - a handful of planes through the crown (radial and horizontal
+   slices, or planes fitted to the leaf distribution), each textured by rendering the leaves
+   near it onto it. About 20-60 crown triangles plus the reduced trunk; keeps the outline from
+   every side and the crown's density; needs per-tree baked textures (GPU renderer exists).
+2. **Hybrid** - 3D trunk plus the crown as TexGen-style crossed billboards (TreeLODGen's dev
+   HYBRID path). Lightest, but flat from oblique angles.
+3. **Clustered cards** - merge neighbouring leaf cards into larger quads textured with the
+   merged cards (local billboard clouds per cluster). Closest to the source look; more triangles
+   and texture space than 1.

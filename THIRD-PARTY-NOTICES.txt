@@ -95,6 +95,7 @@ PART 1. SOURCE-LEVEL COMPONENTS INCORPORATED INTO LODFORGE
      crates/treemodel/src/simplify.rs (Simplify.cs)
      crates/treemodel/src/split.rs    (Split.cs classification, WoodSplit.cs)
      crates/treemodel/src/texture.rs  (Textures.cs)
+     crates/treemodel/src/write.rs    (Split.cs WriteStaticNif, LodShapeName; NifUtil.cs)
 
    TreeLODGen's license text is GPL version 3, compatible with LODForge's
    GPL-3.0-only; its full text is licenses/GPL-3.0-only.txt.

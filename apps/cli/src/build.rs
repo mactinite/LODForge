@@ -359,6 +359,26 @@ pub fn run(a: &Args) -> Result<()> {
                     }
                     event(a.json, "all", "lod-models", None, t.elapsed().as_millis());
                 }
+                if c.ultra && a.dyn_opts.tree_models != crate::dyndolod_build::TreeModelsMode::Off {
+                    let t = Instant::now();
+                    begin(a.json, "all", "tree-models", None);
+                    let all = a.dyn_opts.tree_models == crate::dyndolod_build::TreeModelsMode::All;
+                    match crate::dyndolod_build::with_resolver(&p, &c, |r| crate::tree_models::levels_arg(a.dyn_opts.tree_model_levels.as_deref()).and_then(|lv| crate::tree_models::generate(&p, &c, r, &out, &lv, all, &[]))) {
+                        Ok(rep) => {
+                            // LOD discovery and the object LOD stage read them through the VFS.
+                            own_output(&mut p, &out, &before)?;
+                            c.rescan(&p);
+                            if !a.json {
+                                println!("{}", rep.summary());
+                            }
+                            event(a.json, "all", "tree-models", None, t.elapsed().as_millis());
+                        }
+                        Err(e) => {
+                            eprintln!("tree-models: {e:#}");
+                            failed.push(format!("tree-models: {e}"));
+                        }
+                    }
+                }
                 let flat = crate::dyndolod_build::with_resolver(&p, &c, |r| crate::dyndolod_build::flat_textures(&p, &c, r));
                 tree_billboards = flat.iter().filter_map(|l| l.split('\t').next()).map(str::to_string).collect();
                 std::fs::create_dir_all(&work)?;

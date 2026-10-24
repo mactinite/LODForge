@@ -79,9 +79,10 @@ impl Profile {
     }
 }
 
-/// Prunes a crown mesh to the share `keep` of its pieces, restoring `area` of its leaf area.
-/// Returns false when nothing changed.
-pub fn apply(m: &mut PartMesh, keep: f32, area: f32) -> bool {
+/// Prunes a crown mesh to the share `keep` of its pieces, restoring `area` of its leaf area with
+/// pieces grown at most `max_scale` times (TreeLODGen: [MAX_CARD_SCALE]). Returns false when
+/// nothing changed.
+pub fn apply(m: &mut PartMesh, keep: f32, area: f32, max_scale: f32) -> bool {
     let islands = welded(&m.positions, &m.triangles);
     if islands.len() < 2 || m.positions.is_empty() {
         return false;
@@ -132,7 +133,7 @@ pub fn apply(m: &mut PartMesh, keep: f32, area: f32) -> bool {
     }
     let total: f32 = info.iter().map(|x| x.2).sum();
     let kept_area: f32 = info.iter().zip(&kept).filter(|(_, k)| **k).map(|(x, _)| x.2).sum();
-    let scale = if kept_area > 0.0 { MAX_CARD_SCALE.min((total * area / kept_area).max(1.0).sqrt()) } else { 1.0 };
+    let scale = if kept_area > 0.0 { max_scale.min((total * area / kept_area).max(1.0).sqrt()) } else { 1.0 };
     let profile = Profile::of(&m.positions);
     for (i, (verts, c, _)) in info.iter().enumerate() {
         if !kept[i] {
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn keeps_the_share_and_grows_the_kept_cards() {
         let mut m = cards(10);
-        assert!(apply(&mut m, 0.4, 0.8));
+        assert!(apply(&mut m, 0.4, 0.8, MAX_CARD_SCALE));
         assert_eq!(m.triangles.len(), 8, "4 of 10 cards");
         // 10 * 0.8 / 4 = 2 -> scale sqrt(2): a card is now about 1.41 wide (before the outline clamp).
         let w = m.positions[1][0] - m.positions[0][0];
@@ -200,7 +201,7 @@ mod tests {
     #[test]
     fn growth_is_capped_at_twice_the_size() {
         let mut m = cards(20);
-        assert!(apply(&mut m, 0.05, 1.0));
+        assert!(apply(&mut m, 0.05, 1.0, MAX_CARD_SCALE));
         assert_eq!(m.triangles.len(), 2);
         let w = m.positions[1][0] - m.positions[0][0];
         assert!((w - 2.0).abs() < 1e-4, "{w}");
