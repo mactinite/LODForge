@@ -1,6 +1,6 @@
-# LODForge Runtime instance formats (v1.0)
+# LODForge Runtime instance formats (v1.1)
 
-Status: **v1.0, 2026-10-24.** Written by LODForge (`crates/instances`), read by the LODForge
+Status: **v1.1, 2026-10-24** (v1.0 earlier the same day; see "History" at the end). Written by LODForge (`crates/instances`), read by the LODForge
 Runtime SKSE plugin. This document is the contract between the two; when the code and this
 document disagree, the document wins and the code is a bug. Changes follow the versioning rules in
 section 2.
@@ -69,7 +69,7 @@ round-trip tests and the test vectors in section 8 pin the byte layout.
 |---|---|---|---|
 | 0 | u8[4] | magic | `LFTR`, `LFST` or `LFGR` (ASCII) |
 | 4 | u16 | major | 1 |
-| 6 | u16 | minor | 0 |
+| 6 | u16 | minor | 1 |
 | 8 | u32 | header_size | 64 |
 | 12 | u32 | flags | bit 0: at least one section is zstd-compressed. Other bits 0. |
 | 16 | u32 | record_size | 24 (trees), 32 (statics), 10 (grass) |
@@ -340,3 +340,13 @@ kinds, raw and zstd.
   [grass-lfg-sizes.md](grass-lfg-sizes.md).
 - Limits: 65,535 tree types / meshes / grass types per file, 255 grass types per cell, 2^32 - 1
   records per section, cell coordinates in i16.
+
+## History
+
+- **1.1** (2026-10-24): `TTYP` is the worldspace's impostor type list (impostors.json order, name,
+  model, model_crc32, bounds, references, base list; section 3.2) and a record's `type` is the
+  impostor type index. This changed the layout of an existing chunk, which section 2 reserves for
+  a major bump; it was made a minor bump because no 1.0 file was released and the one reader
+  (LODForge Runtime) handles both. Readers tell them apart by `minor`.
+- **1.0** (2026-10-24): first version; `TTYP` had one entry per base (base_plugin u16, flags u16,
+  base_form u32, model_crc32 u32, bounds i16[6], references u32, model str, lod4 str).
