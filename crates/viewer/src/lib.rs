@@ -14,6 +14,7 @@ pub mod camera;
 pub mod checks;
 pub mod files;
 pub mod headless;
+pub mod impostors;
 pub mod lodselect;
 pub mod mesh;
 pub mod pick;

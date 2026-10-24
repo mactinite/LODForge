@@ -97,6 +97,10 @@ pub struct Args {
     /// Load only these levels (comma list), e.g. `4` to save time and memory.
     #[arg(long, value_delimiter = ',')]
     pub load_levels: Vec<i32>,
+    /// A Data folder holding a LODForge impostor set (`textures\LODForge\Impostors\<World>\`,
+    /// from `lodforge impostors --preview-instances`), shown with the `impostors` layer.
+    #[arg(long)]
+    pub impostors: Option<PathBuf>,
     /// MSAA samples for --screenshot.
     #[arg(long, default_value_t = 4)]
     pub samples: u32,
@@ -256,6 +260,10 @@ pub fn run(a: &Args) -> Result<()> {
     }
     let out: Arc<dyn Files> = Arc::new(out);
     let mut layered = Layered::new().with(out.clone());
+    if let Some(dir) = &a.impostors {
+        let f = DirFiles::new(dir, "impostors").with_context(|| format!("reading {}", dir.display()))?;
+        layered = layered.with(Arc::new(f));
+    }
     let mut snow = lodforge_viewer::snow::SnowMaterials::default();
     let mut load_order = None;
     if let Some(inst) = &a.instance {
@@ -279,6 +287,7 @@ pub fn run(a: &Args) -> Result<()> {
     };
     let load = LoadOptions { texture_budget: a.texture_budget_mb << 20, normal_maps: !a.no_normals, levels: a.load_levels.clone(), ..LoadOptions::default() };
     let mut settings = settings(a)?;
+    let load = LoadOptions { impostors: settings.layers.impostors, ..load };
     settings.snow_materials = snow;
     settings.snow = !a.no_snow;
     settings.atmosphere = !a.no_atmosphere;

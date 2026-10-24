@@ -11,7 +11,7 @@ pub mod scene;
 
 use std::collections::HashMap;
 
-pub use render::{Job, Light, Pass, Renderer, TexData, View};
+pub use render::{Basis, Job, Light, Pass, Renderer, TexData, View};
 pub use scene::{LoadOptions, Scene};
 
 #[derive(Debug, Clone, Copy)]
@@ -94,7 +94,7 @@ fn opaque_box(rgba: &[u8], w: u32, h: u32, thr: u8) -> Option<(u32, u32, u32, u3
 fn prepass_view(scene: &Scene, yaw: f32, z0: f32, z1: f32, h: u32) -> View {
     let (x0, x1) = view_range(scene, yaw);
     let w = ((h as f32) * (x1 - x0) / (z1 - z0)).ceil().max(1.0) as u32;
-    View { yaw_deg: yaw, x0, x1, z0, z1, width: w, height: h }
+    View { yaw_deg: yaw, x0, x1, z0, z1, width: w, height: h, basis: None }
 }
 
 /// The opaque silhouette of a pre-pass image as (left x, right x, bottom z, top z) in view units.
@@ -205,7 +205,7 @@ pub fn make_billboards(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, items: &[It
         let w = quantise(xl.abs().max(xr.abs()));
         let width = w as f32 * height / h as f32;
         let depth = side.map(|(l, r, _, _)| quantise(l.abs().max(r.abs())) as f32 * height / h as f32).unwrap_or(width);
-        finals.push((*it, View { yaw_deg: 0.0, x0: -width / 2.0, x1: width / 2.0, z0: zb, z1: zt, width: w, height: h }));
+        finals.push((*it, View { yaw_deg: 0.0, x0: -width / 2.0, x1: width / 2.0, z0: zb, z1: zt, width: w, height: h, basis: None }));
         meta.push(Some((w, h, width, depth, height, zb)));
     }
     let mut imgs = final_images(gpu, renderer, &finals, s, normals).into_iter();
@@ -291,7 +291,7 @@ pub fn make_rendered_billboards(gpu: &lodforge_gpu::Gpu, renderer: &Renderer, it
         for (k, (xl, xr, zb, zt)) in [a, b].into_iter().enumerate() {
             let (width, height) = (xr - xl, zt - zb);
             let w = (4.0 * ((h as f32) * width / height / 4.0).ceil()).max(4.0) as u32;
-            finals.push((*it, View { yaw_deg: yaws[k], x0: xl, x1: xr, z0: zb, z1: zt, width: w, height: h }));
+            finals.push((*it, View { yaw_deg: yaws[k], x0: xl, x1: xr, z0: zb, z1: zt, width: w, height: h, basis: None }));
             m[k] = (w, h, width, height, -(xl + xr) / 2.0, zb);
         }
         meta.push(Some(m));

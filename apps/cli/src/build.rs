@@ -116,6 +116,12 @@ pub struct Args {
     /// shader either way.
     #[arg(long, value_enum, default_value = "pbr")]
     pub materials: Materials,
+    /// Also bake hemi-octahedral tree impostors for the LODForge runtime, per worldspace under
+    /// `textures\LODForge\Impostors\<World>\` (docs/runtime/impostors.md).
+    #[arg(long)]
+    pub impostors: bool,
+    #[command(flatten)]
+    pub impostor_opts: crate::impostors::Opts,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
@@ -645,6 +651,10 @@ pub fn run(a: &Args) -> Result<()> {
             } else {
                 step("trees", None, &mut || crate::tree_lod::run_with(&p, &args));
             }
+        }
+        if a.impostors {
+            let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
+            step("impostors", None, &mut || crate::impostors::build_stage(&p, &dyndolod, &out, world, &a.seasons, &a.impostor_opts));
         }
         if dyn_mode
             && !a.no_objects

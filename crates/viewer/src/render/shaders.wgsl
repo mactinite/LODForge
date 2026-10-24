@@ -319,6 +319,7 @@ struct TreeOut {
 @group(1) @binding(0) var tree_diffuse: texture_2d<f32>;
 @group(1) @binding(1) var tree_normal: texture_2d<f32>;
 @group(1) @binding(2) var tree_samp: sampler;
+@group(1) @binding(3) var samp_tree_clamp: sampler;
 
 @vertex
 fn vs_tree(in: TreeIn) -> TreeOut {
@@ -378,6 +379,207 @@ fn fs_tree(in: TreeOut) -> @location(0) vec4<f32> {
     }
     if ((in.flags & 1u) != 0u) {
         c = mix(c, vec3<f32>(1.0, 0.6, 0.1), 0.6);
+    }
+    return vec4<f32>(c, 1.0);
+}
+
+// LODForge runtime impostors (docs/runtime/impostors.md, the shader contract; the math mirrors
+// lodforge-impostor `hemioct.rs`): one camera-facing quad per instance, the three hemi-
+// octahedral frames enclosing the view direction blended by barycentric weight, lit with the
+// baked model-space normals.
+struct ImpIn {
+    // xyz position, w yaw (radians; world = Rz(-yaw) * model).
+    @location(0) pos_yaw: vec4<f32>,
+    // xyz model origin -> impostor centre, w reference scale.
+    @location(1) center_scale: vec4<f32>,
+    // The type's rectangle on its page (u0, v0, du, dv).
+    @location(2) rect: vec4<f32>,
+    // Quad size (model units), frames per side, frame size (px), flags.
+    @location(3) misc: vec4<f32>,
+    @builtin(vertex_index) vi: u32,
+};
+
+struct ImpOut {
+    @builtin(position) clip: vec4<f32>,
+    // Per frame: xy grid index, zw frame-local uv (y down).
+    @location(0) f0: vec4<f32>,
+    @location(1) f1: vec4<f32>,
+    @location(2) f2: vec4<f32>,
+    @location(3) w: vec3<f32>,
+    @location(4) world: vec3<f32>,
+    @location(5) @interpolate(flat) rect: vec4<f32>,
+    // x grid, y frame px, z yaw.
+    @location(6) @interpolate(flat) info: vec3<f32>,
+};
+
+fn hemi_oct_encode(d: vec3<f32>) -> vec2<f32> {
+    let n = abs(d.x) + abs(d.y) + d.z;
+    let x = d.x / n;
+    let y = d.y / n;
+    return vec2<f32>(x + y, x - y) * 0.5 + 0.5;
+}
+
+fn hemi_oct_decode(uv: vec2<f32>) -> vec3<f32> {
+    let s = uv.x * 2.0 - 1.0;
+    let t = uv.y * 2.0 - 1.0;
+    let x = (s + t) * 0.5;
+    let y = (s - t) * 0.5;
+    return normalize(vec3<f32>(x, y, 1.0 - abs(x) - abs(y)));
+}
+
+// Frame basis for a direction toward the camera: right x up = dir; top-down: +X, +Y.
+fn imp_right(dir: vec3<f32>) -> vec3<f32> {
+    if (abs(dir.z) < 0.999) {
+        return normalize(cross(vec3<f32>(0.0, 0.0, 1.0), dir));
+    }
+    return vec3<f32>(1.0, 0.0, 0.0);
+}
+
+fn imp_up(dir: vec3<f32>, right: vec3<f32>) -> vec3<f32> {
+    if (abs(dir.z) < 0.999) {
+        return cross(dir, right);
+    }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
+fn frame_dir(idx: vec2<f32>, grid: f32) -> vec3<f32> {
+    return hemi_oct_decode(idx / (grid - 1.0));
+}
+
+// Frame-local uv (y down) of a model-space offset from the impostor centre.
+fn frame_uv(p: vec3<f32>, idx: vec2<f32>, grid: f32, quad: f32) -> vec2<f32> {
+    let d = frame_dir(idx, grid);
+    let r = imp_right(d);
+    let u = imp_up(d, r);
+    return vec2<f32>(0.5 + dot(p, r) / quad, 0.5 - dot(p, u) / quad);
+}
+
+// Rz(a) applied to v.
+fn rot_z(v: vec3<f32>, a: f32) -> vec3<f32> {
+    let c = cos(a);
+    let s = sin(a);
+    return vec3<f32>(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
+}
+
+@vertex
+fn vs_impostor(in: ImpIn) -> ImpOut {
+    var out: ImpOut;
+    let pos = in.pos_yaw.xyz;
+    let yaw = in.pos_yaw.w;
+    let center = in.center_scale.xyz;
+    let scale = max(in.center_scale.w, 1e-3);
+    let quad = in.misc.x;
+    let grid = in.misc.y;
+    // Camera in model space (model = Rz(yaw) * world), relative to the impostor centre.
+    var dir = vec3<f32>(0.0, 0.0, 1.0);
+    if (g.cam_pos.w < 0.5) {
+        let cam = rot_z(g.cam_pos.xyz - pos, yaw) / scale - center;
+        let l = length(cam);
+        if (l > 1e-3) {
+            dir = cam / l;
+        }
+    }
+    dir = normalize(vec3<f32>(dir.xy, max(dir.z, 0.02)));
+    // The enclosing triangle of grid-vertex frames and its barycentric weights.
+    let max_idx = grid - 1.0;
+    let gp = clamp(hemi_oct_encode(dir), vec2<f32>(0.0), vec2<f32>(1.0)) * max_idx;
+    let b = min(floor(gp), vec2<f32>(max_idx - 1.0));
+    let f = gp - b;
+    var i0: vec2<f32>;
+    var i1 = b + vec2<f32>(1.0, 0.0);
+    var i2 = b + vec2<f32>(0.0, 1.0);
+    var w: vec3<f32>;
+    if (f.x + f.y <= 1.0) {
+        i0 = b;
+        w = vec3<f32>(1.0 - f.x - f.y, f.x, f.y);
+    } else {
+        i0 = b + vec2<f32>(1.0, 1.0);
+        w = vec3<f32>(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
+    }
+    // Quad facing the camera in the view direction's own basis.
+    let right = imp_right(dir);
+    let up = imp_up(dir, right);
+    let cx = select(-0.5, 0.5, (in.vi & 1u) == 1u);
+    let cy = select(-0.5, 0.5, in.vi >= 2u);
+    let p = (right * cx + up * cy) * quad;
+    let world = pos + rot_z((center + p) * scale, -yaw);
+    out.clip = g.view_proj * vec4<f32>(world, 1.0);
+    out.f0 = vec4<f32>(i0, frame_uv(p, i0, grid, quad));
+    out.f1 = vec4<f32>(i1, frame_uv(p, i1, grid, quad));
+    out.f2 = vec4<f32>(i2, frame_uv(p, i2, grid, quad));
+    out.w = w;
+    out.world = world;
+    out.rect = in.rect;
+    out.info = vec3<f32>(grid, in.misc.z, yaw);
+    return out;
+}
+
+// Atlas uv of a frame-local uv, clamped half a texel inside the frame's cell.
+fn imp_atlas_uv(fr: vec4<f32>, rect: vec4<f32>, grid: f32, frame_px: f32) -> vec2<f32> {
+    let inset = 0.5 / frame_px;
+    let l = clamp(fr.zw, vec2<f32>(inset), vec2<f32>(1.0 - inset));
+    return rect.xy + (fr.xy + l) * rect.zw / grid;
+}
+
+// Canopy-shell direction of one frame (model space, unnormalised): from the centre to the
+// texel's point on the frame plane, pushed toward the camera by the baked depth.
+fn imp_shell(fr: vec4<f32>, depth: f32, grid: f32) -> vec3<f32> {
+    let d = frame_dir(fr.xy, grid);
+    let r = imp_right(d);
+    let u = imp_up(d, r);
+    return r * (fr.z - 0.5) + u * (0.5 - fr.w) + d * (0.5 - depth);
+}
+
+@fragment
+fn fs_impostor(in: ImpOut) -> @location(0) vec4<f32> {
+    let grid = in.info.x;
+    let fpx = in.info.y;
+    let uv0 = imp_atlas_uv(in.f0, in.rect, grid, fpx);
+    let uv1 = imp_atlas_uv(in.f1, in.rect, grid, fpx);
+    let uv2 = imp_atlas_uv(in.f2, in.rect, grid, fpx);
+    let a0 = textureSample(tree_diffuse, samp_tree_clamp, uv0);
+    let a1 = textureSample(tree_diffuse, samp_tree_clamp, uv1);
+    let a2 = textureSample(tree_diffuse, samp_tree_clamp, uv2);
+    let n0 = textureSample(tree_normal, samp_tree_clamp, uv0);
+    let n1 = textureSample(tree_normal, samp_tree_clamp, uv1);
+    let n2 = textureSample(tree_normal, samp_tree_clamp, uv2);
+    // Frame-local uvs outside 0..1 lie outside the captured sphere: no coverage.
+    let inside = vec3<f32>(
+        select(0.0, 1.0, all(in.f0.zw >= vec2<f32>(0.0)) && all(in.f0.zw <= vec2<f32>(1.0))),
+        select(0.0, 1.0, all(in.f1.zw >= vec2<f32>(0.0)) && all(in.f1.zw <= vec2<f32>(1.0))),
+        select(0.0, 1.0, all(in.f2.zw >= vec2<f32>(0.0)) && all(in.f2.zw <= vec2<f32>(1.0))));
+    let w = in.w;
+    let alpha = w.x * a0.a * inside.x + w.y * a1.a * inside.y + w.z * a2.a * inside.z;
+    var threshold = 0.4;
+    if (g.params.z >= 0.0) {
+        threshold = g.params.z;
+    }
+    if (alpha < threshold) {
+        discard;
+    }
+    // Colour: weights renormalised over the covering frames (an uncovered frame's dilated colour
+    // would bleed in).
+    let cw = w * vec3<f32>(a0.a, a1.a, a2.a) * inside;
+    let base = (cw.x * a0.rgb + cw.y * a1.rgb + cw.z * a2.rgb) / max(cw.x + cw.y + cw.z, 1e-4);
+    // Normal: baked model-space normals, eased toward the canopy shell for stable far shading.
+    let baked = normalize(cw.x * (n0.rgb * 2.0 - 1.0) + cw.y * (n1.rgb * 2.0 - 1.0) + cw.z * (n2.rgb * 2.0 - 1.0) + vec3<f32>(0.0, 0.0, 1e-4));
+    let shell = normalize(w.x * imp_shell(in.f0, n0.a, grid) + w.y * imp_shell(in.f1, n1.a, grid) + w.z * imp_shell(in.f2, n2.a, grid) + vec3<f32>(0.0, 0.0, 1e-4));
+    let n_model = normalize(mix(shell, baked, 0.6));
+    let n = rot_z(n_model, -in.info.z);
+    let mode = i32(g.params.x);
+    var c = base;
+    if (mode == 0 && atmo_on()) {
+        c = apply_fog(weather_shade(base, weather_light(n)), in.world);
+    } else if (mode == 0) {
+        c = base * lit(n);
+    } else if (mode == 2) {
+        c = n * 0.5 + 0.5;
+    } else if (mode == 3) {
+        c = vec3<f32>(0.75) * lit(n);
+    } else if (mode == 4) {
+        c = g.level_colors[0].rgb;
+    } else if (mode == 5) {
+        c = g.kind_colors[3].rgb;
     }
     return vec4<f32>(c, 1.0);
 }

@@ -31,6 +31,9 @@ struct Uniforms {
     spec2: vec4<f32>,
     // rgb: own-emit colour times its multiple; black when the material does not own-emit.
     emit: vec4<f32>,
+    // Object normal + depth pass (pass 2): x = dot(p, toward camera) on the slab's near plane,
+    // y = 1 / slab length.
+    slab: vec4<f32>,
 };
 
 // Material flags in `params.w` (render.rs `flag`).
@@ -82,6 +85,8 @@ struct VsOut {
     @location(2) tangent: vec3<f32>,
     @location(3) bitangent: vec3<f32>,
     @location(4) color: vec4<f32>,
+    // Model-space position (slab depth of pass 2).
+    @location(5) mpos: vec3<f32>,
 };
 
 @vertex
@@ -93,6 +98,7 @@ fn vs(in: VsIn) -> VsOut {
     out.tangent = in.tangent;
     out.bitangent = in.bitangent;
     out.color = in.color;
+    out.mpos = in.pos;
     return out;
 }
 
@@ -106,7 +112,7 @@ fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
+fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let complex = has(FLAG_COMPLEX);
 
     // Complex grass: one texture, diffuse above (v in 0..0.5), normal map below (0.5..1). The
@@ -147,6 +153,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let to_light = safe_normalize(u.light.xyz);
     let to_eye = safe_normalize(u.eye.xyz);
 
+    if u.params.y > 1.5 {
+        // Object normal + depth pass (impostors, RGBA16F target): the shading normal in model
+        // space, turned to the viewer's side on back faces of two-sided shapes (what is seen of
+        // a leaf card is its visible side), and the depth across the slab, 0 at the near plane.
+        // Never the zero vector, which the readback takes as "not covered".
+        let n_os = select(-n, n, front);
+        let depth = (u.slab.x - dot(in.mpos, to_eye)) * u.slab.y;
+        return vec4<f32>(n_os, clamp(depth, 0.0, 1.0));
+    }
     if u.params.y > 0.5 {
         // Normal pass: n in the view basis (right, up, toward the viewer). A normal facing away
         // from the viewer keeps its tilt and only its depth component is turned around (negating
