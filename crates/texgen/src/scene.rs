@@ -92,7 +92,7 @@ impl Xf {
 fn tex_path(t: &str) -> String {
     let t = t.replace('/', "\\").to_ascii_lowercase();
     let t = t.trim_start_matches('\\');
-    let t = match t.find("textures\\") {
+    let t = match lodforge_nif::data_folder_start(t, "textures") {
         Some(p) => &t[p..],
         None => t,
     };
@@ -107,7 +107,8 @@ fn tex_name(t: &str) -> Option<String> {
     if t.is_empty() {
         return None;
     }
-    Some(match t.to_ascii_lowercase().find("textures\\") {
+    // ASCII lower-casing keeps byte offsets, so the offset applies to the original spelling.
+    Some(match lodforge_nif::data_folder_start(&t.to_ascii_lowercase(), "textures") {
         Some(p) => t[p..].to_string(),
         None => format!("textures\\{t}"),
     })
@@ -240,5 +241,18 @@ impl Scene {
             }
             (lo, hi)
         }))
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{tex_name, tex_path};
+
+    #[test]
+    fn texture_folder_is_a_whole_folder() {
+        assert_eq!(tex_path("Data/Textures/A.dds"), r"textures\a.dds");
+        assert_eq!(tex_path(r"XJKCoWTextures\Arch.dds"), r"textures\xjkcowtextures\arch.dds");
+        assert_eq!(tex_name(r"SkyrimHD\build\PC\data\Textures\Arch.dds").as_deref(), Some(r"Textures\Arch.dds"));
+        assert_eq!(tex_name(r"XJKCoWTextures\Arch.dds").as_deref(), Some(r"textures\XJKCoWTextures\Arch.dds"));
     }
 }

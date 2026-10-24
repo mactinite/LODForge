@@ -1056,6 +1056,23 @@ pub fn float_to_byte(f: f32) -> u8 {
     f64::from(v).round() as u8
 }
 
+/// Where the Data-relative part of an asset path starts: the byte offset of the first whole
+/// folder named `folder` (`"textures"`, `"meshes"`), at the start or right after a backslash.
+/// `path` is lower case with backslashes. A folder that merely ends in the name is part of the
+/// path: `xjkcowmeshes\...` and `mytextures\...` have no such folder, `data\textures\a.dds` starts
+/// at 5.
+pub fn data_folder_start(path: &str, folder: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(i) = path[from..].find(folder).map(|i| i + from) {
+        let end = i + folder.len();
+        if (i == 0 || path.as_bytes()[i - 1] == b'\\') && path.as_bytes().get(end) == Some(&b'\\') {
+            return Some(i);
+        }
+        from = i + 1;
+    }
+    None
+}
+
 /// IEEE 754 half to f32.
 pub fn half_to_f32(h: u16) -> f32 {
     let sign = u32::from(h >> 15) << 31;
@@ -1089,6 +1106,19 @@ pub fn f32_to_half(f: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_folder_is_a_whole_folder() {
+        assert_eq!(data_folder_start(r"textures\a.dds", "textures"), Some(0));
+        assert_eq!(data_folder_start(r"data\textures\a.dds", "textures"), Some(5));
+        assert_eq!(data_folder_start(r"skyrimhd\build\pc\data\textures\a.dds", "textures"), Some(23));
+        // Mod folders ending in the name are path, not prefix.
+        assert_eq!(data_folder_start(r"xjkcowtextures\a.dds", "textures"), None);
+        assert_eq!(data_folder_start(r"xjkcowmeshes\architecture\a.nif", "meshes"), None);
+        assert_eq!(data_folder_start(r"data\xjkcowtextures\textures\a.dds", "textures"), Some(20));
+        assert_eq!(data_folder_start(r"texturesx\a.dds", "textures"), None);
+        assert_eq!(data_folder_start("textures", "textures"), None);
+    }
 
     #[test]
     fn halves() {

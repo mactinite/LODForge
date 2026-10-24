@@ -156,8 +156,7 @@ pub fn read_materials(lo: &LoadOrder) -> lodforge_esp::Result<HashMap<u32, Strin
 pub fn model_path(model: &str) -> String {
     let m = model.replace('/', "\\").to_ascii_lowercase();
     let m = m.trim_start_matches('\\');
-    let at = if m.starts_with("meshes\\") { Some(0) } else { m.find("\\meshes\\").map(|p| p + 1) };
-    match at {
+    match lodforge_nif::data_folder_start(m, "meshes") {
         Some(p) => m[p..].to_string(),
         None => format!("meshes\\{m}"),
     }

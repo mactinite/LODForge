@@ -158,7 +158,7 @@ fn num(s: &str) -> f32 {
 pub fn texture_key(path: &str) -> String {
     let l = path.trim().to_ascii_lowercase().replace('/', "\\");
     let l = l.trim_start_matches('\\');
-    match l.find("textures\\") {
+    match lodforge_nif::data_folder_start(l, "textures") {
         Some(i) => l[i..].to_string(),
         None if l.is_empty() => String::new(),
         None => format!("textures\\{l}"),
@@ -371,5 +371,7 @@ mod tests {
         assert_eq!(decode(&[b'a', 0xE9]), "a\u{e9}");
         assert_eq!(texture_key("Data\\Textures\\A.dds"), "textures\\a.dds");
         assert_eq!(texture_key("lod\\x.dds"), "textures\\lod\\x.dds");
+        assert_eq!(texture_key("XJKCoWTextures\\Arch.dds"), "textures\\xjkcowtextures\\arch.dds");
+        assert_eq!(texture_key("Data\\Textures\\XJKCoWTextures\\Arch.dds"), "textures\\xjkcowtextures\\arch.dds");
     }
 }
