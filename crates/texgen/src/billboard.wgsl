@@ -32,7 +32,7 @@ struct Uniforms {
     // rgb: own-emit colour times its multiple; black when the material does not own-emit.
     emit: vec4<f32>,
     // Object normal + depth pass (pass 2): x = dot(p, toward camera) on the slab's near plane,
-    // y = 1 / slab length.
+    // y = 1 / slab length; z: mip bias of every texture sample (0 for billboards).
     slab: vec4<f32>,
 };
 
@@ -125,10 +125,10 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         uv_normal = vec2<f32>(in.uv.x, 0.5 + v * 0.5);
     }
     // All texture reads happen before the alpha test so they stay in uniform control flow.
-    let albedo = textureSample(diffuse_tex, samp, uv_diffuse);
-    let nm_own = textureSample(normal_tex, samp, uv_normal);
-    let nm_complex = textureSample(diffuse_tex, samp, uv_normal);
-    let mask = textureSample(glow_tex, samp, uv_diffuse);
+    let albedo = textureSampleBias(diffuse_tex, samp, uv_diffuse, u.slab.z);
+    let nm_own = textureSampleBias(normal_tex, samp, uv_normal, u.slab.z);
+    let nm_complex = textureSampleBias(diffuse_tex, samp, uv_normal, u.slab.z);
+    let mask = textureSampleBias(glow_tex, samp, uv_diffuse, u.slab.z);
     let nm = select(nm_own, nm_complex, complex);
 
     // Coverage: the alpha test on the diffuse alpha. A texel passes when its alpha exceeds the

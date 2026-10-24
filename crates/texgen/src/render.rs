@@ -27,7 +27,7 @@ struct Uniforms {
     /// Emissive colour times multiple (own emit only).
     emit: [f32; 4],
     /// Object normal + depth pass: x = the slab's near plane along the toward-camera axis
-    /// (`dot(p, toward)` there), y = 1 / slab length.
+    /// (`dot(p, toward)` there), y = 1 / slab length; z = texture mip bias (every pass).
     slab: [f32; 4],
 }
 
@@ -135,13 +135,16 @@ pub struct Basis {
     /// `dot(p, toward)` on the slab's near plane and depth 0..1 runs away from the camera over
     /// `length` units. A length <= 0 uses the scene's own depth range.
     pub slab: (f32, f32),
+    /// Bias added to every texture sample's mip level (negative: sharper). Impostor bakes use it
+    /// so the alpha test sees the foliage's real coverage instead of a mip-averaged alpha.
+    pub mip_bias: f32,
 }
 
 impl Basis {
     /// The basis of a yaw view (no explicit slab).
     pub fn from_yaw(yaw_deg: f32) -> Basis {
         let (s, c) = yaw_deg.to_radians().sin_cos();
-        Basis { right: [-c, -s, 0.0], up: [0.0, 0.0, 1.0], toward: [-s, c, 0.0], slab: (0.0, 0.0) }
+        Basis { right: [-c, -s, 0.0], up: [0.0, 0.0, 1.0], toward: [-s, c, 0.0], slab: (0.0, 0.0), mip_bias: 0.0 }
     }
 }
 
@@ -494,7 +497,7 @@ impl Renderer {
             // depth: 0 nearest (largest dot(p, toward)) .. 1 farthest
             let rz = [-t[0] / dspan, -t[1] / dspan, -t[2] / dspan, dmax / dspan];
             let eye = [t[0], t[1], t[2], light.direct];
-            let slab = if cam.slab.1 > 0.0 { [cam.slab.0, 1.0 / cam.slab.1, 0.0, 0.0] } else { [dmax, 1.0 / dspan, 0.0, 0.0] };
+            let slab = if cam.slab.1 > 0.0 { [cam.slab.0, 1.0 / cam.slab.1, cam.mip_bias, 0.0] } else { [dmax, 1.0 / dspan, cam.mip_bias, 0.0] };
 
             struct Draw {
                 geo: std::rc::Rc<(wgpu::Buffer, wgpu::Buffer)>,

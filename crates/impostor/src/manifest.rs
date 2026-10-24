@@ -54,7 +54,24 @@ pub struct TypeManifest {
     pub rect: [f32; 4],
     /// Mean coverage of the frames (0..1).
     pub coverage: f32,
+    /// Colour correction the runtime multiplies into the pre-lit albedo: `albedo * brightness *
+    /// tint` (1 and white unless a calibration file sets them; see `--impostor-calibration`).
+    #[serde(default = "one")]
+    pub brightness: f32,
+    #[serde(default = "white")]
+    pub tint: [f32; 3],
+    /// The albedo carries the tree's lighting (baker version 2 on); false: unlit albedo.
+    #[serde(default)]
+    pub prelit: bool,
     pub cache_key: String,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn white() -> [f32; 3] {
+    [1.0; 3]
 }
 
 /// One atlas page.

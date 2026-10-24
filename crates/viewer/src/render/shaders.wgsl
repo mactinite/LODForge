@@ -396,6 +396,8 @@ struct ImpIn {
     @location(2) rect: vec4<f32>,
     // Quad size (model units), frames per side, frame size (px), flags.
     @location(3) misc: vec4<f32>,
+    // rgb: brightness * tint; w: 1 when the albedo is pre-lit.
+    @location(4) tint: vec4<f32>,
     @builtin(vertex_index) vi: u32,
 };
 
@@ -410,6 +412,7 @@ struct ImpOut {
     @location(5) @interpolate(flat) rect: vec4<f32>,
     // x grid, y frame px, z yaw.
     @location(6) @interpolate(flat) info: vec3<f32>,
+    @location(7) @interpolate(flat) tint: vec4<f32>,
 };
 
 fn hemi_oct_encode(d: vec3<f32>) -> vec2<f32> {
@@ -511,6 +514,7 @@ fn vs_impostor(in: ImpIn) -> ImpOut {
     out.world = world;
     out.rect = in.rect;
     out.info = vec3<f32>(grid, in.misc.z, yaw);
+    out.tint = in.tint;
     return out;
 }
 
@@ -550,7 +554,8 @@ fn fs_impostor(in: ImpOut) -> @location(0) vec4<f32> {
         select(0.0, 1.0, all(in.f2.zw >= vec2<f32>(0.0)) && all(in.f2.zw <= vec2<f32>(1.0))));
     let w = in.w;
     let alpha = w.x * a0.a * inside.x + w.y * a1.a * inside.y + w.z * a2.a * inside.z;
-    var threshold = 0.4;
+    // The game's alpha-test reference (the baker keeps each frame's coverage at it in every mip).
+    var threshold = 0.5;
     if (g.params.z >= 0.0) {
         threshold = g.params.z;
     }
@@ -560,7 +565,9 @@ fn fs_impostor(in: ImpOut) -> @location(0) vec4<f32> {
     // Colour: weights renormalised over the covering frames (an uncovered frame's dilated colour
     // would bleed in).
     let cw = w * vec3<f32>(a0.a, a1.a, a2.a) * inside;
-    let base = (cw.x * a0.rgb + cw.y * a1.rgb + cw.z * a2.rgb) / max(cw.x + cw.y + cw.z, 1e-4);
+    // Calibration (brightness * tint) applies to the encoded (gamma-space) albedo.
+    let base = to_linear(to_gamma((cw.x * a0.rgb + cw.y * a1.rgb + cw.z * a2.rgb) / max(cw.x + cw.y + cw.z, 1e-4)) * in.tint.rgb);
+    let prelit = in.tint.w > 0.5;
     // Normal: baked model-space normals, eased toward the canopy shell for stable far shading.
     let baked = normalize(cw.x * (n0.rgb * 2.0 - 1.0) + cw.y * (n1.rgb * 2.0 - 1.0) + cw.z * (n2.rgb * 2.0 - 1.0) + vec3<f32>(0.0, 0.0, 1e-4));
     let shell = normalize(w.x * imp_shell(in.f0, n0.a, grid) + w.y * imp_shell(in.f1, n1.a, grid) + w.z * imp_shell(in.f2, n2.a, grid) + vec3<f32>(0.0, 0.0, 1e-4));
@@ -568,7 +575,14 @@ fn fs_impostor(in: ImpOut) -> @location(0) vec4<f32> {
     let n = rot_z(n_model, -in.info.z);
     let mode = i32(g.params.x);
     var c = base;
-    if (mode == 0 && atmo_on()) {
+    if (mode == 0 && prelit && atmo_on()) {
+        // Pre-lit albedo: lit like a billboard, a vertical surface turned partly toward the sun
+        // (as fs_tree, and as the game's DistantTree shader treats a flat quad).
+        c = apply_fog(weather_shade(base, g.atmo[7].rgb + g.atmo[6].rgb * 0.5), in.world);
+    } else if (mode == 0 && prelit) {
+        let ambient = g.sun_dir.w;
+        c = base * (ambient + (1.0 - ambient) * 0.6);
+    } else if (mode == 0 && atmo_on()) {
         c = apply_fog(weather_shade(base, weather_light(n)), in.world);
     } else if (mode == 0) {
         c = base * lit(n);

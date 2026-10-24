@@ -63,9 +63,23 @@ that index. Types are sorted by `name`.
   `right = normalize(cross(+Z, dir))`, `up = cross(dir, right)`; when `|dir.z| >= 0.999`,
   `right = +X`, `up = +Y`. `right x up = dir`. Image x grows along `right`, image rows run along
   `-up` (top row = `+up`).
-- **Lighting.** Albedo is unlit: diffuse texture times vertex colour (no PBR scale, no specular).
-- **Supersampling.** Frames render at 4x per axis and are averaged down: alpha is fractional
-  coverage, colour the coverage-weighted mean.
+- **Pre-lit albedo** (baker version 2, `prelit: true`). In game the impostors go through CS's
+  DistantTree pixel shader, which lights a flat quad as it lights TexGen billboards, so the
+  albedo carries the tree's shading like a billboard does. Each covered texel is lit on the CPU
+  from the bake's own unlit albedo (texture x vertex colour), model-space normal and depth, in
+  the textures' encoded space as TexGen does:
+  `albedo * (0.55 * ao + 1.35 * max((n.L + 0.3) / 1.3, 0) * T)`, L = +Z (TexGen's top light).
+  - `T`, sun transmittance: `exp(-t / 0.35r)`, t = foliage depth between the texel and the
+    crown's lit surface, from a 256 px depth map rendered from L (3 x 3 filtered).
+  - `ao`, ambient occlusion: `1 - 0.75 * (1 - exp(-recess / 0.25r))`, recess = how far the
+    texel lies behind the nearest foliage within F/16 texels in its own frame. Trunks and
+    inner branches inside the crown go dark, as in the 3D render.
+  `--impostor-unlit` keeps the M2 behaviour (unlit albedo, `prelit: false`).
+- **Alpha-tested coverage.** Frames render at 4x per axis and are averaged down. Every
+  supersample is alpha-tested at the material's own threshold, with the tree textures sampled
+  at mip bias -2 (`--impostor-mip-bias`): a mip-averaged alpha falls below the threshold and
+  thins needles into holes. Alpha = the share of supersamples that pass; colour = the mean of
+  the passing samples only (no coverage-weighted darkening at edges).
 - **Dilation.** Each frame is dilated on its own (16 rings, 8 neighbours) under the albedo
   coverage mask: covered colours, normals and depths flood into the empty texels so filtering
   never pulls in background. Coverage itself stays 0 there.
@@ -77,17 +91,25 @@ that index. Types are sorted by `name`.
   cell texels `[x + i * F, x + (i + 1) * F) x [y + j * F, y + (j + 1) * F)`, F = `frame_px`.
 - In normalised page uv (D3D convention, v down):
   `cell(i, j) = rect.xy + (i, j) * rect.zw / N`, size `rect.zw / N`.
-- Rectangles start on multiples of 128 texels; frame sizes are powers of two (32, 64 or 128 by
+- Rectangles start on multiples of 512 texels; frame sizes are powers of two (32 to 256 by
   default), so frame boundaries stay aligned through `log2(F) + 1` mip levels.
+- **Mips keep the alpha-tested coverage.** Each frame's share of texels with alpha >= 0.5 (the
+  game's alpha-test reference) at level 0 is kept at every level by scaling that frame's alpha
+  (alpha-to-coverage-preserving mips), so distant impostors neither thin out nor turn into
+  blobs. Test alpha against 0.5.
 
-Default layouts (frame size = next power of two of `height * max(1, min(2, max ref scale)) / 12`,
-clamped to 32..128; grid 16 up to 64 px frames, 12 above):
+Default layouts. World height = model height x (largest reference scale, clamped to
+1..1.25). Trees at least 2600 units tall in the world get 256 px frames
+(`--impostor-large-height`, `--impostor-large-frame`). Below that, the frame size is the next
+power of two of `world height / 12`, clamped to 32..128. The grid is 16 up to 64 px frames
+and 12 above:
 
 | Layout | Atlas | Typical trees |
 | --- | --- | --- |
 | 16 x 16 x 32 px | 512 | shrubs, saplings |
 | 16 x 16 x 64 px | 1024 | small trees |
-| 12 x 12 x 128 px | 1536 | most full-size trees (pines, oaks, aspens) |
+| 12 x 12 x 128 px | 1536 | full-size trees below 2600 units |
+| 12 x 12 x 256 px | 3072 | tall conifers, big oaks and aspens |
 
 ## Channel encodings
 
@@ -95,8 +117,13 @@ clamped to 32..128; grid 16 up to 64 px frames, 12 above):
 
 | Channel | Content |
 | --- | --- |
-| RGB | Albedo, **sRGB-encoded** (as the source textures). Create the SRV as `BC7_UNORM_SRGB` for linear values, or decode in the shader. |
-| A | Coverage (0..1). Alpha-test it (the reference uses 0.4). |
+| RGB | **Pre-lit** albedo (`prelit: true`), **sRGB-encoded** (as the source textures and TexGen billboards). Multiply by the type's `brightness * tint` in encoded space. Create the SRV as `BC7_UNORM_SRGB` for linear values, or decode in the shader. |
+| A | Alpha-tested coverage (0..1), preserved through the mips at 0.5. Alpha-test it at 0.5. |
+
+The per-type `brightness` (default 1) and `tint` (default white) are colour corrections for
+calibration against the in-game 3D trees. `--impostor-calibration <csv>` sets them from lines
+`type,brightness,r,g,b` (`*` = every type). They are applied at draw time, so changing them
+needs no rebake.
 
 **Normal + depth page** (`pageNN_nd.dds`), linear:
 
@@ -177,9 +204,12 @@ float2 AtlasUv(float2 idx, float2 local) {
 // Sample albedo (a_k) and normal-depth (nd_k) of the three frames at AtlasUv(i_k, local_k).
 // A frame whose local uv lies outside 0..1 has no coverage there.
 float alpha = dot(w, float3(a0.a, a1.a, a2.a) * inside);
-clip(alpha - 0.4);
+clip(alpha - 0.5);
 float3 cw = w * float3(a0.a, a1.a, a2.a) * inside;      // colour/normal weights
 float3 albedo = (cw.x * a0.rgb + cw.y * a1.rgb + cw.z * a2.rgb) / max(dot(cw, 1), 1e-4);
+albedo *= brightness * tint;                            // encoded space
+// Pre-lit: hand albedo to the DistantTree lighting as a billboard's colour (M2). Relighting
+// with the baked normals (M2b) must divide out the baked top light first, or the tree is lit twice.
 float3 nBaked = normalize(cw.x * (nd0.rgb * 2 - 1) + cw.y * (nd1.rgb * 2 - 1) + cw.z * (nd2.rgb * 2 - 1));
 // Optional canopy-shell normal for stable far shading (Terra): per frame
 // shell_k = r_k * (local_k.x - 0.5) + u_k * (0.5 - local_k.y) + d_k * (0.5 - nd_k.a),
@@ -199,45 +229,71 @@ float3 nWorld = mul(Rz(-yaw), n);
 
 Bakes are cached (default `%LOCALAPPDATA%\LODForge\cache\impostors`, `--impostor-cache`) by an
 FNV-1a key over: the model's CRC-32, each texture's path and CRC-32, grid, frame size, dilation,
-supersampling, and the baker version. Types with the same key (identical model and textures under
+supersampling, mip bias, light-map size, the pre-lighting settings, and the baker version (2). Types with the same key (identical model and textures under
 another path, common in Skyrim's per-hold tree copies) share one atlas rectangle.
 
 ## Measured: skyrim-cs-base Tamriel (2026-10-24)
 
 `lodforge impostors --instance D:\Modlists\skyrim-cs-base --worlds Tamriel --preview-instances`,
-default settings, empty cache, CPU BC7 (`--bc7 high`):
+default settings, CPU BC7 (`--bc7 high`).
 
 - **348 types** (one per rendered model) for 380 tree bases with references; 88,741 instances.
-  101 types share an identical bake with another type (same model and texture bytes under another
-  path, e.g. the per-hold `haafingar_*` / `whiterun_*` copies), so 247 unique rectangles.
-- **Time**: 5.3 min in all: bake 279 s, page encode 37 s. Per baked type: 512 px atlas mean
-  0.49 s, 1024 px 0.60 s, 1536 px 1.47 s (max 9 s, the first type of a run pays texture
-  uploads). Cached reruns of a type take ~50 ms.
-- **Size**: 39 pages of 4096 px (BC7, mips), 1.09 GiB on disk:
+  Types with an identical bake share one rectangle (same model and texture bytes under another
+  path, e.g. the per-hold `haafingar_*` / `whiterun_*` copies).
+- **Baker v2** (pre-lit, alpha-tested coverage, coverage-preserving mips, 256 px tier):
+  - Time from an empty cache: 5.5 min (bake 240 s, 0.94 s per baked type; page encode 84 s).
+  - A rebake after a layout change: 1.5 min (320 of 348 from the cache).
+  - Size: 55 pages, 1.39 GiB on disk.
 
-  | Layout | Types | Unique | BC7 + mips (both maps) |
-  | --- | --- | --- | --- |
-  | 12 x 12 x 128 px (1536) | 250 | 153 | 918 MiB |
-  | 16 x 16 x 64 px (1024) | 31 | 27 | 72 MiB |
-  | 16 x 16 x 32 px (512) | 67 | 67 | 45 MiB |
+  | Layout | Types | BC7 + mips (both maps) |
+  | --- | --- | --- |
+  | 12 x 12 x 256 px (3072) | 26 (22 unique) | 528 MiB |
+  | 12 x 12 x 128 px (1536) | 220 | 774 MiB |
+  | 16 x 16 x 64 px (1024) | 32 | 72 MiB |
+  | 16 x 16 x 32 px (512) | 70 | 47 MiB |
 
-  `--impostor-max-frame 64` puts the 1536 types at 16 x 16 x 64 px (2.7 MiB each, about
-  530 MiB in all); the runtime's residency streaming (M2b) is the other lever.
+  With the large tier at 2000 units instead of 2600, 92 types (53 unique) get 256 px frames
+  and the set grows to 2.0 GiB / 79 pages. `--impostor-large-frame 0` gives about 0.95 GiB;
+  `--impostor-max-frame 64` puts the mid tier at 1024 px (about 0.4 GiB less).
+- **v1** (unlit, M2): 39 pages, 1.09 GiB, 5.3 min.
 - 2 bases bake nothing: `deadshrub01.nif` (no renderable texture) and
   `haafingar_tundradriftwood01.nif` (no geometry).
 
-Viewer golden screenshots (`lodforge view --levels 4 --camera 100000,-112000,40000,45,-28
---fov 50`, the Rift): classic billboard tree LOD (`--layers terrain,water,objects,trees`, the
-2026-10-22 cs-base build) against the impostor preview (`--layers
-terrain,water,objects,impostors --impostors <set folder>`):
+### Viewer goldens
+
+The classic billboard tree LOD (`--layers terrain,water,objects,trees`, the 2026-10-22 cs-base
+build) against the impostor preview (`--layers terrain,water,objects,impostors --impostors <set
+folder>`), `--levels 4`.
+
+The Rift from above (`--camera 100000,-112000,40000,45,-28 --fov 50`): billboards, impostors v1,
+impostors v2.
 
 ![billboards](img/rift-trees.png)
-![impostors](img/rift-impostors.png)
+![impostors v1](img/rift-impostors-v1.png)
+![impostors v2](img/rift-impostors-v2.png)
 
-The impostors keep their silhouette from above (billboards turn into flat cards), and carry
-no baked lighting: they are lit from the baked normals, so they read darker than TexGen's
-pre-lit billboards (direct 1.35 + ambient 0.55). Brightness matching is a runtime setting
-(Terra uses a 1.2 boost).
+The forest edge near Riften (`--camera 113000,-99000,15500,45,-6 --fov 40`): billboards,
+v1, v2.
+
+![billboards](img/near-billboards.png)
+![impostors v1](img/near-impostors-v1.png)
+![impostors v2](img/near-impostors-v2.png)
+
+- **v1** shows the in-game problem: unlit, light-grey bark streaks through flat crowns.
+- **v2**: trunks sit dark inside the crowns, tops are lit and undersides shaded.
+- Foliage colour in the near shot (rows 300..700):
+
+  | Shot | Mean RGB | Luma | Luma sd |
+  | --- | --- | --- | --- |
+  | Billboards | 65, 76, 35 | 68.4 | 13.5 |
+  | v1 | 49, 58, 31 | 52.3 | 10.6 |
+  | v2 | 48, 58, 28 | 51.4 | 15.1 |
+
+  v2 has 43% more contrast than v1 at the same mean.
+- Pre-lighting keeps a type's mean brightness about where the unlit albedo was (pine02 atlas:
+  lit / unlit 1.04): the top light adds about as much as occlusion and transmittance take away.
+  Match the in-game 3D trees through `brightness` / `tint` (`--impostor-calibration`), measured
+  per type in game.
 
 ## Preview instances (temporary)
 
