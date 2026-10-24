@@ -19,6 +19,16 @@ fn main() {
                         Some(lodforge_nif::Block::LightingShader(l)) => Some((l.shader_type, l.flags1, l.flags2)),
                         _ => None,
                     });
+                    let textures = sh.shader_property.and_then(|r| match nif.blocks.get(r as usize) {
+                        Some(lodforge_nif::Block::LightingShader(l)) => match l.texture_set.and_then(|t| nif.blocks.get(t as usize)) {
+                            Some(lodforge_nif::Block::TextureSet(t)) => Some(t.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" | ")),
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                    if std::env::var_os("NIF_TEXTURES").is_some() {
+                        println!("      textures {}", textures.unwrap_or_default());
+                    }
                     println!("    {:?} tris {} alpha {:?} shader {:?}", sh.av.net.name, sh.triangles.len(), alpha.map(|(f, t)| format!("{f:#06x}/{t}")), shader.map(|(ty, f1, f2)| format!("type {ty} f1 {f1:#010x} f2 {f2:#010x}")));
                 }
                 t += sh.triangles.len();

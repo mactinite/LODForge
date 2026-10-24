@@ -62,6 +62,10 @@ pub struct Args {
     /// `<dir>\<stem>.png` (TexGen's billboard camera, same scale).
     #[arg(long)]
     pub render: Option<PathBuf>,
+    /// With `--out`: after generating, contact sheets of every generated model (full model |
+    /// LOD4), most placed trees first, as `<dir>\trees_NN.png` with a `.txt` index per page.
+    #[arg(long)]
+    pub sheets: Option<PathBuf>,
 }
 
 /// Texture alpha through the VFS, decoded once per path.
@@ -165,9 +169,25 @@ pub fn cloud_prep(bytes: &[u8], textures: &dyn Fn(&str) -> Option<Arc<AlphaImage
     let nif = lodforge_nif::parse_all_geometry(bytes).map_err(|e| format!("parse: {e}"))?;
     let shapes = collect(&nif);
     let mut notes = Default::default();
-    let parts = split(&nif, &shapes, textures, &mut notes);
+    let mut parts = split(&nif, &shapes, textures, &mut notes);
     if parts.is_empty() {
         return Err("no geometry".into());
+    }
+    // Small crown shapes with a texture of their own (bark blends, moss cards) stay 3D with the
+    // trunk: sliced, they were projected away from the trunk they cover (floating bits).
+    {
+        let diffuse = |si: usize| match nif.blocks.get(shapes[si].block) {
+            Some(lodforge_nif::Block::TriShape(s)) => lodforge_treemodel::split::diffuse(&nif, s).unwrap_or_default(),
+            _ => String::new(),
+        };
+        let crown_total: usize = parts.iter().filter(|p| p.kind == Kind::Crown).map(|p| p.triangles).sum();
+        if let Some(main) = parts.iter().filter(|p| p.kind == Kind::Crown).max_by_key(|p| p.triangles).map(|p| diffuse(p.shape)) {
+            for p in parts.iter_mut() {
+                if p.kind == Kind::Crown && diffuse(p.shape) != main && p.triangles * 100 < crown_total * 15 {
+                    p.kind = Kind::Trunk;
+                }
+            }
+        }
     }
     let sum = |k: Kind| parts.iter().filter(|p| p.kind == k).map(|p| p.triangles).sum::<usize>();
     // Leaves untouched (keep 1), bark reduced per level.
@@ -199,8 +219,16 @@ fn crown_material(prep: &CloudPrep, diffuse: &str, normal: &str) -> lodforge_tre
     // ZBuffer_Test only; ZBuffer_Write, Double_Sided and Vertex_Colors (white vertex colours on the
     // quads). The source leaf shader's other flags (Vertex_Alpha, which takes alpha from vertex
     // colours the quads did not have, among them) left the crowns unclipped squares in game.
+    let soft = shader.flags2 & 0x0200_0000 != 0;
     shader.flags1 = 0x8000_0000;
     shader.flags2 = 0x31;
+    // Soft lighting (thin foliage lit from behind, through a slot-2 mask) when the leaves have it,
+    // with the crown diffuse as the mask, as DynDOLOD's own crown LOD models do
+    // (reachtree02passthru_lod.nif: slot 2 = the branch diffuse; flags2 0x02000031 in object LOD).
+    // Without it, vanilla broadleaf crowns lit at about half the brightness of the full tree.
+    if soft {
+        shader.flags2 |= 0x0200_0000;
+    }
     shader.net = lodforge_nif::ObjectNet { name: shader.net.name.clone(), ..Default::default() };
     let alpha = src
         .and_then(|s| match s.alpha_property.and_then(|r| prep.nif.blocks.get(r as usize)) {
@@ -208,7 +236,11 @@ fn crown_material(prep: &CloudPrep, diffuse: &str, normal: &str) -> lodforge_tre
             _ => None,
         })
         .or(Some((4844, 128)));
-    lodforge_treemodel::write::Material { name: "Crown Cloud".into(), shader, textures: vec![diffuse.to_string(), normal.to_string()], alpha }
+    let mut textures = vec![diffuse.to_string(), normal.to_string()];
+    if soft {
+        textures.push(diffuse.to_string());
+    }
+    lodforge_treemodel::write::Material { name: "Crown Cloud".into(), shader, textures, alpha }
 }
 
 /// Renders the tiles, packs the crown textures and writes every level. Returns the files (Data-
@@ -456,18 +488,17 @@ fn inspect(p: &Profile, models: &[String], render: Option<&Path>, params: &[Leve
 }
 
 /// The models side by side as TexGen's billboard camera sees them, on grey.
-fn render_sheet(p: &Profile, nifs: &[lodforge_nif::Nif], png: &Path, extra: &HashMap<String, Vec<u8>>) -> Result<()> {
-    let gpu = lodforge_gpu::Gpu::new()?;
-    let renderer = lodforge_texgen::Renderer::new(&gpu);
+/// The models side by side as TexGen's billboard camera sees them, each `height` pixels high
+/// (billboard heights round up to a power of two), on grey: (width, height, RGBA).
+fn sheet_image(gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Renderer, read: &dyn Fn(&str) -> Option<Vec<u8>>, nifs: &[lodforge_nif::Nif], height: f32) -> (u32, u32, Vec<u8>) {
     let s = lodforge_texgen::Settings::default();
     let mut imgs = Vec::new();
-    let scenes: Vec<lodforge_texgen::Scene> = nifs.iter().map(lodforge_texgen::Scene::from_nif).collect();
-    for scene in &scenes {
-        // Each model about 500 pixels high (billboard heights round up to a power of two).
-        let height = scene.bounds().map(|(lo, hi)| hi[2] - lo[2]).unwrap_or(1.0).max(1.0);
-        let scale = 500.0 * s.units_per_pixel / height;
-        let tex = lodforge_texgen::load_textures(scene, |t| extra.get(t).cloned().or_else(|| p.vfs.read(t).ok().flatten()).and_then(|b| lodforge_texgen::TexData::from_dds(&b, true)));
-        if let Some(b) = lodforge_texgen::make_billboard(&gpu, &renderer, scene, &tex, scale, &s, false) {
+    for nif in nifs {
+        let scene = lodforge_texgen::Scene::from_nif(nif);
+        let h = scene.bounds().map(|(lo, hi)| hi[2] - lo[2]).unwrap_or(1.0).max(1.0);
+        let scale = height * s.units_per_pixel / h;
+        let tex = lodforge_texgen::load_textures(&scene, |t| read(t).and_then(|b| lodforge_texgen::TexData::from_dds(&b, true)));
+        if let Some(b) = lodforge_texgen::make_billboard(gpu, renderer, &scene, &tex, scale, &s, false) {
             imgs.push(b);
         }
     }
@@ -492,12 +523,87 @@ fn render_sheet(p: &Profile, nifs: &[lodforge_nif::Nif], png: &Path, extra: &Has
         }
         x0 += b.width_px + 8;
     }
-    let f = std::fs::File::create(png)?;
+    (w, h, out)
+}
+
+fn save_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
+    let f = std::fs::File::create(path)?;
     let mut e = png::Encoder::new(std::io::BufWriter::new(f), w, h);
     e.set_color(png::ColorType::Rgba);
     e.set_depth(png::BitDepth::Eight);
-    e.write_header()?.write_image_data(&out)?;
+    e.write_header()?.write_image_data(rgba)?;
     Ok(())
+}
+
+/// Box-filtered copy of an image scaled to fit `cw` x `ch`, bottom-centred into a cell of that size.
+fn fit(src: (u32, u32, &[u8]), cw: u32, ch: u32) -> Vec<u8> {
+    let (sw, sh, s) = src;
+    let k = (cw as f32 / sw as f32).min(ch as f32 / sh as f32).min(1.0);
+    let (dw, dh) = (((sw as f32 * k) as u32).max(1), ((sh as f32 * k) as u32).max(1));
+    let mut out: Vec<u8> = (0..cw * ch).flat_map(|_| [96u8, 104, 112, 255]).collect();
+    let (ox, oy) = ((cw - dw) / 2, ch - dh);
+    for y in 0..dh {
+        for x in 0..dw {
+            let (x0, x1) = ((x as f32 / k) as u32, (((x + 1) as f32 / k) as u32).max((x as f32 / k) as u32 + 1).min(sw));
+            let (y0, y1) = ((y as f32 / k) as u32, (((y + 1) as f32 / k) as u32).max((y as f32 / k) as u32 + 1).min(sh));
+            let mut acc = [0u32; 4];
+            let mut n = 0;
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    let i = ((yy * sw + xx) * 4) as usize;
+                    for c in 0..4 {
+                        acc[c] += u32::from(s[i + c]);
+                    }
+                    n += 1;
+                }
+            }
+            let d = (((oy + y) * cw + ox + x) * 4) as usize;
+            for c in 0..4 {
+                out[d + c] = (acc[c] / n.max(1)) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Contact sheets of generated models: per page `cols` x `rows` cells of (full model | LOD4).
+fn contact_sheets(p: &Profile, out: &Path, made: &[(String, usize, String)], dir: &Path) -> Result<usize> {
+    let gpu = lodforge_gpu::Gpu::new()?;
+    let renderer = lodforge_texgen::Renderer::new(&gpu);
+    let read = |t: &str| -> Option<Vec<u8>> { std::fs::read(out.join(t)).ok().or_else(|| p.vfs.read(t).ok().flatten()) };
+    let (cols, rows, cw, ch) = (6u32, 4u32, 420u32, 300u32);
+    std::fs::create_dir_all(dir)?;
+    let per = (cols * rows) as usize;
+    let mut pages = 0;
+    for (pi, chunk) in made.chunks(per).enumerate() {
+        let (pw, ph) = (cols * cw, rows * ch);
+        let mut page: Vec<u8> = (0..pw * ph).flat_map(|_| [40u8, 40, 40, 255]).collect();
+        let mut index = String::new();
+        for (ci, (model, refs, lod0)) in chunk.iter().enumerate() {
+            let nifs: Vec<lodforge_nif::Nif> = [read(model), read(lod0)].into_iter().flatten().filter_map(|b| lodforge_nif::parse(&b).ok()).collect();
+            let (w, h, img) = sheet_image(&gpu, &renderer, &read, &nifs, 300.0);
+            let cell = fit((w, h, &img), cw - 6, ch - 6);
+            let (cx, cy) = ((ci as u32 % cols) * cw + 3, (ci as u32 / cols) * ch + 3);
+            for y in 0..ch - 6 {
+                let s0 = (y * (cw - 6) * 4) as usize;
+                let d0 = (((cy + y) * pw + cx) * 4) as usize;
+                page[d0..d0 + ((cw - 6) * 4) as usize].copy_from_slice(&cell[s0..s0 + ((cw - 6) * 4) as usize]);
+            }
+            index.push_str(&format!("{}\t{}\t{refs} refs\t{model}\r\n", ci / cols as usize + 1, ci % cols as usize + 1));
+        }
+        save_png(&dir.join(format!("trees_{:02}.png", pi + 1)), pw, ph, &page)?;
+        std::fs::write(dir.join(format!("trees_{:02}.txt", pi + 1)), format!("row\tcol\treferences\tmodel (cell: full model | LOD4)\r\n{index}"))?;
+        pages += 1;
+    }
+    Ok(pages)
+}
+
+fn render_sheet(p: &Profile, nifs: &[lodforge_nif::Nif], png: &Path, extra: &HashMap<String, Vec<u8>>) -> Result<()> {
+    let gpu = lodforge_gpu::Gpu::new()?;
+    let renderer = lodforge_texgen::Renderer::new(&gpu);
+    let read = |t: &str| extra.get(t).cloned().or_else(|| p.vfs.read(t).ok().flatten());
+    let (w, h, out) = sheet_image(&gpu, &renderer, &read, nifs, 500.0);
+    save_png(png, w, h, &out)
 }
 
 pub fn run(a: &Args) -> Result<()> {
@@ -509,10 +615,39 @@ pub fn run(a: &Args) -> Result<()> {
     }
     let out = a.out.clone().context("--out or --inspect is needed")?;
     let dir = a.dyndolod_config.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
-    let c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
+    let mut c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
+    c.ultra = true;
     let t = std::time::Instant::now();
     let rep = crate::dyndolod_build::with_resolver(&p, &c, |r| generate(&p, &c, r, &out, &params, a.all, &a.only, a.crown, &cp))?;
     println!("{} in {:.1} s", rep.summary(), t.elapsed().as_secs_f64());
+    if let Some(dir) = &a.sheets {
+        // Most placed first (Tamriel's tree report), then by name.
+        let refs: HashMap<String, usize> = crate::dyndolod_build::with_resolver(&p, &c, |r| -> Result<HashMap<String, usize>> {
+            let worlds = lodforge_esp::scan_worldspaces(&p.load_order)?;
+            let Some(ws) = worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case("Tamriel")) else { return Ok(HashMap::new()) };
+            let h = crate::dyndolod_build::header(&p, &c, ws, "", &a.profile.game_dir().join("Data"), "");
+            let we = crate::dyndolod_build::export_world(&p, &c, r, ws, &[], &h, &[])?;
+            let s = &we.seasons[0];
+            let rows = crate::tree_report::rows(&p, &c, r, ws, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "");
+            let mut m = HashMap::new();
+            for row in rows {
+                *m.entry(lodforge_dyndolod::bases::model_path(&row.model).to_ascii_lowercase()).or_default() += row.refs;
+            }
+            Ok(m)
+        })?;
+        let mut list: Vec<(String, usize, String)> = rep
+            .made
+            .iter()
+            .filter_map(|m| {
+                let lod0 = m.files.iter().find(|f| f.ends_with("passthru_lod.nif"))?.clone();
+                Some((m.model.clone(), refs.get(&m.model.to_ascii_lowercase()).copied().unwrap_or(0), lod0))
+            })
+            .collect();
+        list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let t = std::time::Instant::now();
+        let pages = contact_sheets(&p, &out, &list, dir)?;
+        println!("contact sheets: {pages} pages of {} models in {:.1} s ({})", list.len(), t.elapsed().as_secs_f64(), dir.display());
+    }
     let mut notes: BTreeMap<String, usize> = BTreeMap::new();
     for m in &rep.made {
         for n in &m.notes {

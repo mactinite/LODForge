@@ -71,6 +71,11 @@ fn bounds(points: &[[f32; 3]]) -> ([f32; 3], f32) {
 
 const SLSF1_SPECULAR: u32 = 1;
 const SLSF1_SKINNED: u32 = 1 << 1;
+const SLSF1_VERTEX_ALPHA: u32 = 1 << 3;
+
+fn ai_source(src: &Nif, s: &TriShape) -> bool {
+    matches!(s.alpha_property.and_then(|r| src.blocks.get(r as usize)), Some(Block::Alpha { .. }))
+}
 const SLSF1_ENVMAP: u32 = 1 << 7;
 const SLSF1_PARALLAX: u32 = 1 << 11;
 const SLSF1_EYE_ENVMAP: u32 = 1 << 17;
@@ -215,6 +220,11 @@ pub fn level_nif(src: &Nif, shapes: &[SourceShape], level: &Level, notes: &mut V
         }
         if s.skin.is_some() {
             shader.flags1 &= !SLSF1_SKINNED;
+        }
+        // Vertex_Alpha takes the alpha from vertex colours; in object LOD that left alpha-tested
+        // shapes unclipped (the cloud crowns drew as squares until it went).
+        if ai_source(src, s) {
+            shader.flags1 &= !SLSF1_VERTEX_ALPHA;
         }
         shader.net = ObjectNet { name: shader.net.name.clone(), ..Default::default() };
         let ts = out.add_block(Block::TextureSet(textures));

@@ -27,8 +27,10 @@ pub struct CloudParams {
     pub yaws: Vec<f32>,
     pub vertical_slices: usize,
     pub horizontal_slices: usize,
-    /// Texture resolution of the tiles (game units per pixel).
-    pub units_per_pixel: f32,
+    /// Tile sizes are relative to the tree: the largest tile gets `max_tile` pixels on its long
+    /// side and the others the same pixels per unit (at least `min_tile`). Many tree models are
+    /// small and scaled up where they are placed, so a fixed units-per-pixel left them with
+    /// 50-pixel tiles (blotchy, straight-edged crowns in game).
     pub min_tile: u32,
     pub max_tile: u32,
     /// Turn the rendered soft coverage into on/off alpha by error diffusion ([dither_alpha]):
@@ -38,7 +40,7 @@ pub struct CloudParams {
 
 impl Default for CloudParams {
     fn default() -> Self {
-        CloudParams { yaws: vec![0.0, 45.0, 90.0, 135.0], vertical_slices: 3, horizontal_slices: 3, units_per_pixel: 4.0, min_tile: 16, max_tile: 256, dither: true }
+        CloudParams { yaws: vec![0.0, 45.0, 90.0, 135.0], vertical_slices: 3, horizontal_slices: 3, min_tile: 16, max_tile: 256, dither: true }
     }
 }
 
@@ -148,6 +150,13 @@ pub fn plan(src: &Nif, shapes: &[SourceShape], crown: &[&LevelPart], p: &CloudPa
             }
         }
     }
+    // The largest tile side gets `max_tile` pixels; every tile the same pixels per unit.
+    let largest = tiles.iter().map(|t| (t.a1 - t.a0).max(t.b1 - t.b0)).fold(0.0f32, f32::max).max(1e-3);
+    let ppu = p.max_tile as f32 / largest;
+    for t in &mut tiles {
+        t.width = (((t.a1 - t.a0) * ppu).round() as u32).clamp(p.min_tile, p.max_tile);
+        t.height = (((t.b1 - t.b0) * ppu).round() as u32).clamp(p.min_tile, p.max_tile);
+    }
     tiles
 }
 
@@ -202,11 +211,9 @@ fn tile(src: &Nif, shapes: &[SourceShape], crown: &[&LevelPart], baked: &[Baked]
     // A small margin so edge texels are not cut.
     let (ma, mb) = ((a1 - a0) * 0.01, (b1 - b0) * 0.01);
     let (a0, a1, b0, b1) = (a0 - ma, a1 + ma, b0 - mb, b1 + mb);
-    let (wu, hu) = ((a1 - a0) / p.units_per_pixel, (b1 - b0) / p.units_per_pixel);
-    let k = (p.max_tile as f32 / wu.max(hu)).min(1.0);
-    let width = ((wu * k).round() as u32).clamp(p.min_tile, p.max_tile);
-    let height = ((hu * k).round() as u32).clamp(p.min_tile, p.max_tile);
-    Some(Tile { u, v, n, d, a0, a1, b0, b1, width, height, nif: out, triangles: count })
+    let _ = p;
+    // Sizes are set by [plan] once every tile's extent is known.
+    Some(Tile { u, v, n, d, a0, a1, b0, b1, width: 0, height: 0, nif: out, triangles: count })
 }
 
 /// The source shape's shader, texture set and alpha property copied into `out`.
