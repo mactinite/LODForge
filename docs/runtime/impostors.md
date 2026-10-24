@@ -32,8 +32,9 @@ A type's **index** is its position in `impostors.json` `types`. Types are sorted
 The instance files refer to types by that index: a `<World>[.<SEASON>].trees.bin` record's `type`
 is this index, and its `TTYP` table repeats this list in the same order with the same `name`,
 `model` and `model_crc32` (docs/runtime/instance-formats.md section 3.2). One set covers every
-season of the worldspace. `build --runtime lodforge` bakes the set before it writes the trees
-files; trees whose base has no baked type (bake failed, not a TexGen tree candidate) stay in
+season of the worldspace. `build --runtime lodforge` runs the object LOD export first, adds every tree base the runtime
+will draw to the set (besides TexGen's candidates), bakes it, then writes the trees files; trees
+whose base still has no type (the bake failed: no geometry or no renderable texture) stay in
 object LOD.
 
 ### Type fields
