@@ -82,6 +82,9 @@ struct Cli {
     /// 0.75 matched the full pines at the switch distance in game (skyrim-cs-base 2026-10-23).
     #[arg(long, global = true, default_value_t = 0.75)]
     conifer_density: f32,
+    /// Keep tree billboards' rescaled soft alpha instead of dithering it into on/off alpha.
+    #[arg(long, global = true)]
+    billboard_soft: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -228,6 +231,7 @@ fn main() -> Result<()> {
     texgen_billboards::set_render_installed(cli.installed_billboards == InstalledBillboards::Render);
     object_atlas::set_billboard_density(cli.billboard_density);
     object_atlas::set_conifer_density(cli.conifer_density);
+    object_atlas::set_billboard_dither(!cli.billboard_soft);
     match cli.command {
         Command::Inspect { profile, json } => inspect::run(&profile, json),
         Command::BsaScan { profile } => scan::bsa_scan(&profile.open()?.vfs),

@@ -182,7 +182,8 @@ pub fn atlas_dds(p: &Profile, t: &TreeLod, gpu: &Gpu) -> Result<Option<Vec<u8>>>
         density.push(if crate::object_atlas::is_conifer_billboard(&tree.billboard) { crate::object_atlas::conifer_density() } else { crate::object_atlas::billboard_density() });
     }
     let mut levels = crate::object_atlas::assemble(w, h, mips, [0, 0, 0, 0], &chains);
-    crate::object_atlas::keep_alpha_coverage_with(&mut levels, &tiles, &density);
+    let dither = vec![crate::object_atlas::billboard_dither(); tiles.len()];
+    crate::object_atlas::keep_alpha_coverage_with(&mut levels, &tiles, &density, &dither);
     levels.drain(..drop as usize);
     let (w, h) = (levels[0].0, levels[0].1);
     let images: Vec<RgbaImage<'_>> = levels.iter().map(|(w, h, p)| RgbaImage { width: *w, height: *h, rgba: p }).collect();

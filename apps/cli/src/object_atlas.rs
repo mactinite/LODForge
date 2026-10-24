@@ -249,6 +249,50 @@ pub fn density_for(texture: &str) -> f32 {
     }
 }
 
+/// Dither tree billboard alpha (`--billboard-soft` turns it off): every mip level of a billboard
+/// tile keeps its supersampled soft coverage and is error-diffused into on/off alpha, instead of
+/// being rescaled so the alpha test passes the same share of texels as the top mip. Thin foliage
+/// then survives the game's alpha test as a fine pattern at the coverage it really has, instead of
+/// dense clusters turning solid and sparse ones vanishing (the cloud crowns' fix, 2026-10-23).
+static BILLBOARD_DITHER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_billboard_dither(on: bool) {
+    BILLBOARD_DITHER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn billboard_dither() -> bool {
+    BILLBOARD_DITHER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Floyd-Steinberg (serpentine) of the alpha inside a rectangle of an RGBA image into 0 / 255.
+pub fn dither_rect(rgba: &mut [u8], width: u32, rect: (u32, u32, u32, u32)) {
+    let (x0, y0, w, h) = (rect.0 as usize, rect.1 as usize, rect.2 as usize, rect.3 as usize);
+    let iw = width as usize;
+    let mut err = vec![0.0f32; w * h];
+    for y in 0..h {
+        let ltr = y % 2 == 0;
+        for i in 0..w {
+            let x = if ltr { i } else { w - 1 - i };
+            let k = y * w + x;
+            let a = ((y0 + y) * iw + x0 + x) * 4 + 3;
+            let v = f32::from(rgba[a]) / 255.0 + err[k];
+            let out = if v >= 0.5 { 1.0 } else { 0.0 };
+            rgba[a] = if out > 0.0 { 255 } else { 0 };
+            let e = v - out;
+            let fwd = |dx: isize| if ltr { x as isize + dx } else { x as isize - dx };
+            let mut add = |xx: isize, yy: usize, f: f32| {
+                if xx >= 0 && (xx as usize) < w && yy < h {
+                    err[yy * w + xx as usize] += e * f;
+                }
+            };
+            add(fwd(1), y, 7.0 / 16.0);
+            add(fwd(-1), y + 1, 3.0 / 16.0);
+            add(x as isize, y + 1, 5.0 / 16.0);
+            add(fwd(1), y + 1, 1.0 / 16.0);
+        }
+    }
+}
+
 /// Whether an atlas texture key is a TexGen tree billboard (`textures\terrain\lodgen\...`).
 pub fn is_tree_billboard(texture: &str) -> bool {
     texture.to_ascii_lowercase().replace('/', "\\").contains("\\terrain\\lodgen\\")
@@ -256,15 +300,59 @@ pub fn is_tree_billboard(texture: &str) -> bool {
 
 /// [keep_alpha_coverage], then for tiles with a `density` below 1 the alpha of every level (the
 /// top one too) is scaled down until only `density` times the top mip's coverage passes the
-/// test.
-pub fn keep_alpha_coverage_with(levels: &mut [(u32, u32, Vec<u8>)], tiles: &[(u32, u32, u32, u32)], density: &[f32]) {
+/// test. Tiles with `dither` set instead keep their filtered soft alpha, times `density`, and are
+/// dithered into on/off alpha on every level ([billboard_dither]).
+pub fn keep_alpha_coverage_with(levels: &mut [(u32, u32, Vec<u8>)], tiles: &[(u32, u32, u32, u32)], density: &[f32], dither: &[bool]) {
     let targets: Vec<f32> = match levels.first() {
         Some((tw, _, top)) => tiles.iter().map(|&r| coverage(top, *tw, r, 1.0)).collect(),
         None => return,
     };
+    // The soft alpha of dithered tiles, per level, before the coverage rescale.
+    let soft: Vec<Option<Vec<Vec<u8>>>> = tiles
+        .iter()
+        .zip(dither.iter().chain(std::iter::repeat(&false)))
+        .map(|(&(x, y, w, h), &on)| {
+            on.then(|| {
+                levels
+                    .iter()
+                    .enumerate()
+                    .map(|(k, (lw, _, px))| {
+                        let sh = k as u32;
+                        let (rx, ry, rw, rh) = (x >> sh, y >> sh, (w >> sh).max(1), (h >> sh).max(1));
+                        let mut a = Vec::with_capacity((rw * rh) as usize);
+                        for yy in ry..ry + rh {
+                            for xx in rx..rx + rw {
+                                a.push(px.get(((yy * *lw + xx) * 4 + 3) as usize).copied().unwrap_or(0));
+                            }
+                        }
+                        a
+                    })
+                    .collect()
+            })
+        })
+        .collect();
     keep_alpha_coverage(levels, tiles);
-    for ((&(x, y, w, h), &d), &top_cov) in tiles.iter().zip(density).zip(&targets) {
-        if d >= 1.0 || top_cov <= 0.0 {
+    for (ti, ((&(x, y, w, h), &d), soft)) in tiles.iter().zip(density).zip(&soft).enumerate() {
+        let _ = ti;
+        let Some(soft) = soft else { continue };
+        for (k, (lw, _, px)) in levels.iter_mut().enumerate() {
+            let sh = k as u32;
+            let rect = (x >> sh, y >> sh, (w >> sh).max(1), (h >> sh).max(1));
+            if rect.0 + rect.2 > *lw {
+                continue;
+            }
+            let mut i = 0;
+            for yy in rect.1..rect.1 + rect.3 {
+                for xx in rect.0..rect.0 + rect.2 {
+                    px[((yy * *lw + xx) * 4 + 3) as usize] = (f32::from(soft[k][i]) * d.min(1.0)).round() as u8;
+                    i += 1;
+                }
+            }
+            dither_rect(px, *lw, rect);
+        }
+    }
+    for (((&(x, y, w, h), &d), &top_cov), soft) in tiles.iter().zip(density).zip(&targets).zip(&soft) {
+        if d >= 1.0 || top_cov <= 0.0 || soft.is_some() {
             continue;
         }
         let target = top_cov * d;
@@ -473,7 +561,8 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
             let page_entries: Vec<_> = layout.entries.iter().filter(|e| e.page == pi).collect();
             let tiles: Vec<(u32, u32, u32, u32)> = page_entries.iter().map(|e| (e.x, e.y, e.width, e.height)).collect();
             let density: Vec<f32> = page_entries.iter().map(|e| density_for(&e.texture)).collect();
-            keep_alpha_coverage_with(&mut d_levels, &tiles, &density);
+            let dither: Vec<bool> = page_entries.iter().map(|e| billboard_dither() && is_tree_billboard(&e.texture)).collect();
+            keep_alpha_coverage_with(&mut d_levels, &tiles, &density, &dither);
         }
         let d_enc = if glow_page { Encoding::Bc7 } else if alpha_page { formats.alpha_diffuse } else { formats.diffuse };
         let d_dds = encode_as(gpu, d_enc, &d_levels)?;
@@ -649,7 +738,7 @@ mod tests {
         let mut levels = mip_chain_n(w, h, top, 3);
         let before: Vec<f32> = (0..2u32).map(|k| coverage(&levels[k as usize].2, levels[k as usize].0, (0, 0, 16 >> k, 16 >> k), 1.0)).collect();
         let other = coverage(&levels[0].2, w, (16, 0, 16, 16), 1.0);
-        keep_alpha_coverage_with(&mut levels, &[(0, 0, 16, 16), (16, 0, 16, 16)], &[0.6, 1.0]);
+        keep_alpha_coverage_with(&mut levels, &[(0, 0, 16, 16), (16, 0, 16, 16)], &[0.6, 1.0], &[false, false]);
         for k in 0..2u32 {
             let after = coverage(&levels[k as usize].2, levels[k as usize].0, (0, 0, 16 >> k, 16 >> k), 1.0);
             assert!((after - before[0] * 0.6).abs() < 0.08, "level {k}: {after} vs {}", before[0] * 0.6);
