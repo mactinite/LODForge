@@ -158,7 +158,7 @@ pub fn run(a: &Args) -> Result<()> {
     let inputs: Vec<crate::dyn_export::DynWorld<'_>> = exports
         .iter()
         .filter_map(|(w, we)| {
-            all.iter().find(|x| &x.editor_id == w).map(|world| crate::dyn_export::DynWorld { world, dynamic: &we.dynamic, seasonal: &we.seasonal_dynamic, child_copies: &we.child_copies, lod_refs: &we.lod_refs, lod_bases: &we.lod_bases, large_columns: large_columns.get(w) })
+            all.iter().find(|x| &x.editor_id == w).map(|world| crate::dyn_export::DynWorld { world, dynamic: &we.dynamic, seasonal: &we.seasonal_dynamic, child_copies: &we.child_copies, lod_refs: &we.lod_refs, lod_bases: &we.lod_bases, large_columns: large_columns.get(w), lines: &we.seasons[0].lines })
         })
         .collect();
     let workarounds = !a.no_large_ref_workarounds && c.num("WorkaroundLargeReferencesBugs", 1) == 1 && c.num("IgnoreLargeReferences", 0) == 0;

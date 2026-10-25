@@ -429,6 +429,9 @@ pub fn run(a: &Args) -> Result<()> {
     }
     // Runtime mode: per worldspace, the export's large references -> `.bto` levels with a column.
     let mut large_columns: std::collections::HashMap<String, std::collections::HashMap<u32, u16>> = std::collections::HashMap::new();
+    // Runtime mode: per worldspace, its export lines inside the bounds of a child worldspace that
+    // uses its LOD (the parent copies of the `<Child>.dyn.bin` files).
+    let mut child_lines: std::collections::HashMap<String, Vec<lodforge_dyndolod::export::RefLine>> = std::collections::HashMap::new();
     let mut tree_mesh_cache: std::collections::HashMap<String, lodforge_instances::trees::TreeMesh> = std::collections::HashMap::new();
     let mut tex_index = crate::instances::TextureIndex::default();
     for world in &worlds {
@@ -645,6 +648,12 @@ pub fn run(a: &Args) -> Result<()> {
                 let skipped = we.seasons[0].skipped.iter().filter(|(_, s)| matches!(s, lodforge_dyndolod::export::Skip::ReferenceRule)).map(|(id, _)| *id);
                 // Tree LOD leaves out what the export keeps in object or dynamic LOD (tilted, large, child-world bounds).
                 if a.rt.on() {
+                    let bounds: Vec<(i32, i32, i32, i32)> = dyn_worlds.iter().filter(|x| x.parent == Some(ws.form_id) && x.parent_flags & 0x02 != 0).filter_map(|x| crate::dyndolod_build::child_config(c, &x.editor_id, &ws.editor_id).0).collect();
+                    let inside = |l: &lodforge_dyndolod::export::RefLine| {
+                        let (x, y) = ((l.position[0] / 4096.0).floor() as i32, (l.position[1] / 4096.0).floor() as i32);
+                        bounds.iter().any(|b| x >= b.0 && x <= b.2 && y >= b.1 && y <= b.3)
+                    };
+                    child_lines.insert(world.clone(), we.seasons[0].lines.iter().filter(|l| inside(l)).cloned().collect());
                     let lc = large_columns.entry(world.clone()).or_default();
                     for l in &we.seasons[0].lines {
                         if ws.large_ref_cells.contains_key(&l.ref_id) {
@@ -795,7 +804,7 @@ pub fn run(a: &Args) -> Result<()> {
         let inputs: Vec<crate::dyn_export::DynWorld<'_>> = dynamic
             .iter()
             .filter_map(|(w, dynamic, seasonal, child_copies, lod_refs, lod_bases)| {
-                dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(w)).map(|world| crate::dyn_export::DynWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases, large_columns: large_columns.get(w) })
+                dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(w)).map(|world| crate::dyn_export::DynWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases, large_columns: large_columns.get(w), lines: child_lines.get(w).map_or(&[][..], Vec::as_slice) })
             })
             .collect();
         match crate::dyn_export::write(&p, c, &inputs, &dyn_worlds, &undersides, names, &out, a.rt.write_options(), crate::dyn_export::WriteFlags { large_refs_instanced: !a.rt.runtime_no_large_refs, workarounds: crate::dyndolod_build::workarounds_on(c, &a.dyn_opts) }) {

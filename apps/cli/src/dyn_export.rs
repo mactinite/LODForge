@@ -34,6 +34,9 @@ pub struct DynWorld<'a> {
     /// Large references of the export: load-order form id -> `.bto` columns used (bit 0-2 =
     /// LOD4/8/16 has a model or billboard).
     pub large_columns: Option<&'a HashMap<u32, u16>>,
+    /// Export lines of the default season (for the parent copies of child worldspaces); only
+    /// lines inside some child's bounds are used.
+    pub lines: &'a [lodforge_dyndolod::export::RefLine],
 }
 
 /// What the build did that the `.dyn.bin` files record.
@@ -58,6 +61,8 @@ pub struct Report {
     pub disabled: usize,
     pub migration: usize,
     pub direct_parents: usize,
+    /// Per child worldspace: (EditorID, parent copies, parent references left out as duplicates).
+    pub child_copies_per_world: Vec<(String, usize, usize)>,
     /// Items whose original or base has no defining plugin (left out).
     pub unnamed: usize,
     pub bytes: usize,
@@ -68,7 +73,8 @@ impl Report {
         format!(
             "runtime dynamic LOD: {} files, {} items ({} with a direct enable parent below the chain top) + {} child-world copies, {} models; {} large references ({} instanced, {} merged in .bto only); {} resets, {} disabled, {} migration large refs; {} without a plugin left out; {:.2} MB",
             self.files, self.items, self.direct_parents, self.copies, self.models, self.large, self.large_instanced, self.large_merged, self.resets, self.disabled, self.migration, self.unnamed, self.bytes as f64 / 1e6
-        )
+        ) + &self.child_copies_per_world.iter().map(|(w, n, d)| format!("
+  parent copies in {w}: {n} ({d} parent references left out as duplicates of the child)")).collect::<String>()
     }
 }
 
@@ -166,6 +172,7 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
     let near: u32 = c.num("NearGrid", 11);
     let far: u32 = c.num("FarGrid", 21);
     let height: f32 = c.num("TerrainUndersideHeight", 500.0);
+    let matches = lodforge_dyndolod::childworld::known_matches(&c.dir);
     for w in worlds {
         let world = w.world;
         let mut f = DynFile::new(Common { world: world.editor_id.clone(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("near_grid={near}\nfar_grid={far}"), token: crate::instances::build_token() });
@@ -273,6 +280,9 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
             let Some((n, l)) = names.split(x.form_id) else { continue };
             let (bounds, _) = crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id);
             let mut flags = if x.parent_flags & 0x02 != 0 { CHILD_USES_PARENT_LOD } else { 0 };
+            if x.parent_flags & 0x01 != 0 {
+                flags |= CHILD_USES_PARENT_LAND;
+            }
             if bounds.is_some() {
                 flags |= CHILD_HAS_BOUNDS;
             }
@@ -340,6 +350,54 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
         rep.migration += f.migration.len();
         rep.resets += f.resets.len();
         rep.disabled += f.disabled.len();
+        // Parent copies for the child worldspaces that use this world's LOD (walled cities).
+        let in_child_dynamic: HashSet<u32> = if in_child { w.dynamic.iter().filter(|d| !d.replace).map(|d| d.ref_id).collect() } else { HashSet::new() };
+        for x in all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0) {
+            let Some(b) = crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id).0 else { continue };
+            let dups = lodforge_dyndolod::childworld::parent_duplicates(&p.load_order, world, x, &c.bases, &matches);
+            let mut cf = DynFile::new(Common { world: x.editor_id.clone(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("parent_copies_of={}\nbounds={},{},{},{}", world.editor_id, b.0, b.1, b.2, b.3), token: crate::instances::build_token() });
+            let xr = names.split(x.form_id).map(|(n, l)| cf.form(n, l)).unwrap_or_default();
+            cf.header = DynHeader { world: xr, south_west: f.header.south_west, near_grid: near as u8, far_grid: far as u8, glow_multiple: 1.75, lod_world: world.editor_id.clone(), flags: 0 };
+            let mut dup_count = 0;
+            for l in w.lines {
+                let cell = ((l.position[0] / 4096.0).floor() as i32, (l.position[1] / 4096.0).floor() as i32);
+                if cell.0 < b.0 || cell.0 > b.2 || cell.1 < b.1 || cell.1 > b.3 || lodforge_dyndolod::childworld::is_copy(l.ref_id) || in_child_dynamic.contains(&l.ref_id) {
+                    continue;
+                }
+                if dups.contains(&l.ref_id) {
+                    dup_count += 1;
+                    continue;
+                }
+                if l.columns[..3].iter().all(|c| c.is_empty()) {
+                    continue;
+                }
+                let (Some((on, ol)), Some((bn, bl))) = (names.split(l.ref_id), names.split(l.base)) else { continue };
+                let base = c.bases.get(&l.base);
+                let first = if l.columns[0].ends_with(".nif") { l.columns[0].as_str() } else { "" };
+                let m = model_entry(&mut cf, first, &l.columns, false, base);
+                let mut flags = GRID_NEAR | PARENT_COPY | INITIALLY_ENABLED;
+                if base.is_some_and(lodforge_dyndolod::assign::is_tree) {
+                    flags |= TREE;
+                }
+                if world.large_ref_cells.contains_key(&l.ref_id) {
+                    flags |= LARGE;
+                }
+                let rot = l.rotation.map(|d| d.to_radians() as f32);
+                let rc = world.refs.get(&l.ref_id).and_then(|r| r.cell).map_or(cell_of(l.position), |(x, y)| (x as i16, y as i16));
+                cf.add(l.position, rot, l.scale, (on, ol), None, m, flags, rc, (bn, bl), None);
+            }
+            rep.child_copies_per_world.push((x.editor_id.clone(), cf.items(), dup_count));
+            if cf.items() == 0 {
+                continue;
+            }
+            cf.finish();
+            rep.models += cf.models.len();
+            let bytes = cf.to_bytes(opts)?;
+            let path = dir.join(cf.common.file_name(EXT));
+            std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+            rep.files += 1;
+            rep.bytes += bytes.len();
+        }
         if f.items() == 0 && f.large.is_empty() && f.underside.is_none() && f.resets.is_empty() && f.migration.is_empty() {
             continue;
         }

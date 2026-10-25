@@ -34,6 +34,14 @@ pub const GLOW_LEVEL_NONE: u32 = 3;
 pub const CHILD_COPY: u32 = 1 << 13;
 pub const IN_CHILD_WORLDS: u32 = 1 << 14;
 pub const FROM_CHILD_WORLD: u32 = 1 << 15;
+/// A parent-world reference copied into a child worldspace that uses the parent's LOD (in a
+/// `<Child>.dyn.bin`): the engine hides the parent's LOD in the child's cells, and the child has no
+/// object of its own there (stables, farms, outer walls). Drawn while the player is in the child
+/// world, at its LOD models (`DMDL` slots 1-3; slot 0 = the LOD4 model).
+pub const PARENT_COPY: u32 = 1 << 17;
+/// The base is a tree (`TREE`, or a `STAT` with tree LOD); its LOD4 may be a billboard (no pack
+/// mesh): draw the parent's impostor of the same reference (`.trees.bin`, same plugin and form).
+pub const TREE: u32 = 1 << 18;
 /// The direct enable parent's own XESP opposite flag.
 pub const DIRECT_OPPOSITE: u32 = 1 << 16;
 
@@ -181,6 +189,8 @@ pub struct ChildWorld {
 
 pub const CHILD_USES_PARENT_LOD: u16 = 1;
 pub const CHILD_HAS_BOUNDS: u16 = 2;
+/// The child uses the parent's land (terrain, so also its grass: draw the parent's `.lfg`).
+pub const CHILD_USES_PARENT_LAND: u16 = 4;
 
 /// `DUND`.
 #[derive(Debug, Clone, PartialEq, Default)]

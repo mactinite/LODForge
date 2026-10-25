@@ -542,7 +542,9 @@ Flags:
 | 14 | in_child_worlds: also shown while the player is in a child world that uses this world's LOD |
 | 15 | from_child_world: the item was produced for a child world's own dynamic LOD |
 | 16 | direct_opposite: the direct parent's own XESP opposite flag |
-| 17-31 | reserved, 0 |
+| 17 | parent_copy: a parent-world reference in a `<Child>.dyn.bin` (see "Child worldspaces" below) |
+| 18 | tree: the base is a tree (`TREE`, or a `STAT` with tree LOD); when `DMDL` slot 0 has no mesh (billboard LOD4), draw the parent's impostor of the same reference from the parent's `.trees.bin` |
+| 19-31 | reserved, 0 |
 
 Meta chunks (besides `WRLD`, `PLUG`, `PARM`, `BTOK`):
 
@@ -579,7 +581,7 @@ LOD, F8), **`DMIG`** (migration large references, since 1.7): each `u32 n`, then
   DLL handles it.)
 
 **`DCHW`** (child worlds of this world, F17): `u32 n`, per entry: `u16 plugin`, `u16 flags` (bit 0
-uses this world's LOD (parent "use LOD data"), bit 1 has bounds), `u32 form`, `i16 bounds[4]`
+uses this world's LOD (parent "use LOD data"), bit 1 has bounds, bit 2 uses this world's land), `u32 form`, `i16 bounds[4]`
 (SW x, SW y, NE x, NE y in cells; zeros without), `str editor_id`.
 
 **`DUND`** (terrain underside, F16): `str model`, `f32 height` (the mesh sits at z = -height),
@@ -590,6 +592,31 @@ x 32 bytes: `u16 plugin`, `u16 lod` (bit 0-2: merged into the `.bto` at LOD4/8/1
 instanced in `.statics.bin` at LOD4/8/16; bit 6: a dynamic item in this file; bit 7: persistent;
 bit 8: initially disabled or behind an enable parent), `u32 form`, `f32 bounds[6]` (world AABB of
 the reference's base bounds under its transform).
+
+### Child worldspaces (parent copies, grass)
+
+A child worldspace that uses its parent's LOD (a walled city: `WhiterunWorld`, `RiftenWorld`,
+`WindhelmWorld`, `SolitudeWorld` on cs-base) gets its own `<Child>.dyn.bin`, holding only
+`parent_copy` items. The engine hides the parent's LOD in the child's cells, so without these the
+strip inside the child's bounds but outside its walls (stables, farms, outer walls, nearby trees)
+is empty. The items are the parent's LOD references (default-season export lines with an LOD4,
+LOD8 or LOD16 model) whose cell lies inside the child's `DCHW` bounds, without:
+- child-to-parent copies (the city's own content copied into the parent);
+- parent references that duplicate the child's content: the parent side of a known pair in
+  `DynDOLOD_SSE_ChildworldMatches.txt` whose child side is in the child, and parent twins (same
+  model, position / 100 and scale as a child reference, DynDOLOD's reference key);
+- the parent's dynamic items already flagged `in_child_worlds` (drawn from the parent's file).
+
+Each item is `parent_copy` (+ `tree`, `large` where they apply), grid NearGrid, initially
+enabled, no parent; `DMDL` slot 0 is its LOD4 model (empty for a billboard), slots 1-3 its
+LOD4/8/16 pack meshes. The file's `DHDR.lod_world` is the parent; `PARM` has
+`parent_copies_of=<parent>` and `bounds=x0,y0,x1,y1`. The runtime draws them while the player
+is in that child world, at the LOD level the distance asks for, and hides an item while its
+original's own 3D is loaded (it is a parent reference, so normally never inside the child).
+
+Far grass: a child worldspace with `DCHW` bit 2 shares the parent's land, so its grass is the
+parent's. NGIO writes no grass cache for such children and LODForge writes no `.lfg` for them:
+draw the parent's `.lfg` (`DHDR.lod_world`) in the child worldspace as in the parent.
 
 ### Large references
 
@@ -652,7 +679,7 @@ kinds, raw and zstd.
 
 ## History
 
-- **1.7** (2026-10-24): `<World>.dyn.bin` (`LFDY`, section 7b): dynamic LOD items, models with
+- **1.7** (2026-10-24, extended the same evening: `<Child>.dyn.bin` parent copies, flags 17-18, `DCHW` bit 2): `<World>.dyn.bin` (`LFDY`, section 7b): dynamic LOD items, models with
   pack meshes in `StaticMeshes.bin`, seasonal models, reset / disabled / base lists, child worlds,
   underside and large references (`DLRG`); `BTOK` build token chunk in every file and
   `Build.txt`; every eligible large reference is instanced in runtime mode. Additive.

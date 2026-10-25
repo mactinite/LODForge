@@ -398,3 +398,29 @@ mod tests {
         assert!(!mod_world_ignored(&HashSet::new(), "jks skyrim.esp", "jks skyrim.esp"));
     }
 }
+
+/// Parent references that duplicate content of `child` (the child has the object itself): the
+/// parent sides of known pairs (`ChildworldMatches.txt`) whose child side is in `child`, and
+/// parent twins, i.e. a parent reference with the [`ref_key`] (model, position / 100, scale) of
+/// a child reference. Used by runtimes that draw the parent's LOD inside a child worldspace's
+/// cells: everything else of the parent there is missing from the child (stables, farms,
+/// outer walls), the duplicates would draw the city twice.
+pub fn parent_duplicates(lo: &LoadOrder, parent: &Worldspace, child: &Worldspace, bases: &HashMap<u32, Base>, matches: &HashMap<(String, u32), Vec<(String, u32)>>) -> HashSet<u32> {
+    let owner = owners(lo);
+    let identity = |id: u32| {
+        owner.get(&owner_key(id)).map(|&i| {
+            let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
+            (lo.plugins[i].plugin.name.to_ascii_lowercase(), local)
+        })
+    };
+    let model_of = |p: &Placement| bases.get(&p.base).map(|b| b.model.as_str()).unwrap_or("");
+    let live = |p: &Placement| p.flags & lodforge_esp::record::FLAG_DELETED == 0;
+    let child_keys: HashSet<(String, [i64; 4])> = child.refs.values().filter(|p| live(p)).map(|p| ref_key(model_of(p), p)).collect();
+    let paired: HashSet<(String, u32)> = child.refs.iter().filter(|(_, p)| live(p)).filter_map(|(&id, _)| identity(id)).filter_map(|k| matches.get(&k)).flatten().cloned().collect();
+    parent
+        .refs
+        .iter()
+        .filter(|(id, p)| !is_copy(**id) && (child_keys.contains(&ref_key(model_of(p), p)) || identity(**id).is_some_and(|k| paired.contains(&k))))
+        .map(|(&id, _)| id)
+        .collect()
+}
