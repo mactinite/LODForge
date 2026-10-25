@@ -219,3 +219,149 @@ mod tests {
         assert_eq!(albedo, vec![100, 100, 100, 255]);
     }
 }
+
+/// Snow grade, applied to the pre-lit albedo when the pages are composed (after the bake cache,
+/// so changing it re-bakes nothing).
+///
+/// In game the impostor quad goes through CS's DistantTree pixel shader, the near-tier 3D tree
+/// LOD meshes through the Lighting shader. With the same albedo (the baked 3D LOD models and the
+/// impostors of the Whiterun snow pines agree to 2%), the DistantTree path renders bright,
+/// near-colourless surfaces much brighter and cyan: WIN snow pines near Whiterun read luma ~189
+/// against ~138 for the 3D snow pines beside them (`f9-ft-whiterun-south`, 2026-10-25), while
+/// dark, saturated foliage matches. The grade compresses the luminance of snow-like texels above
+/// a knee and pulls their hue part-way to grey; saturated texels (needles, autumn leaves,
+/// flowers) are left alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnowGrade {
+    /// Off: pixels unchanged.
+    pub enabled: bool,
+    /// Encoded (sRGB, 0..255) luminance above which snow-like texels are compressed.
+    pub knee: f32,
+    /// Slope above the knee (1 = no compression).
+    pub slope: f32,
+    /// Share of the way a fully graded texel's hue moves toward grey.
+    pub neutral: f32,
+    /// Saturation `(max - min) / max` at or below which a texel counts fully as snow, and at or
+    /// above which not at all.
+    pub sat_full: f32,
+    pub sat_none: f32,
+    /// A type is graded only when at least this share of its covered texels is snow-like
+    /// ([`snow_share`]): snow-covered (winter) trees, not bark, grey wood or pale flowers.
+    pub min_share: f32,
+}
+
+impl Default for SnowGrade {
+    fn default() -> Self {
+        SnowGrade { enabled: true, knee: 48.0, slope: 0.35, neutral: 0.5, sat_full: 0.12, sat_none: 0.30, min_share: 0.15 }
+    }
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Applies the [`SnowGrade`] to RGBA8 albedo in place (alpha untouched). Returns the number of
+/// texels it changed.
+pub fn grade_snow(albedo: &mut [u8], g: &SnowGrade) -> usize {
+    if !g.enabled {
+        return 0;
+    }
+    let mut changed = 0;
+    for p in albedo.chunks_exact_mut(4) {
+        let (r, gr, b) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
+        let l = 0.299 * r + 0.587 * gr + 0.114 * b;
+        if l <= g.knee {
+            continue;
+        }
+        let mx = r.max(gr).max(b);
+        let mn = r.min(gr).min(b);
+        let sat = if mx > 0.0 { (mx - mn) / mx } else { 0.0 };
+        // Snow is neutral to cool (blue >= red); grey wood and pale greens are warm.
+        let w = (1.0 - smoothstep(g.sat_full, g.sat_none, sat)) * smoothstep(-8.0, 4.0, b - r);
+        if w <= 0.0 {
+            continue;
+        }
+        let target = g.knee + (l - g.knee) * g.slope;
+        let l2 = l + (target - l) * w;
+        let k = l2 / l;
+        let n = g.neutral * w * ((l - g.knee) / 32.0).clamp(0.0, 1.0);
+        let out = [r, gr, b].map(|c| (c * k * (1.0 - n) + l2 * n).round().clamp(0.0, 255.0) as u8);
+        if out != [p[0], p[1], p[2]] {
+            changed += 1;
+        }
+        p[..3].copy_from_slice(&out);
+    }
+    changed
+}
+
+#[cfg(test)]
+mod grade_tests {
+    use super::*;
+
+    #[test]
+    fn snow_is_compressed_and_neutralised_colour_is_kept() {
+        let g = SnowGrade::default();
+        // Bright cyan-white snow, dark green needles, bright autumn yellow, mid grey below the knee.
+        let mut px = vec![200, 225, 230, 255, 36, 39, 17, 255, 200, 160, 40, 255, 40, 40, 40, 255];
+        let n = grade_snow(&mut px, &g);
+        assert_eq!(n, 1);
+        let l = 0.299 * f32::from(px[0]) + 0.587 * f32::from(px[1]) + 0.114 * f32::from(px[2]);
+        let want = 48.0 + (0.299 * 200.0 + 0.587 * 225.0 + 0.114 * 230.0 - 48.0) * 0.35;
+        assert!((l - want).abs() < 2.0, "snow luma {l} vs {want}");
+        // Less cyan: blue and green moved toward red.
+        assert!(f32::from(px[2]) / f32::from(px[0]) < 230.0 / 200.0);
+        assert_eq!(&px[4..16], &[36, 39, 17, 255, 200, 160, 40, 255, 40, 40, 40, 255]);
+        assert_eq!(px[3], 255);
+        let mut off = vec![200, 225, 230, 255];
+        assert_eq!(grade_snow(&mut off, &SnowGrade { enabled: false, ..g }), 0);
+        assert_eq!(off, vec![200, 225, 230, 255]);
+    }
+}
+
+/// Share of the covered texels (alpha >= 128) that [`grade_snow`] treats as snow (weight >= 0.5).
+pub fn snow_share(albedo: &[u8], g: &SnowGrade) -> f32 {
+    let (mut covered, mut snow) = (0u64, 0u64);
+    for p in albedo.chunks_exact(4) {
+        if p[3] < 128 {
+            continue;
+        }
+        covered += 1;
+        let (r, gr, b) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
+        let l = 0.299 * r + 0.587 * gr + 0.114 * b;
+        let mx = r.max(gr).max(b);
+        let sat = if mx > 0.0 { (mx - r.min(gr).min(b)) / mx } else { 0.0 };
+        if l > g.knee && (1.0 - smoothstep(g.sat_full, g.sat_none, sat)) * smoothstep(-8.0, 4.0, b - r) >= 0.5 {
+            snow += 1;
+        }
+    }
+    snow as f32 / covered.max(1) as f32
+}
+
+/// [`grade_snow`] of one type's albedo when it is snow-covered ([`SnowGrade::min_share`]);
+/// returns the number of texels changed (0: not graded).
+pub fn grade_snow_type(albedo: &mut [u8], g: &SnowGrade) -> usize {
+    if !g.enabled || snow_share(albedo, g) < g.min_share {
+        return 0;
+    }
+    grade_snow(albedo, g)
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn only_snow_covered_types_are_graded() {
+        let g = SnowGrade::default();
+        // 40% bright cool snow texels: graded.
+        let mut snowy: Vec<u8> = (0..10).flat_map(|i| if i < 4 { [205, 220, 228, 255] } else { [36, 39, 17, 255] }).collect();
+        assert!(grade_snow_type(&mut snowy, &g) > 0);
+        // Pale warm grey wood (dead pine) and a few cool texels (10%): left alone.
+        let mut wood: Vec<u8> = (0..10).flat_map(|i| if i < 1 { [205, 220, 228, 255] } else { [120, 112, 100, 255] }).collect();
+        let before = wood.clone();
+        assert_eq!(grade_snow_type(&mut wood, &g), 0);
+        assert_eq!(wood, before);
+        assert!(snow_share(&before, &g) < 0.15);
+    }
+}

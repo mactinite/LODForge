@@ -129,7 +129,37 @@ and 12 above:
 The per-type `brightness` (default 1) and `tint` (default white) are colour corrections for
 calibration against the in-game 3D trees. `--impostor-calibration <csv>` sets them from lines
 `type,brightness,r,g,b` (`*` = every type). They are applied at draw time, so changing them
-needs no rebake.
+needs no rebake. (The runtime reads them but cannot apply them yet: CS's DistantTree pixel shader
+has no colour input. Until its own pixel shader (M2b), corrections have to be baked into the
+albedo, as the snow grade is.)
+
+**Snow grade** (`impostors.json` `snow_grade: [knee, slope]`, default `[48, 0.35]`). In game,
+CS's DistantTree path renders bright, near-colourless surfaces much brighter and cyan compared
+with the Lighting shader on the near tier's 3D tree LOD meshes, though both carry the same
+albedo. WIN snow pines near Whiterun read luma ~189 as impostors vs ~138 as 3D LOD meshes, while
+dark, saturated foliage matches. The albedo pages are therefore graded after baking:
+- only snow-covered types are graded: at least 15% of the covered texels must be snow-like
+  (bright, low saturation, neutral to cool, blue >= red). On cs-base Tamriel that is 79 types,
+  all heavy-snow winter trees and shrubs. No other type is touched: grey dead wood and pale
+  flowers are warm or sparse, at most 13%;
+- texels with luma above `knee` (encoded 0..255) and low saturation (`(max - min) / max`: fully
+  at <= 0.12, not at all at >= 0.30), neutral to cool, get their luminance compressed above the
+  knee by `slope`;
+- the same texels move half-way toward grey (less cyan);
+- saturated texels (needles, autumn leaves, flowers) are unchanged.
+
+Example: Whiterun snow pines go from mean 77,85,83 to 55,58,57. The grade runs when the pages are
+composed, after the bake cache, so changing it re-bakes nothing.
+`lodforge impostor-regrade <set> --out <dir>` applies it to an installed set. It reads every type
+back from the cache by its `cache_key` and re-encodes only the albedo pages that change, in the
+set's own rectangles: type indices, rectangles and normal-depth pages stay as they are.
+`--impostor-no-snow-grade`, `--impostor-snow-knee` and `--impostor-snow-slope` control it.
+
+**Follow-up (open): per-type brightness / tint in the runtime.** The snow grade bakes a
+correction that belongs at draw time. Once the runtime has its own impostor pixel shader (M2b),
+it should apply each type's `brightness * tint` (and, if needed, a season-aware variant). Bakes
+can then drop the snow grade (`--impostor-no-snow-grade`), and corrections become calibration
+data (`--impostor-calibration`) instead of re-encoded pages.
 
 **Normal + depth page** (`pageNN_nd.dds`), linear:
 
