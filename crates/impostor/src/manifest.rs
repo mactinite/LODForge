@@ -95,6 +95,9 @@ pub struct Index {
     pub worlds: Vec<String>,
     pub pages: Vec<PageInfo>,
     pub types: Vec<TypeManifest>,
+    /// Snow grade applied to the albedo pages: `[knee, slope]` (absent: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snow_grade: Option<[f32; 2]>,
 }
 
 /// `meshes\landscape\trees\treepineforest01.nif` -> `treepineforest01_<crc32 of the path>`.

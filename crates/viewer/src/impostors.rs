@@ -130,7 +130,7 @@ mod tests {
             cache_key: String::new(),
         };
         let p = |index: u32| PageInfo { index, albedo: String::new(), normal_depth: String::new(), width: 1536, height: 1536, mips: 7 };
-        Index { version: 1, baker_version: 1, layout: "hemi-oct-z-up".into(), worlds: vec![], pages: vec![p(0), p(1)], types: vec![t(1), t(0)] }
+        Index { version: 1, baker_version: 1, layout: "hemi-oct-z-up".into(), worlds: vec![], pages: vec![p(0), p(1)], types: vec![t(1), t(0)], snow_grade: None }
     }
 
     #[test]
