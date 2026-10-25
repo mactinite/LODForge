@@ -70,9 +70,11 @@ pub struct Opts {
     /// CS Snow Cover's sky-exposure test).
     #[arg(long = "impostor-alpha", value_enum, default_value = "coverage")]
     pub alpha: AlphaMode,
-    /// No snow grade (compression of bright, colourless texels; docs/runtime/impostors.md).
-    #[arg(long = "impostor-no-snow-grade")]
-    pub no_snow_grade: bool,
+    /// Apply the snow grade (compression of bright, colourless texels in snow-covered types;
+    /// docs/runtime/impostors.md). Off by default: it addressed a glow that turned out not to come
+    /// from the impostors.
+    #[arg(long = "impostor-snow-grade")]
+    pub snow_grade: bool,
     /// Snow grade knee (encoded luminance 0..255) and slope above it.
     #[arg(long = "impostor-snow-knee", default_value_t = 48.0)]
     pub snow_knee: f32,
@@ -97,9 +99,9 @@ impl Opts {
         s
     }
 
-    /// The snow grade (off with --impostor-no-snow-grade or an unlit bake).
+    /// The snow grade (only with --impostor-snow-grade, never for an unlit bake).
     fn snow_grade(&self, s: &bake::Settings) -> lodforge_impostor::shade::SnowGrade {
-        lodforge_impostor::shade::SnowGrade { enabled: !self.no_snow_grade && s.shading.enabled, knee: self.snow_knee, slope: self.snow_slope, ..Default::default() }
+        lodforge_impostor::shade::SnowGrade { enabled: self.snow_grade && s.shading.enabled, knee: self.snow_knee, slope: self.snow_slope, ..Default::default() }
     }
 
     /// `type -> (brightness, tint)` from --impostor-calibration (`*` = every type).
