@@ -231,6 +231,8 @@ enum Command {
     RuntimeDyn(runtime_dyn::Args),
     /// Writes only Occlusion.esp into an output folder (use --exclude-plugin for a plugin without DynDOLOD masters).
     RuntimeOcclusion(runtime_dyn::OcclusionArgs),
+    /// Retypes .dyn.bin tree items against the current impostor sets and stamps a new token into every runtime file.
+    RuntimeRetype(runtime_dyn::RetypeArgs),
     /// Rebuilds only GrassMeshes.bin (grass model, simplified, card per .lfg grass type).
     RuntimeGrassPack(grass_pack::Args),
     /// CPU preview of TreeMeshes.bin meshes through the atlas pages (PNG).
@@ -337,6 +339,7 @@ fn main() -> Result<()> {
         Command::RuntimeDynInfo(a) => dyn_export::info(&a),
         Command::RuntimeDyn(a) => runtime_dyn::run(&a),
         Command::RuntimeOcclusion(a) => runtime_dyn::occlusion(&a),
+        Command::RuntimeRetype(a) => runtime_dyn::retype(&a),
         Command::RuntimeGrassPack(a) => grass_pack::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),

@@ -75,9 +75,24 @@ pub struct CheckArgs {
     /// Folder the dumped model paths are relative to (prefixed to them).
     #[arg(long, default_value = "")]
     pub model_root: String,
+    /// Check the `.dyn.bin` tree items' impostor types (offset 46) against the current
+    /// `impostors.json` of their LOD world (base lists and the `impostor_set` fingerprint);
+    /// fails when one is stale.
+    #[arg(long)]
+    pub types: bool,
+    /// Data folder with `textures\LODForge\Impostors` (default: three levels above `--dir`).
+    #[arg(long)]
+    pub data: Option<PathBuf>,
 }
 
 pub fn check(a: &CheckArgs) -> Result<()> {
+    if a.types {
+        let root = a.data.clone().unwrap_or_else(|| a.dir.ancestors().nth(3).map(std::path::Path::to_path_buf).unwrap_or_default());
+        let n = crate::runtime_dyn::check_types(&root, &a.dir)?;
+        println!("runtime-check --types: {n} problem(s)");
+        anyhow::ensure!(n == 0, "{n} stale impostor type reference(s); run runtime-dyn (or runtime-trees, which now retypes)");
+        return Ok(());
+    }
     if let Some(filter) = &a.dump {
         let f = filter.to_ascii_lowercase();
         for path in std::fs::read_dir(&a.dir)?.flatten().map(|e| e.path()) {

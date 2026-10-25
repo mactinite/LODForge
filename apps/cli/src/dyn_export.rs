@@ -359,12 +359,14 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
         // items carry the impostor type of their base.
         // The parent's trees drawn as impostors (`.trees.bin`, default season).
         let parent_trees: HashSet<(String, u32)> = std::fs::read(dir.join(format!("{}.trees.bin", world.editor_id))).ok().and_then(|b| lodforge_instances::trees::TreeFile::from_bytes(&b).ok()).map(|t| t.cells.values().flatten().filter_map(|r| t.common.plugins.get(usize::from(r.plugin)).map(|n| (n.to_ascii_lowercase(), r.form))).collect()).unwrap_or_default();
-        let impostors: HashMap<u32, u32> = crate::runtime_trees::set_from_index(p, &impostor_root.join("textures").join("LODForge").join("Impostors").join(&world.editor_id).join("impostors.json")).map(|s| s.base_index).unwrap_or_default();
+        let iset = crate::runtime_dyn::impostor_set(p, impostor_root, &world.editor_id);
+        let impostor_fp = iset.as_ref().map(crate::runtime_dyn::impostor_fingerprint).unwrap_or_else(|| "none".into());
+        let impostors: HashMap<u32, u32> = iset.map(|s| s.base_index).unwrap_or_default();
         let in_child_dynamic: HashSet<u32> = if in_child { w.dynamic.iter().filter(|d| !d.replace).map(|d| d.ref_id).collect() } else { HashSet::new() };
         for x in all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0) {
             let Some(b) = crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id).0 else { continue };
             let dups = lodforge_dyndolod::childworld::parent_duplicates(&p.load_order, world, x, &c.bases, &matches);
-            let mut cf = DynFile::new(Common { world: x.editor_id.clone(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("parent_copies_of={}\nbounds={},{},{},{}", world.editor_id, b.0, b.1, b.2, b.3), token: crate::instances::build_token() });
+            let mut cf = DynFile::new(Common { world: x.editor_id.clone(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("parent_copies_of={}\nbounds={},{},{},{}\nimpostor_set={impostor_fp}", world.editor_id, b.0, b.1, b.2, b.3), token: crate::instances::build_token() });
             let xr = names.split(x.form_id).map(|(n, l)| cf.form(n, l)).unwrap_or_default();
             cf.header = DynHeader { world: xr, south_west: f.header.south_west, near_grid: near as u8, far_grid: far as u8, glow_multiple: 1.75, lod_world: world.editor_id.clone(), flags: 0 };
             // (twins, city copies, trees with an impostor type, trees without a mesh or type,

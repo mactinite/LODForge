@@ -93,7 +93,7 @@ pub fn init_build_token(out: &Path) -> String {
         .clone()
 }
 
-fn new_token() -> String {
+pub fn new_token() -> String {
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
     lodforge_dyndolod::dynplugins::bunch_of_numbers(seed ^ 0x4C46_5254)
 }
@@ -106,6 +106,11 @@ pub const BUILD_TXT: &str = "Build.txt";
 
 /// `Build.txt`: the token, format version, generator and the worlds with a `.dyn.bin`.
 pub fn write_build_txt(out: &Path) -> Result<()> {
+    write_build_txt_with(out, &build_token())
+}
+
+/// [`write_build_txt`] with an explicit token (a fast path that issues a new one).
+pub fn write_build_txt_with(out: &Path, token: &str) -> Result<()> {
     let dir = out_dir(out);
     std::fs::create_dir_all(&dir)?;
     let mut worlds: Vec<String> = std::fs::read_dir(&dir)?
@@ -115,7 +120,7 @@ pub fn write_build_txt(out: &Path) -> Result<()> {
     worlds.sort();
     let text = format!(
         "token={}\nformat={}.{}\ngenerator={}\nworlds={}\n",
-        build_token(),
+        token,
         lodforge_instances::container::MAJOR,
         lodforge_instances::container::MINOR,
         generator(),

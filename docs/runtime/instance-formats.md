@@ -670,6 +670,21 @@ from the `Build.txt` an earlier build left in that folder, else new; independent
 mismatch) and stores the token in its co-save; a different token on load means the LOD data
 changed since the save (reset lists rerun, disabled originals re-applied).
 
+**Impostor type indices and the token.** Types are referenced by index (`.trees.bin` records,
+`.dyn.bin` offset 46), so an impostor set whose type list changes (a re-bake that adds, drops or
+reorders types) invalidates every file that holds such an index. Rules:
+- A `.dyn.bin` with `tree` items records the type list it was built against in `PARM` as
+  `impostor_set=<hex>`: FNV-1a 32 of `name|CRC32\n` per type of `impostors.json` (model CRC as 8
+  upper-case hex digits), in order. The same fingerprint over a `.trees.bin` `TTYP` (name,
+  `model_crc32`) describes that file's list.
+- A fast path that changes a type list must not keep the old token: `runtime-trees` compares each
+  world's list before and after; when one changed it issues a new token, retypes every `.dyn.bin`
+  tree item from its own base (`base_plugin`/`base_form`) against the new `impostors.json`,
+  stamps the new token into every runtime file and rewrites `Build.txt`
+  (`runtime-retype` does that step alone). A full build writes everything with one token anyway.
+- `runtime-check --types` validates an output: every offset-46 type must hold the item's base
+  in `impostors.json`, and `impostor_set` must match the current list.
+
 ## 8. Test vectors
 
 ```

@@ -94,8 +94,19 @@ pub fn run(a: &Args) -> Result<()> {
     let write = lodforge_instances::WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true };
     let mut mesh_cache = HashMap::new();
     let mut textures = crate::instances::TextureIndex::default();
+    // The impostor type list each world's trees used before this run (`TTYP` of its default
+    // `.trees.bin`): other files (`.dyn.bin` offset 46) refer to types by index, so a changed
+    // list makes them stale unless they are regenerated.
+    let old_fp = |world: &str| -> Option<String> {
+        let name = format!("{world}.trees.bin");
+        let path = [crate::instances::out_dir(&out).join(&name), crate::instances::out_dir(&a.data).join(&name)].into_iter().find(|q| q.is_file())?;
+        let f = lodforge_instances::trees::TreeFile::from_bytes(&std::fs::read(path).ok()?).ok()?;
+        Some(crate::runtime_dyn::fingerprint_of(f.types.iter().map(|t| (t.name.as_str(), t.model_crc32))))
+    };
+    let mut changed: Vec<String> = Vec::new();
     for world in &worlds {
         let t = Instant::now();
+        let before = old_fp(world);
         let Some(ws) = all.iter().find(|w| w.editor_id.eq_ignore_ascii_case(world)) else {
             println!("{world}: not in the load order, skipped");
             continue;
@@ -112,6 +123,11 @@ pub fn run(a: &Args) -> Result<()> {
         } else {
             set_from_index(&p, &sets_dir.join(world).join("impostors.json"))?
         };
+        let now = crate::runtime_dyn::impostor_fingerprint(&set);
+        if before.as_deref() != Some(now.as_str()) {
+            println!("  {world}: impostor type list changed ({} -> {now}, {} types)", before.as_deref().unwrap_or("none"), set.types.len());
+            changed.push(world.clone());
+        }
         for s in &we.seasons {
             let mut st = crate::instances::select_trees(&c, ws, s, &names, &set);
             crate::instances::fill_meshes(&p, &a.data, &mut st.file, &mut mesh_cache, &mut textures);
@@ -136,6 +152,24 @@ pub fn run(a: &Args) -> Result<()> {
     if !a.no_pack {
         let rep = crate::tree_pack::build(&p, &out, &crate::tree_pack::Settings { tile_cap: a.tree_atlas_tile, ..Default::default() }, write)?;
         println!("tree {}", rep.summary());
+    }
+    if !changed.is_empty() {
+        // New type indices: a new token, and every file that refers to types is regenerated
+        // (`.dyn.bin` tree items retyped from their bases) and restamped, so no file of the
+        // old token can pair with the new type list.
+        if out != a.data {
+            let (src, dst) = (crate::instances::out_dir(&a.data), crate::instances::out_dir(&out));
+            for e in std::fs::read_dir(&src).into_iter().flatten().flatten() {
+                let target = dst.join(e.file_name());
+                if e.path().is_file() && !target.exists() {
+                    std::fs::copy(e.path(), &target)?;
+                }
+            }
+        }
+        let token = crate::instances::new_token();
+        let root = if a.bake { &out } else { &a.data };
+        let (files, retyped, stamped) = crate::runtime_dyn::retype_and_restamp(&p, root, &out, &token)?;
+        println!("impostor types changed in {}: new token {token}; {files} .dyn.bin rewritten ({retyped} tree items retyped), {stamped} other files stamped, Build.txt written", changed.join(", "));
     }
     println!("runtime-trees finished in {:.1} s", t0.elapsed().as_secs_f64());
     Ok(())
