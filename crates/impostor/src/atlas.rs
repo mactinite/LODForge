@@ -169,7 +169,10 @@ fn coverage_shares(albedo: &[u8], w: usize, cell: usize, alpha_ref: f32) -> Vec<
 
 /// A type's own mip chains (`levels` levels): albedo filtered as sRGB colour with per-frame
 /// coverage kept at `alpha_ref`, normals renormalised.
-pub fn type_mips(b: &Baked, levels: u32, alpha_ref: f32) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+/// With `binary`, every level's alpha is written as the alpha test's result (0 or 255 at
+/// `alpha_ref`): the same silhouette, opaque crown interiors (CS Snow Cover reads `1 - alpha` of the
+/// texel above as sky exposure).
+pub fn type_mips(b: &Baked, levels: u32, alpha_ref: f32, binary: bool) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let size = b.size();
     let a = lodforge_dds::mips::chain(size, size, &b.albedo, levels, MipKind::Color, Edge::Clamp);
     let n = lodforge_dds::mips::chain(size, size, &b.normal_depth, levels, MipKind::Normal, Edge::Clamp);
@@ -179,12 +182,20 @@ pub fn type_mips(b: &Baked, levels: u32, alpha_ref: f32) -> (Vec<Vec<u8>>, Vec<V
         let cell = (b.frame_px >> l).max(1) as usize;
         preserve_coverage(px, (size >> l).max(1) as usize, cell, &target, alpha_ref);
     }
+    if binary {
+        let r = (alpha_ref * 255.0).ceil() as u8;
+        for px in &mut albedo {
+            for p in px.chunks_exact_mut(4) {
+                p[3] = if p[3] >= r { 255 } else { 0 };
+            }
+        }
+    }
     (albedo, n.into_iter().map(|l| l.2).collect())
 }
 
 /// Composes the pages of `slots` (`bakes[k]` goes to `slots[k]`) with their mip chains. Unused
 /// texels are transparent black (albedo) and up-normal / far (normal-depth).
-pub fn compose(bakes: &[&Baked], slots: &[Slot], alpha_ref: f32) -> Vec<Page> {
+pub fn compose(bakes: &[&Baked], slots: &[Slot], alpha_ref: f32, binary: bool) -> Vec<Page> {
     let n = slots.iter().map(|s| s.page + 1).max().unwrap_or(0) as usize;
     (0..n)
         .map(|pi| {
@@ -202,7 +213,7 @@ pub fn compose(bakes: &[&Baked], slots: &[Slot], alpha_ref: f32) -> Vec<Page> {
             }
             for &k in &on {
                 let (s, b) = (slots[k], bakes[k]);
-                let (am, nm) = type_mips(b, levels, alpha_ref);
+                let (am, nm) = type_mips(b, levels, alpha_ref, binary);
                 for l in 0..levels as usize {
                     let size = (b.size() >> l).max(1) as usize;
                     let lw = (w >> l).max(1) as usize;
@@ -290,7 +301,7 @@ mod tests {
         let a = Baked { grid: 2, frame_px: 4, fit, albedo: vec![200; 8 * 8 * 4], normal_depth: vec![10; 8 * 8 * 4] };
         let b = Baked { grid: 2, frame_px: 2, fit, albedo: vec![100; 4 * 4 * 4], normal_depth: vec![20; 4 * 4 * 4] };
         let slots = pack(&[8, 4], 16);
-        let pages = compose(&[&a, &b], &slots, 0.5);
+        let pages = compose(&[&a, &b], &slots, 0.5, false);
         assert_eq!(pages.len(), 1);
         let p = &pages[0];
         // b stacks in a column beside a, inside a's shelf.
@@ -327,7 +338,7 @@ mod coverage_tests {
             }
         }
         let b = Baked { grid: 2, frame_px: 8, fit, albedo, normal_depth: vec![128; w * w * 4] };
-        let (am, _) = type_mips(&b, levels_for(8), 0.5);
+        let (am, _) = type_mips(&b, levels_for(8), 0.5, false);
         assert_eq!(am.len(), 4);
         for (l, px) in am.iter().enumerate().skip(1) {
             let (lw, cell) = (w >> l, f >> l);
