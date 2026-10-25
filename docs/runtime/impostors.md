@@ -155,6 +155,12 @@ back from the cache by its `cache_key` and re-encodes only the albedo pages that
 set's own rectangles: type indices, rectangles and normal-depth pages stay as they are.
 `--impostor-no-snow-grade`, `--impostor-snow-knee` and `--impostor-snow-slope` control it.
 
+**Follow-up (open): per-type brightness / tint in the runtime.** The snow grade bakes a
+correction that belongs at draw time. Once the runtime has its own impostor pixel shader (M2b),
+it should apply each type's `brightness * tint` (and, if needed, a season-aware variant). Bakes
+can then drop the snow grade (`--impostor-no-snow-grade`), and corrections become calibration
+data (`--impostor-calibration`) instead of re-encoded pages.
+
 **Normal + depth page** (`pageNN_nd.dds`), linear:
 
 | Channel | Content |
