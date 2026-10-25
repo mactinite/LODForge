@@ -538,7 +538,7 @@ Flags:
 | 9 | animated: a `_dyndolod_lod` model; draw a NIF clone with its controllers, not the pack mesh |
 | 10 | glow: the model is a glow window model (`glow_lod` in the name); NIF clone with emissive |
 | 11-12 | glow level `N` of `glow_lod_N` (0..2); 3 = not a glow level model |
-| 13 | child_copy: a child-world reference copied into this world (the original lives in a child world). Drawn while the item's cell is attached in this world (where DynDOLOD.esm placed a plain reference); beyond the loaded cells its LOD is in the `.bto`. Grid bits are 0 and no parent is set |
+| 13 | child_copy: a child-world reference copied into this world (the original lives in a child world). Drawn while the item's cell is attached in this world, and only when DynDOLOD.esm is not loaded (`--runtime-no-dyndolod-plugins`): DynDOLOD.esm holds a `<plugin>&<id>_DynDOLOD_CHILD` reference of the same LOD model at the same place, so drawing the item as well z-fights. Beyond the loaded cells its LOD is in the `.bto`. Grid bits are 0 and no parent is set |
 | 14 | in_child_worlds: also shown while the player is in a child world that uses this world's LOD |
 | 15 | from_child_world: the item was produced for a child world's own dynamic LOD |
 | 16 | direct_opposite: the direct parent's own XESP opposite flag |
