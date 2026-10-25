@@ -137,7 +137,7 @@ pub fn run(a: &Args) -> Result<()> {
         };
         let t = Instant::now();
         let h = crate::dyndolod_build::header(&p, &c, ws, "", &a.profile.game_dir().join("Data"), "");
-        let we = crate::dyndolod_build::with_resolver(&p, &c, |r| -> Result<_> {
+        let mut we = crate::dyndolod_build::with_resolver(&p, &c, |r| -> Result<_> {
             let copies = crate::child_copies::for_world(&p, &c, r, &all, ws, &a.child_parent);
             crate::dyndolod_build::export_world(&p, &c, r, ws, &seasons, &h, &copies)
         })?;
@@ -153,16 +153,23 @@ pub fn run(a: &Args) -> Result<()> {
             undersides.insert(e.clone());
         }
         println!("{world}: export {} dynamic, {} child copies in {:.1} s", we.dynamic.len(), we.child_copies.len(), t.elapsed().as_secs_f64());
-        exports.push((ws.editor_id.clone(), we));
+        // The AltTextures and VC side texts the parent copies' draw variants come from.
+        crate::dyndolod_build::add_side_files(&p, &c, &mut we);
+        let cl = crate::dyn_export::child_bound_lines(&c, &all, ws, &we.seasons[0].lines);
+        let v = crate::dyn_export::variants(&p, &we.seasons[0], &cl);
+        if !cl.is_empty() {
+            println!("  {world}: {} lines inside child-world bounds, {} with a draw variant", cl.len(), v.len());
+        }
+        exports.push((ws.editor_id.clone(), we, cl, v));
     }
     let inputs: Vec<crate::dyn_export::DynWorld<'_>> = exports
         .iter()
-        .filter_map(|(w, we)| {
-            all.iter().find(|x| &x.editor_id == w).map(|world| crate::dyn_export::DynWorld { world, dynamic: &we.dynamic, seasonal: &we.seasonal_dynamic, child_copies: &we.child_copies, lod_refs: &we.lod_refs, lod_bases: &we.lod_bases, large_columns: large_columns.get(w), lines: &we.seasons[0].lines })
+        .filter_map(|(w, we, cl, v)| {
+            all.iter().find(|x| &x.editor_id == w).map(|world| crate::dyn_export::DynWorld { world, dynamic: &we.dynamic, seasonal: &we.seasonal_dynamic, child_copies: &we.child_copies, lod_refs: &we.lod_refs, lod_bases: &we.lod_bases, large_columns: large_columns.get(w), lines: cl, variants: Some(v) })
         })
         .collect();
     let workarounds = !a.no_large_ref_workarounds && c.num("WorkaroundLargeReferencesBugs", 1) == 1 && c.num("IgnoreLargeReferences", 0) == 0;
-    let rep = crate::dyn_export::write(&p, &c, &inputs, &all, &undersides, &names, &out, write, crate::dyn_export::WriteFlags { large_refs_instanced: false, workarounds })?;
+    let rep = crate::dyn_export::write(&p, &c, &inputs, &all, &undersides, &names, &out, write, crate::dyn_export::WriteFlags { large_refs_instanced: false, workarounds }, &a.data)?;
     println!("{}", rep.summary());
     // The static pack with the dynamic LOD models (reads the VFS: the profile shows the output).
     let t = Instant::now();
@@ -176,5 +183,47 @@ pub fn run(a: &Args) -> Result<()> {
     }
     crate::instances::write_build_txt(&out)?;
     println!("token {token}: {stamped} files stamped; Build.txt written; runtime-dyn finished in {:.1} s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// `lodforge runtime-occlusion`: Occlusion.esp alone into an output folder, as the build's
+/// occlusion stage writes it, against the profile's load order (use `--exclude-plugin` to leave
+/// DynDOLOD.esm/.esp and an old Occlusion.esp out: then the plugin has no DynDOLOD master).
+/// Object height maps are read from `--out`, terrain LOD through the profile.
+#[derive(clap::Args)]
+pub struct OcclusionArgs {
+    #[command(flatten)]
+    pub profile: ProfileArgs,
+    /// The output folder (gets `Occlusion.esp`; holds `meshes\terrain\<World>\Objects\*.objects.heightmap.dat`).
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Worldspaces; default: every worldspace with object LOD files in `--out`.
+    #[arg(long, value_delimiter = ',')]
+    pub worlds: Vec<String>,
+    #[arg(long, default_value = "High")]
+    pub preset: String,
+}
+
+pub fn occlusion(a: &OcclusionArgs) -> Result<()> {
+    let t0 = Instant::now();
+    let p = a.profile.open()?;
+    let dir = a.profile.instance.join("tools").join("DynDOLOD").join("Edit Scripts").join("DynDOLOD");
+    let c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
+    let worlds: Vec<String> = if a.worlds.is_empty() {
+        let terrain = a.out.join("meshes").join("terrain");
+        let mut v: Vec<String> = std::fs::read_dir(&terrain).with_context(|| format!("listing {}", terrain.display()))?.flatten().filter(|e| e.path().join("Objects").is_dir()).filter_map(|e| e.file_name().to_str().map(str::to_string)).collect();
+        v.sort();
+        v
+    } else {
+        a.worlds.clone()
+    };
+    for n in ["DynDOLOD.esm", "DynDOLOD.esp"] {
+        if p.load_order.plugins.iter().any(|lp| lp.plugin.name.eq_ignore_ascii_case(n)) {
+            println!("warning: {n} is in the load order; Occlusion.esp may get it as a master (--exclude-plugin {n})");
+        }
+    }
+    let done = crate::dyndolod_build::write_occlusion(&p, &c, &worlds, &a.out)?;
+    let cells: usize = done.iter().map(|d| d.1).sum();
+    println!("Occlusion.esp: {cells} cells in {} worldspace(s) in {:.1} s", done.len(), t0.elapsed().as_secs_f64());
     Ok(())
 }

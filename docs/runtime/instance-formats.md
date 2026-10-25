@@ -516,7 +516,7 @@ Record (64 bytes), one per original reference that gets dynamic LOD (or child-wo
 | 40 | u32 | hash (`ref_hash` of the original) |
 | 44 | u8 | destruction_stage (0xFF = unknown / none; LODForge writes 0xFF in 1.7) |
 | 45 | u8 | destruction_type (0 when unknown) |
-| 46 | u16 | reserved, 0 |
+| 46 | u16 | impostor (`tree` items): the worldspace's impostor type index + 1 of the base (`impostors.json`, = `TTYP` index), 0 = none. Lets the runtime draw an impostor for a tree with no `.trees.bin` record (parent copies: trees inside a child's bounds stay in the parent's `.bto`) |
 | 48 | i16[2] | cell of the original (its `CELL` grid; for persistent references the cell their position is in) |
 | 52 | u16 | base_plugin (`PLUG` index of the base the item shows, after season-independent swaps) |
 | 54 | u16 | direct_parent_plugin (`PLUG` index of the direct enable parent when it differs from `parent` (the chain has more links); 0xFFFF otherwise) |
@@ -543,8 +543,9 @@ Flags:
 | 15 | from_child_world: the item was produced for a child world's own dynamic LOD |
 | 16 | direct_opposite: the direct parent's own XESP opposite flag |
 | 17 | parent_copy: a parent-world reference in a `<Child>.dyn.bin` (see "Child worldspaces" below) |
-| 18 | tree: the base is a tree (`TREE`, or a `STAT` with tree LOD); when `DMDL` slot 0 has no mesh (billboard LOD4), draw the parent's impostor of the same reference from the parent's `.trees.bin` |
-| 19-31 | reserved, 0 |
+| 18 | tree: the base is a tree (`TREE`, or a `STAT` with tree LOD); when `DMDL` slot 0 has no mesh (billboard LOD4), draw the impostor type at offset 46 (or the parent's `.trees.bin` record of the same reference) |
+| 19 | twin: a `parent_copy` duplicating a child-world reference (same model and place, or a known pair); the twin is in the direct parent fields (54, 60). Hide the item while the twin's 3D is loaded |
+| 20-31 | reserved, 0 |
 
 Meta chunks (besides `WRLD`, `PLUG`, `PARM`, `BTOK`):
 
@@ -560,6 +561,12 @@ bit 2 glow), `u32 pack[4]` (meshes in `StaticMeshes.bin`: 0 the dynamic model it
 LOD8, LOD16 models of the item's rule; 0xFFFFFFFF none; animated and glow models have no pack mesh
 in slot 0), `f32 bounds[6]` (model space AABB of the dynamic model; zeros when unknown),
 `str model`, `str lod4`, `str lod8`, `str lod16` (Data-relative, lower case, `""` = none).
+
+**`DMVT`** (model draw variants, present when some entry has one): `u32 count` (= `DMDL` count),
+then per entry, for each of the 4 slots: `u16 n` + `n` x (`str diffuse`, `str normal`) (the
+textures of the slot model's parts, as `MTEX`; `n = 0`: its own) and `u16 m` + `m` x `u8` (per
+part LOD material class with bit 7 = whitened, as `MCLS`; `m = 0`: all plain). The slot's pack
+mesh is built for exactly this variant (and shared with a statics entry of the same variant).
 
 **`DSEA`** (seasonal models, present when some item changes model in a season): `u32 seasons`, per
 season `str code` (`SPR`...), `u32 n`, then `n` x (`u16 plugin`, `u16 reserved`, `u32 form`,
@@ -600,19 +607,27 @@ A child worldspace that uses its parent's LOD (a walled city: `WhiterunWorld`, `
 `parent_copy` items. The engine hides the parent's LOD in the child's cells, so without these the
 strip inside the child's bounds but outside its walls (stables, farms, outer walls, nearby trees)
 is empty. The items are the parent's LOD references (default-season export lines with an LOD4,
-LOD8 or LOD16 model) whose cell lies inside the child's `DCHW` bounds, without:
-- child-to-parent copies (the city's own content copied into the parent);
-- parent references that duplicate the child's content: the parent side of a known pair in
-  `DynDOLOD_SSE_ChildworldMatches.txt` whose child side is in the child, and parent twins (same
-  model, position / 100 and scale as a child reference, DynDOLOD's reference key);
-- the parent's dynamic items already flagged `in_child_worlds` (drawn from the parent's file).
+LOD8 or LOD16 model) whose cell lies inside the child's `DCHW` bounds, except the parent's
+dynamic items already flagged `in_child_worlds` (drawn from the parent's file). Among them:
+- **child content copied into the parent** (the city's own references, as LOD in the parent):
+  the item's original is the child reference itself, so the usual rule (hidden while the
+  original's 3D is loaded) shows its LOD only where the city's own cells are not loaded;
+- **twins** (`twin` flag): parent references that duplicate a child reference (the parent side
+  of a known pair in `DynDOLOD_SSE_ChildworldMatches.txt`, or the same model, position / 100 and
+  scale, DynDOLOD's reference key; city walls, towers, Tamriel's stand-ins of city buildings).
+  The twin is in the direct parent fields; the item is hidden while the twin's 3D is loaded;
+- everything else (stables, farms, outer walls, rocks, trees) is only in the parent and always
+  shown in the child world (until its own original loads, which a parent reference never does
+  there).
 
-Each item is `parent_copy` (+ `tree`, `large` where they apply), grid NearGrid, initially
-enabled, no parent; `DMDL` slot 0 is its LOD4 model (empty for a billboard), slots 1-3 its
-LOD4/8/16 pack meshes. The file's `DHDR.lod_world` is the parent; `PARM` has
-`parent_copies_of=<parent>` and `bounds=x0,y0,x1,y1`. The runtime draws them while the player
-is in that child world, at the LOD level the distance asks for, and hides an item while its
-original's own 3D is loaded (it is a parent reference, so normally never inside the child).
+Each item is `parent_copy` (+ `tree`, `large`, `twin` where they apply), grid NearGrid,
+initially enabled, no enable parent; `DMDL` slot 0 is its LOD4 model (empty for a billboard),
+slots 1-3 its LOD4/8/16 pack meshes, and `DMVT` carries the textures and snow/ash classes the
+object LOD would draw it with (AltTextures, snow shader, VC whitening), so the pack meshes match
+the `.bto` (a rock with a PBR AltTextures entry is not drawn with its plain LOD texture). Trees
+carry their impostor type (offset 46). The file's `DHDR.lod_world` is the parent; `PARM` has
+`parent_copies_of=<parent>` and `bounds=x0,y0,x1,y1`. The runtime draws them while the player is
+in that child world, at the LOD level the distance asks for.
 
 Far grass: a child worldspace with `DCHW` bit 2 shares the parent's land, so its grass is the
 parent's. NGIO writes no grass cache for such children and LODForge writes no `.lfg` for them:

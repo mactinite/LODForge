@@ -125,6 +125,57 @@ impl Default for Options<'_> {
 pub const DEFAULT_HIDDEN_RULE: HiddenRule = HiddenRule { terrain: TerrainKind::Btr, samples: Samples::Vertices, shift: 0.0, water: true, outside_hidden: false };
 
 impl<'a> Options<'a> {
+    /// How an instance of `r` with `mesh` (model `model_l`, lower case) at LOD `level` must be
+    /// drawn to match its merged `.bto` shapes: the reference's AltTextures per part (diffuse,
+    /// normal; `None` without entries) and per part the LOD material class ([`PART_SNOW`] ...,
+    /// HD by the same rule as the shape names) with [`PART_WHITEN`] for parts the VC side file
+    /// whitens (empty: all plain, colours as stored).
+    ///
+    /// [`PART_SNOW`]: crate::instancing::PART_SNOW
+    /// [`PART_WHITEN`]: crate::instancing::PART_WHITEN
+    #[allow(clippy::type_complexity)]
+    pub fn instance_variant(&self, r: &StaticRef, level: i32, model_l: &str, mesh: &LodMesh) -> (Option<Vec<(String, String)>>, Vec<u8>) {
+        let alt: Vec<Option<&[String]>> = mesh.parts.iter().map(|p| self.alt_textures.textures_for(&r.ref_id, p.index, &p.name)).collect();
+        let alt_textures = alt.iter().any(Option::is_some).then(|| {
+            mesh.parts
+                .iter()
+                .zip(&alt)
+                .map(|(p, a)| {
+                    let t = a.unwrap_or(&p.textures[..]);
+                    (t.first().cloned().unwrap_or_default(), t.get(1).cloned().unwrap_or_default())
+                })
+                .collect()
+        });
+        let class = MaterialClass::parse(r.material());
+        let part_classes: Vec<u8> = if class.is_snow_or_ash() {
+            let passthru = is_passthru_model(model_l, &self.passthru_masks);
+            let model_hd = self.hd.mesh_masks.iter().any(|m| model_l.contains(m.as_str()));
+            let ctx = Context { class: class.clone(), large_ref: r.is_large_ref(), level, passthru, hd: &self.hd, model_hd };
+            mesh.parts
+                .iter()
+                .zip(&alt)
+                .map(|(p, a)| {
+                    let hd = crate::material::is_hd(&ctx, a.unwrap_or(&p.textures[..]));
+                    match (class == MaterialClass::Snow, hd) {
+                        (true, false) => crate::instancing::PART_SNOW,
+                        (true, true) => crate::instancing::PART_SNOW_HD,
+                        (false, false) => crate::instancing::PART_ASH,
+                        (false, true) => crate::instancing::PART_ASH_HD,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let whiten: Vec<bool> = mesh.parts.iter().map(|p| p.colors.is_some() && self.vc.verdict(&r.full_model, &p.name) == VcVerdict::White).collect();
+        let part_classes = if whiten.iter().any(|&w| w) {
+            (0..mesh.parts.len()).map(|i| part_classes.get(i).copied().unwrap_or(crate::instancing::PART_PLAIN) | if whiten[i] { crate::instancing::PART_WHITEN } else { 0 }).collect()
+        } else {
+            part_classes
+        };
+        (alt_textures, part_classes)
+    }
+
     pub fn from_export(e: &ExportFile) -> Options<'a> {
         let lower = |v: Vec<&str>| v.into_iter().map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect::<Vec<_>>();
         match e.dialect {
@@ -326,45 +377,7 @@ impl<'a> ObjectLod<'a> {
                     if let Some(mesh) = self.mesh(&model_l).filter(|m| !m.parts.is_empty()) {
                         Stats::add(&self.stats.instanced, 1);
                         let runtime_ref = self.opts.instancing.as_ref().is_some_and(|i| i.is_runtime_ref(r));
-                        // The reference's AltTextures, per part (diffuse, normal).
-                        let alt: Vec<Option<&[String]>> = mesh.parts.iter().map(|p| self.opts.alt_textures.textures_for(&r.ref_id, p.index, &p.name)).collect();
-                        let alt_textures = alt.iter().any(Option::is_some).then(|| {
-                            mesh.parts.iter().zip(&alt).map(|(p, a)| {
-                                let t = a.unwrap_or(&p.textures[..]);
-                                (t.first().cloned().unwrap_or_default(), t.get(1).cloned().unwrap_or_default())
-                            }).collect()
-                        });
-                        // Per part: the LOD material class the merged shape would get (snow/ash,
-                        // HD by the same rule as the shape names).
-                        let class = MaterialClass::parse(r.material());
-                        let part_classes: Vec<u8> = if class.is_snow_or_ash() {
-                            let passthru = is_passthru_model(&model_l, &self.opts.passthru_masks);
-                            let model_hd = self.opts.hd.mesh_masks.iter().any(|m| model_l.contains(m.as_str()));
-                            let ctx = Context { class: class.clone(), large_ref: r.is_large_ref(), level: q.level, passthru, hd: &self.opts.hd, model_hd };
-                            mesh.parts
-                                .iter()
-                                .zip(&alt)
-                                .map(|(p, a)| {
-                                    let hd = crate::material::is_hd(&ctx, a.unwrap_or(&p.textures[..]));
-                                    match (class == MaterialClass::Snow, hd) {
-                                        (true, false) => crate::instancing::PART_SNOW,
-                                        (true, true) => crate::instancing::PART_SNOW_HD,
-                                        (false, false) => crate::instancing::PART_ASH,
-                                        (false, true) => crate::instancing::PART_ASH_HD,
-                                    }
-                                })
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-                        // VC side file: parts whose colours the `.bto` would whiten (RGB 255,
-                        // alpha kept) carry PART_WHITEN; the pack bakes the whitened colours.
-                        let whiten: Vec<bool> = mesh.parts.iter().map(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White).collect();
-                        let part_classes = if whiten.iter().any(|&w| w) {
-                            (0..mesh.parts.len()).map(|i| part_classes.get(i).copied().unwrap_or(crate::instancing::PART_PLAIN) | if whiten[i] { crate::instancing::PART_WHITEN } else { 0 }).collect()
-                        } else {
-                            part_classes
-                        };
+                        let (alt_textures, part_classes) = self.opts.instance_variant(r, q.level, &model_l, mesh);
                         instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures, part_classes });
                         placed += 1;
                     } else {

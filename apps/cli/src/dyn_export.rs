@@ -37,6 +37,8 @@ pub struct DynWorld<'a> {
     /// Export lines of the default season (for the parent copies of child worldspaces); only
     /// lines inside some child's bounds are used.
     pub lines: &'a [lodforge_dyndolod::export::RefLine],
+    /// Draw variants of `lines` ([`variants`]).
+    pub variants: Option<&'a HashMap<u32, Variant>>,
 }
 
 /// What the build did that the `.dyn.bin` files record.
@@ -61,8 +63,9 @@ pub struct Report {
     pub disabled: usize,
     pub migration: usize,
     pub direct_parents: usize,
-    /// Per child worldspace: (EditorID, parent copies, parent references left out as duplicates).
-    pub child_copies_per_world: Vec<(String, usize, usize)>,
+    /// Per child worldspace: (EditorID, items, twins, city copies, billboard trees with an
+    /// impostor type, billboard trees without one).
+    pub child_copies_per_world: Vec<(String, usize, usize, usize, usize, usize)>,
     /// Items whose original or base has no defining plugin (left out).
     pub unnamed: usize,
     pub bytes: usize,
@@ -73,8 +76,8 @@ impl Report {
         format!(
             "runtime dynamic LOD: {} files, {} items ({} with a direct enable parent below the chain top) + {} child-world copies, {} models; {} large references ({} instanced, {} merged in .bto only); {} resets, {} disabled, {} migration large refs; {} without a plugin left out; {:.2} MB",
             self.files, self.items, self.direct_parents, self.copies, self.models, self.large, self.large_instanced, self.large_merged, self.resets, self.disabled, self.migration, self.unnamed, self.bytes as f64 / 1e6
-        ) + &self.child_copies_per_world.iter().map(|(w, n, d)| format!("
-  parent copies in {w}: {n} ({d} parent references left out as duplicates of the child)")).collect::<String>()
+        ) + &self.child_copies_per_world.iter().map(|(w, n, t, cc, ti, tn)| format!("
+  parent copies in {w}: {n} items ({t} twins of child references, {cc} copies of the child's own content); billboard trees: {ti} with an impostor type, {tn} without")).collect::<String>()
     }
 }
 
@@ -133,13 +136,14 @@ fn mesh_path(m: &str) -> String {
     if m.is_empty() || m.starts_with("meshes\\") || m.ends_with(".dds") { m } else { format!("meshes\\{m}") }
 }
 
-fn model_entry(f: &mut DynFile, model: &str, columns: &[String; 4], full: bool, base: Option<&Base>) -> u32 {
+fn model_entry(f: &mut DynFile, model: &str, columns: &[String; 4], full: bool, base: Option<&Base>, variant: Option<&Variant>) -> u32 {
     let model = mesh_path(model);
     let lod: [String; 3] = std::array::from_fn(|i| mesh_path(&columns[i]));
     let flags = model_flags(&model, full);
-    let key = format!("{model}|{}|{}|{}|{flags}", lod[0], lod[1], lod[2]);
+    let key = format!("{model}|{}|{}|{}|{flags}|{variant:?}", lod[0], lod[1], lod[2]);
     let bounds = base.map(|b| b.bounds.map(f32::from)).unwrap_or_default();
-    f.model(&key, || DynModel { flags, pack: [NO_MESH; 4], bounds, model: model.clone(), lod })
+    let (textures, classes) = variant.map(|v| (v.clone().map(|s| s.0), v.clone().map(|s| s.1))).unwrap_or_default();
+    f.model(&key, || DynModel { flags, pack: [NO_MESH; 4], bounds, model: model.clone(), lod, textures, classes })
 }
 
 /// (lower-case plugin, local form) -> instanced levels (bit 3-5) from `<World>.statics.bin`.
@@ -165,7 +169,7 @@ fn instanced(out: &Path, world: &str) -> Result<HashMap<(String, u32), u16>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, names: &FormNames, out: &Path, opts: lodforge_instances::WriteOptions, wf: WriteFlags) -> Result<Report> {
+pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, names: &FormNames, out: &Path, opts: lodforge_instances::WriteOptions, wf: WriteFlags, impostor_root: &Path) -> Result<Report> {
     let dir = crate::instances::out_dir(out);
     std::fs::create_dir_all(&dir)?;
     let mut rep = Report::default();
@@ -190,7 +194,7 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
             };
             dyn_ids.insert(d.ref_id);
             let full = d.replace || matches!(d.grid, Grid::NearFull | Grid::FarFull | Grid::NeverFadeFull);
-            let model = model_entry(&mut f, &d.model, &d.columns, full, c.bases.get(&d.base));
+            let model = model_entry(&mut f, &d.model, &d.columns, full, c.bases.get(&d.base), None);
             let mf = f.models[model as usize].flags;
             let mut flags = grid_flags(d.grid, d.large);
             for (on_, bit) in [(d.large, LARGE), (d.enable_parent != 0 && d.opposite_parent, OPPOSITE), (d.initially_enabled, INITIALLY_ENABLED), (d.replace, REPLACE), (d.persistent, PERSISTENT), (full, FULL), (mf & MODEL_ANIMATED != 0, ANIMATED), (mf & MODEL_GLOW != 0, GLOW), (in_child && !d.replace, IN_CHILD_WORLDS)] {
@@ -232,7 +236,7 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
                 }
                 let Some((on, ol)) = names.split(d.ref_id) else { continue };
                 let full = d.replace || matches!(d.grid, Grid::NearFull | Grid::FarFull | Grid::NeverFadeFull);
-                let m = model_entry(&mut f, m2, &Default::default(), full, c.bases.get(b2));
+                let m = model_entry(&mut f, m2, &Default::default(), full, c.bases.get(b2), None);
                 v.push((f.form(on, ol), m));
             }
             if !v.is_empty() {
@@ -247,7 +251,7 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
                 continue;
             };
             let full = cp.full_model;
-            let m = model_entry(&mut f, if full { c.bases.get(&pl.base).map_or(model.as_str(), |b| b.model.as_str()) } else { model }, &Default::default(), full, c.bases.get(&pl.base));
+            let m = model_entry(&mut f, if full { c.bases.get(&pl.base).map_or(model.as_str(), |b| b.model.as_str()) } else { model }, &Default::default(), full, c.bases.get(&pl.base), None);
             let mut flags = GRID_NEAR | CHILD_COPY | INITIALLY_ENABLED;
             if cp.large {
                 flags |= LARGE;
@@ -351,6 +355,9 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
         rep.resets += f.resets.len();
         rep.disabled += f.disabled.len();
         // Parent copies for the child worldspaces that use this world's LOD (walled cities).
+        // Billboard trees there are in no `.trees.bin` (they stay in the parent's `.bto`): their
+        // items carry the impostor type of their base.
+        let impostors: HashMap<u32, u32> = crate::runtime_trees::set_from_index(p, &impostor_root.join("textures").join("LODForge").join("Impostors").join(&world.editor_id).join("impostors.json")).map(|s| s.base_index).unwrap_or_default();
         let in_child_dynamic: HashSet<u32> = if in_child { w.dynamic.iter().filter(|d| !d.replace).map(|d| d.ref_id).collect() } else { HashSet::new() };
         for x in all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0) {
             let Some(b) = crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id).0 else { continue };
@@ -358,35 +365,57 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
             let mut cf = DynFile::new(Common { world: x.editor_id.clone(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("parent_copies_of={}\nbounds={},{},{},{}", world.editor_id, b.0, b.1, b.2, b.3), token: crate::instances::build_token() });
             let xr = names.split(x.form_id).map(|(n, l)| cf.form(n, l)).unwrap_or_default();
             cf.header = DynHeader { world: xr, south_west: f.header.south_west, near_grid: near as u8, far_grid: far as u8, glow_multiple: 1.75, lod_world: world.editor_id.clone(), flags: 0 };
-            let mut dup_count = 0;
+            // (twins, city copies, trees with an impostor type, trees without a mesh or type)
+            let mut counts = (0usize, 0usize, 0usize, 0usize);
             for l in w.lines {
                 let cell = ((l.position[0] / 4096.0).floor() as i32, (l.position[1] / 4096.0).floor() as i32);
-                if cell.0 < b.0 || cell.0 > b.2 || cell.1 < b.1 || cell.1 > b.3 || lodforge_dyndolod::childworld::is_copy(l.ref_id) || in_child_dynamic.contains(&l.ref_id) {
+                if cell.0 < b.0 || cell.0 > b.2 || cell.1 < b.1 || cell.1 > b.3 || in_child_dynamic.contains(&l.ref_id) || l.columns[..3].iter().all(|c| c.is_empty()) {
                     continue;
                 }
-                if dups.contains(&l.ref_id) {
-                    dup_count += 1;
-                    continue;
-                }
-                if l.columns[..3].iter().all(|c| c.is_empty()) {
-                    continue;
-                }
-                let (Some((on, ol)), Some((bn, bl))) = (names.split(l.ref_id), names.split(l.base)) else { continue };
-                let base = c.bases.get(&l.base);
+                // The original: a parent reference, or for the city's own content copied into the
+                // parent, the child reference itself (hidden while its 3D is loaded, as any item).
+                let (orig, base_id) = if lodforge_dyndolod::childworld::is_copy(l.ref_id) {
+                    match w.child_copies.iter().find(|(cp, _)| cp.copy_id == l.ref_id && cp.child_world == x.form_id) {
+                        Some((cp, _)) => (cp.ref_id, cp.placement.base),
+                        None => continue,
+                    }
+                } else {
+                    (l.ref_id, l.base)
+                };
+                let (Some((on, ol)), Some((bn, bl))) = (names.split(orig), names.split(base_id)) else { continue };
+                let twin = dups.get(&l.ref_id).and_then(|&t| names.split(t));
+                let base = c.bases.get(&base_id);
                 let first = if l.columns[0].ends_with(".nif") { l.columns[0].as_str() } else { "" };
-                let m = model_entry(&mut cf, first, &l.columns, false, base);
+                let m = model_entry(&mut cf, first, &l.columns, false, base, w.variants.and_then(|v| v.get(&l.ref_id)));
                 let mut flags = GRID_NEAR | PARENT_COPY | INITIALLY_ENABLED;
-                if base.is_some_and(lodforge_dyndolod::assign::is_tree) {
+                let is_tree = base.is_some_and(lodforge_dyndolod::assign::is_tree);
+                if is_tree {
                     flags |= TREE;
                 }
-                if world.large_ref_cells.contains_key(&l.ref_id) {
+                if world.large_ref_cells.contains_key(&l.ref_id) || x.large_ref_cells.contains_key(&orig) {
                     flags |= LARGE;
                 }
+                if twin.is_some() {
+                    flags |= TWIN;
+                    counts.0 += 1;
+                }
+                if orig != l.ref_id {
+                    counts.1 += 1;
+                }
                 let rot = l.rotation.map(|d| d.to_radians() as f32);
-                let rc = world.refs.get(&l.ref_id).and_then(|r| r.cell).map_or(cell_of(l.position), |(x, y)| (x as i16, y as i16));
-                cf.add(l.position, rot, l.scale, (on, ol), None, m, flags, rc, (bn, bl), None);
+                let rc = world.refs.get(&l.ref_id).or_else(|| x.refs.get(&orig)).and_then(|r| r.cell).map_or(cell_of(l.position), |(x, y)| (x as i16, y as i16));
+                let impostor = if is_tree { impostors.get(&base_id).map_or(0, |&t| t as u16 + 1) } else { 0 };
+                let it = cf.add(l.position, rot, l.scale, (on, ol), None, m, flags, rc, (bn, bl), twin);
+                it.impostor = impostor;
+                if is_tree && first.is_empty() {
+                    if impostor > 0 {
+                        counts.2 += 1;
+                    } else {
+                        counts.3 += 1;
+                    }
+                }
             }
-            rep.child_copies_per_world.push((x.editor_id.clone(), cf.items(), dup_count));
+            rep.child_copies_per_world.push((x.editor_id.clone(), cf.items(), counts.0, counts.1, counts.2, counts.3));
             if cf.items() == 0 {
                 continue;
             }
@@ -446,6 +475,10 @@ pub struct InfoArgs {
     /// Also print this many items.
     #[arg(long, default_value_t = 0)]
     pub items: usize,
+    /// A `.statics.bin` (the parent's): print items whose reference is instanced there at LOD4
+    /// with other textures or a snow/ash class than the item's plain model.
+    #[arg(long)]
+    pub statics: Option<std::path::PathBuf>,
 }
 
 pub fn info(a: &InfoArgs) -> Result<()> {
@@ -458,7 +491,8 @@ pub fn info(a: &InfoArgs) -> Result<()> {
     println!("items {} in {} cells: near {}, far {}, never-fade {}; large {}, parent {} (opposite {}), initially enabled {}, replace {}, persistent {}, door {}, full {}, animated {}, glow {}, child copies {}, in child worlds {}", items.len(), f.cells.len(), grid(GRID_NEAR), grid(GRID_FAR), grid(GRID_NEVER_FADE), count(LARGE), items.iter().filter(|i| i.has_parent()).count(), count(OPPOSITE), count(INITIALLY_ENABLED), count(REPLACE), count(PERSISTENT), count(DOOR), count(FULL), count(ANIMATED), count(GLOW), count(CHILD_COPY), count(IN_CHILD_WORLDS));
     let no_pack = f.models.iter().filter(|m| m.pack[0] == NO_MESH && m.flags & (MODEL_ANIMATED | MODEL_GLOW) == 0).count();
     let with_lod = f.models.iter().filter(|m| m.pack[1..].iter().any(|&p| p != NO_MESH)).count();
-    println!("models {}: {} without a pack mesh for the dynamic model (not animated/glow), {} with some LOD4/8/16 pack mesh", f.models.len(), no_pack, with_lod);
+    let variant = f.models.iter().filter(|m| m.textures.iter().any(|t| !t.is_empty()) || m.classes.iter().any(|c| !c.is_empty())).count();
+    println!("models {}: {} without a pack mesh for the dynamic model (not animated/glow), {} with some LOD4/8/16 pack mesh, {variant} with a draw variant (AltTextures / snow / whitening)", f.models.len(), no_pack, with_lod);
     for m in f.models.iter().filter(|m| m.pack[0] == NO_MESH && m.flags & (MODEL_ANIMATED | MODEL_GLOW) == 0).take(8) {
         println!("  no pack: {}", m.model);
     }
@@ -466,9 +500,88 @@ pub fn info(a: &InfoArgs) -> Result<()> {
     let lc = |m: u16| lr.iter().filter(|l| l.lod & m != 0).count();
     println!("large refs {} in {} cells: instanced {}, merged {}, dynamic {}, persistent {}, disabled/parent {}, no LOD {}", lr.len(), f.large.len(), lr.iter().filter(|l| l.lod & (LRG_INST4 | LRG_INST8 | LRG_INST16) != 0).count(), lc(LRG_BTO4 | LRG_BTO8 | LRG_BTO16), lc(LRG_DYN), lc(LRG_PERSISTENT), lc(LRG_DISABLED), lr.iter().filter(|l| l.lod & 0x7F == 0).count());
     println!("seasons {:?}; resets {}, disabled {}, bases {}; child worlds {}; underside {:?}", f.seasons.iter().map(|(c, v)| format!("{c}:{}", v.len())).collect::<Vec<_>>(), f.resets.len(), f.disabled.len(), f.bases.len(), f.child_worlds.iter().map(|c| format!("{} {:#x} {:?}", c.editor_id, c.flags, c.bounds)).collect::<Vec<_>>().join(", "), f.underside.as_ref().map(|u| (&u.model, u.height, u.worlds.len())));
+    if let Some(sp) = &a.statics {
+        let st = StaticsFile::from_bytes(&std::fs::read(sp)?)?;
+        let mut inst: HashMap<(String, u32), usize> = HashMap::new();
+        for ((level, _, _), recs) in &st.blocks {
+            if *level == 4 {
+                for r in recs {
+                    if let Some(n) = st.common.plugins.get(usize::from(r.plugin)) {
+                        inst.insert((n.to_ascii_lowercase(), r.form), usize::from(r.mesh));
+                    }
+                }
+            }
+        }
+        let (mut found, mut variant) = (0, 0);
+        for i in &items {
+            let k = (f.common.plugins[usize::from(i.original.plugin)].to_ascii_lowercase(), i.original.form);
+            let Some(&m) = inst.get(&k) else { continue };
+            found += 1;
+            let me = &st.meshes[m];
+            if !me.textures.is_empty() || me.classes.iter().any(|&c| c != 0) {
+                variant += 1;
+                if variant <= 12 {
+                    println!("  variant: {}:{:06X} {} textures {:?} classes {:?}", k.0, k.1, me.model, me.textures.first(), me.classes);
+                }
+            }
+        }
+        println!("statics: {found} items instanced there at LOD4, {variant} with textures or classes the item does not carry");
+    }
     for i in items.iter().take(a.items) {
         let m = &f.models[i.model as usize];
         println!("  {}:{:06X} at ({:.0},{:.0},{:.0}) flags {:#x} parent {}:{:06X} model {} pack {:?}", f.common.plugins[usize::from(i.original.plugin)], i.original.form, i.pos[0], i.pos[1], i.pos[2], i.flags, f.common.plugins.get(usize::from(i.parent.plugin)).map_or("-", String::as_str), i.parent.form, m.model, m.pack);
     }
     Ok(())
+}
+
+/// Per slot (dynamic model = LOD4, LOD4, LOD8, LOD16): (AltTextures per part, part classes).
+pub type Variant = [(Vec<(String, String)>, Vec<u8>); 4];
+
+/// The draw variants (AltTextures, snow/ash class, VC whitening) of `lines` (default season),
+/// exactly as object LOD would draw them, from the season export's header and side files.
+pub fn variants(p: &Profile, s: &crate::dyndolod_build::SeasonExport, lines: &[lodforge_dyndolod::export::RefLine]) -> HashMap<u32, Variant> {
+    let mut out = HashMap::new();
+    if lines.is_empty() {
+        return out;
+    }
+    let export = lodforge_objlod::ExportFile::parse_with(&s.text, lodforge_objlod::Dialect::Dyndolod);
+    let mut opts = lodforge_objlod::Options::from_export(&export);
+    opts.alt_textures = lodforge_objlod::sidefiles::AltTextures::parse(&s.alt_textures);
+    opts.vc = lodforge_objlod::sidefiles::VcList::parse(&s.vc);
+    let by_id: HashMap<&str, &lodforge_objlod::StaticRef> = export.statics.iter().map(|r| (r.ref_id.as_str(), r)).collect();
+    let mut meshes: HashMap<String, Option<lodforge_objlod::mesh::LodMesh>> = HashMap::new();
+    for l in lines {
+        let id = format!("{:08X}", l.ref_id);
+        let Some(r) = by_id.get(id.as_str()) else { continue };
+        let mut v: Variant = Default::default();
+        for (k, level) in [(0usize, 4i32), (1, 8), (2, 16)] {
+            let Some(model) = r.model(k).map(|m| m.to_ascii_lowercase().replace('/', "\\")) else { continue };
+            if !model.ends_with(".nif") {
+                continue;
+            }
+            let mesh = meshes.entry(model.clone()).or_insert_with(|| crate::tree_pack::vfs_mesh(p, &model));
+            let Some(mesh) = mesh.as_ref() else { continue };
+            let (t, c) = opts.instance_variant(r, level, &model, mesh);
+            v[k + 1] = (t.unwrap_or_default(), c);
+        }
+        v[0] = v[1].clone();
+        if v.iter().any(|(t, c)| !t.is_empty() || !c.is_empty()) {
+            out.insert(l.ref_id, v);
+        }
+    }
+    out
+}
+
+/// The export lines of `world` inside the bounds of a child worldspace that uses its LOD (the
+/// parent copies' candidates).
+pub fn child_bound_lines(c: &Config, all_worlds: &[Worldspace], world: &Worldspace, lines: &[lodforge_dyndolod::export::RefLine]) -> Vec<lodforge_dyndolod::export::RefLine> {
+    let bounds: Vec<(i32, i32, i32, i32)> = all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0).filter_map(|x| crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id).0).collect();
+    lines
+        .iter()
+        .filter(|l| {
+            let (x, y) = ((l.position[0] / 4096.0).floor() as i32, (l.position[1] / 4096.0).floor() as i32);
+            bounds.iter().any(|b| x >= b.0 && x <= b.2 && y >= b.1 && y <= b.3)
+        })
+        .cloned()
+        .collect()
 }

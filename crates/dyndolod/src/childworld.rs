@@ -399,13 +399,13 @@ mod tests {
     }
 }
 
-/// Parent references that duplicate content of `child` (the child has the object itself): the
-/// parent sides of known pairs (`ChildworldMatches.txt`) whose child side is in `child`, and
-/// parent twins, i.e. a parent reference with the [`ref_key`] (model, position / 100, scale) of
-/// a child reference. Used by runtimes that draw the parent's LOD inside a child worldspace's
-/// cells: everything else of the parent there is missing from the child (stables, farms,
-/// outer walls), the duplicates would draw the city twice.
-pub fn parent_duplicates(lo: &LoadOrder, parent: &Worldspace, child: &Worldspace, bases: &HashMap<u32, Base>, matches: &HashMap<(String, u32), Vec<(String, u32)>>) -> HashSet<u32> {
+/// Parent references that duplicate content of `child` (the child has the object itself), each
+/// with its child twin: the parent sides of known pairs (`ChildworldMatches.txt`) whose child
+/// side is in `child`, and parent twins, i.e. a parent reference with the [`ref_key`] (model,
+/// position / 100, scale) of a child reference. Used by runtimes that draw the parent's LOD
+/// inside a child worldspace's cells: such a duplicate is shown only while its twin's own 3D is
+/// not loaded, everything else of the parent there (stables, farms) is missing from the child.
+pub fn parent_duplicates(lo: &LoadOrder, parent: &Worldspace, child: &Worldspace, bases: &HashMap<u32, Base>, matches: &HashMap<(String, u32), Vec<(String, u32)>>) -> HashMap<u32, u32> {
     let owner = owners(lo);
     let identity = |id: u32| {
         owner.get(&owner_key(id)).map(|&i| {
@@ -415,12 +415,22 @@ pub fn parent_duplicates(lo: &LoadOrder, parent: &Worldspace, child: &Worldspace
     };
     let model_of = |p: &Placement| bases.get(&p.base).map(|b| b.model.as_str()).unwrap_or("");
     let live = |p: &Placement| p.flags & lodforge_esp::record::FLAG_DELETED == 0;
-    let child_keys: HashSet<(String, [i64; 4])> = child.refs.values().filter(|p| live(p)).map(|p| ref_key(model_of(p), p)).collect();
-    let paired: HashSet<(String, u32)> = child.refs.iter().filter(|(_, p)| live(p)).filter_map(|(&id, _)| identity(id)).filter_map(|k| matches.get(&k)).flatten().cloned().collect();
+    let mut child_ids: Vec<u32> = child.refs.iter().filter(|(_, p)| live(p)).map(|(&id, _)| id).collect();
+    child_ids.sort_unstable();
+    let mut child_keys: HashMap<(String, [i64; 4]), u32> = HashMap::new();
+    let mut paired: HashMap<(String, u32), u32> = HashMap::new();
+    for &id in &child_ids {
+        child_keys.entry(ref_key(model_of(&child.refs[&id]), &child.refs[&id])).or_insert(id);
+        if let Some(parents) = identity(id).and_then(|k| matches.get(&k)) {
+            for pk in parents {
+                paired.entry(pk.clone()).or_insert(id);
+            }
+        }
+    }
     parent
         .refs
         .iter()
-        .filter(|(id, p)| !is_copy(**id) && (child_keys.contains(&ref_key(model_of(p), p)) || identity(**id).is_some_and(|k| paired.contains(&k))))
-        .map(|(&id, _)| id)
+        .filter(|(id, _)| !is_copy(**id))
+        .filter_map(|(&id, p)| identity(id).and_then(|k| paired.get(&k).copied()).or_else(|| child_keys.get(&ref_key(model_of(p), p)).copied()).map(|twin| (id, twin)))
         .collect()
 }

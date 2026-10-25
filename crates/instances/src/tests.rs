@@ -252,7 +252,7 @@ fn dyn_round_trip() {
     let mut f = DynFile::new(c);
     f.header = DynHeader { world: FormRef { plugin: 0, form: 0x3C }, south_west: (-96, -96), near_grid: 11, far_grid: 21, glow_multiple: 1.75, lod_world: "Tamriel".into(), flags: HDR_LARGE_REFS_INSTANCED };
     f.common.plugin_index("Skyrim.esm");
-    let m = f.model("a", || DynModel { flags: MODEL_FULL, pack: [3, NO_MESH, 4, NO_MESH], bounds: [-1.0, -2.0, -3.0, 1.0, 2.0, 3.0], model: r"meshes\a.nif".into(), lod: [r"meshes\lod\a_lod_0.nif".into(), String::new(), String::new()] });
+    let m = f.model("a", || DynModel { flags: MODEL_FULL, pack: [3, NO_MESH, 4, NO_MESH], bounds: [-1.0, -2.0, -3.0, 1.0, 2.0, 3.0], model: r"meshes\a.nif".into(), lod: [r"meshes\lod\a_lod_0.nif".into(), String::new(), String::new()], textures: [Vec::new(), vec![(r"textures\a.dds".into(), r"textures\a_n.dds".into())], Vec::new(), Vec::new()], classes: [Vec::new(), vec![1, 0x81], Vec::new(), Vec::new()] });
     assert_eq!(f.model("a", DynModel::default), m);
     f.add([5000.0, -10.0, 30.0], [0.1, 0.0, 3.0], 1.5, ("Skyrim.esm", 0x15B13), Some(("Skyrim.esm", 0x7265C)), m, GRID_FAR | LARGE | INITIALLY_ENABLED, (1, -1), ("Skyrim.esm", 0xB23FC), Some(("Skyrim.esm", 0x7265D)));
     f.add([5100.0, 20.0, 30.0], [0.0; 3], 1.0, ("Dawnguard.esm", 0x12), None, m, GRID_NEVER_FADE | (GLOW_LEVEL_NONE << GLOW_LEVEL_SHIFT), (1, 0), ("Skyrim.esm", 0x10), None);

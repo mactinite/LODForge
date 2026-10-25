@@ -42,6 +42,10 @@ pub const PARENT_COPY: u32 = 1 << 17;
 /// The base is a tree (`TREE`, or a `STAT` with tree LOD); its LOD4 may be a billboard (no pack
 /// mesh): draw the parent's impostor of the same reference (`.trees.bin`, same plugin and form).
 pub const TREE: u32 = 1 << 18;
+/// A `parent_copy` that duplicates a child-world reference (same model and place, or a known
+/// pair): the twin is in the `direct_parent` fields (54, 60). Hide the item while the twin's 3D
+/// is loaded.
+pub const TWIN: u32 = 1 << 19;
 /// The direct enable parent's own XESP opposite flag.
 pub const DIRECT_OPPOSITE: u32 = 1 << 16;
 
@@ -89,6 +93,9 @@ pub struct DynItem {
     pub hash: u32,
     pub destruction_stage: u8,
     pub destruction_type: u8,
+    /// Offset 46 (since 1.7, `tree` items): the parent's impostor type index + 1 (the
+    /// `impostors.json` type of the base; 0 = none), for trees without a `.trees.bin` record.
+    pub impostor: u16,
     pub cell: (i16, i16),
     pub base: FormRef,
     /// The direct enable parent when it differs from `parent` (the top of the chain); `plugin ==
@@ -126,7 +133,7 @@ impl DynItem {
         b.u32(self.hash);
         b.u8(self.destruction_stage);
         b.u8(self.destruction_type);
-        b.u16(0);
+        b.u16(self.impostor);
         b.i16(self.cell.0);
         b.i16(self.cell.1);
         b.u16(self.base.plugin);
@@ -143,13 +150,13 @@ impl DynItem {
         let (of, pf) = (r.u32()?, r.u32()?);
         let (model, flags, hash) = (r.u32()?, r.u32()?, r.u32()?);
         let (destruction_stage, destruction_type) = (r.u8()?, r.u8()?);
-        r.u16()?;
+        let impostor = r.u16()?;
         let cell = (r.i16()?, r.i16()?);
         let bp = r.u16()?;
         let dp = r.u16()?;
         let bf = r.u32()?;
         let df = r.u32()?;
-        Ok(DynItem { pos, angles, scale, original: FormRef { plugin: op, form: of }, parent: FormRef { plugin: pp, form: pf }, model, flags, hash, destruction_stage, destruction_type, cell, base: FormRef { plugin: bp, form: bf }, direct_parent: FormRef { plugin: dp, form: df } })
+        Ok(DynItem { pos, angles, scale, original: FormRef { plugin: op, form: of }, parent: FormRef { plugin: pp, form: pf }, model, flags, hash, destruction_stage, destruction_type, cell, base: FormRef { plugin: bp, form: bf }, direct_parent: FormRef { plugin: dp, form: df }, impostor })
     }
 }
 
@@ -163,6 +170,13 @@ pub struct DynModel {
     pub model: String,
     /// LOD4, LOD8, LOD16 models of the item's rule (`""` = none).
     pub lod: [String; 3],
+    /// `DMVT` (since 1.7): per slot (dynamic model, LOD4, LOD8, LOD16), the (diffuse, normal) of
+    /// each part when the reference draws other textures than the model's (AltTextures; empty:
+    /// the model's own) ...
+    pub textures: [Vec<(String, String)>; 4],
+    /// ... and the per-part LOD material class with the whitening bit (`MCLS` coding; empty: all
+    /// plain). The pack mesh of a slot is built for exactly this variant.
+    pub classes: [Vec<u8>; 4],
 }
 
 /// `DHDR`.
@@ -280,7 +294,7 @@ impl DynFile {
     /// Adds an item. `angles` in radians as the plugin stores them; `parent` `None` without an
     /// enable parent; `direct` the direct enable parent when it differs from `parent`.
     #[allow(clippy::too_many_arguments)]
-    pub fn add(&mut self, pos: [f32; 3], angles: [f32; 3], scale: f32, original: (&str, u32), parent: Option<(&str, u32)>, model: u32, flags: u32, cell: (i16, i16), base: (&str, u32), direct: Option<(&str, u32)>) {
+    pub fn add(&mut self, pos: [f32; 3], angles: [f32; 3], scale: f32, original: (&str, u32), parent: Option<(&str, u32)>, model: u32, flags: u32, cell: (i16, i16), base: (&str, u32), direct: Option<(&str, u32)>) -> &mut DynItem {
         let o = self.form(original.0, original.1);
         let p = match parent {
             Some((n, f)) => self.form(n, f),
@@ -291,8 +305,10 @@ impl DynFile {
             Some((n, f)) => self.form(n, f),
             None => FormRef { plugin: NONE, form: 0 },
         };
-        let item = DynItem { pos, angles: angles.map(angle_u16), scale: f16::from_f32(scale), original: o, parent: p, model, flags, hash: ref_hash(original.0, original.1), destruction_stage: 0xFF, destruction_type: 0, cell, base: b, direct_parent: d };
-        self.cells.entry(cell_of(pos)).or_default().push(item);
+        let item = DynItem { pos, angles: angles.map(angle_u16), scale: f16::from_f32(scale), original: o, parent: p, model, flags, hash: ref_hash(original.0, original.1), destruction_stage: 0xFF, destruction_type: 0, cell, base: b, direct_parent: d, impostor: 0 };
+        let v = self.cells.entry(cell_of(pos)).or_default();
+        v.push(item);
+        v.last_mut().unwrap()
     }
 
     pub fn items(&self) -> usize {
@@ -330,6 +346,22 @@ impl DynFile {
             }
         }
         chunks.push(Chunk { tag: *b"DMDL", data: b.0 });
+        if self.models.iter().any(|m| m.textures.iter().any(|t| !t.is_empty()) || m.classes.iter().any(|c| !c.is_empty())) {
+            let mut b = Buf::default();
+            b.u32(self.models.len() as u32);
+            for m in &self.models {
+                for s in 0..4 {
+                    b.u16(m.textures[s].len() as u16);
+                    for (d, n) in &m.textures[s] {
+                        b.str(d);
+                        b.str(n);
+                    }
+                    b.u16(m.classes[s].len() as u16);
+                    b.0.extend(&m.classes[s]);
+                }
+            }
+            chunks.push(Chunk { tag: *b"DMVT", data: b.0 });
+        }
         if !self.seasons.is_empty() {
             let mut b = Buf::default();
             b.u32(self.seasons.len() as u32);
@@ -428,7 +460,23 @@ impl DynFile {
                 }
                 let model = r.str()?;
                 let lod = [r.str()?, r.str()?, r.str()?];
-                f.models.push(DynModel { flags, pack, bounds, model, lod });
+                f.models.push(DynModel { flags, pack, bounds, model, lod, ..Default::default() });
+            }
+        }
+        if let Some(ch) = c.chunk(b"DMVT") {
+            let mut r = Cur::new(&ch.data);
+            let n = r.u32()? as usize;
+            for i in 0..n {
+                for s in 0..4 {
+                    let k = usize::from(r.u16()?);
+                    let t = (0..k).map(|_| Ok((r.str()?, r.str()?))).collect::<Result<Vec<_>>>()?;
+                    let k = usize::from(r.u16()?);
+                    let cl = r.take(k)?.to_vec();
+                    if let Some(m) = f.models.get_mut(i) {
+                        m.textures[s] = t;
+                        m.classes[s] = cl;
+                    }
+                }
             }
         }
         if let Some(ch) = c.chunk(b"DSEA") {

@@ -146,7 +146,9 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
     use lodforge_instances::dynlod::{DynFile, MODEL_ANIMATED, MODEL_GLOW};
     let mut dyn_files: Vec<PathBuf> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".dyn.bin")).collect();
     dyn_files.sort();
-    let plain_key = |m: &str| format!("{m}||[]");
+    // Same key as `key_of` for a statics entry with these textures and classes, so a `.dyn.bin` slot
+    // and a statics variant of the same model share a pack mesh.
+    let slot_key = |m: &lodforge_instances::dynlod::DynModel, i: usize, s: &str| format!("{s}|{}|{:?}", m.textures[i].iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), m.classes[i]);
     let dyn_slots = |m: &lodforge_instances::dynlod::DynModel| -> [String; 4] {
         let first = if m.flags & (MODEL_ANIMATED | MODEL_GLOW) != 0 { String::new() } else { m.model.clone() };
         [first, m.lod[0].clone(), m.lod[1].clone(), m.lod[2].clone()].map(|s| if s.ends_with(".nif") { s } else { String::new() })
@@ -154,8 +156,8 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
     for f in &dyn_files {
         let d = DynFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for m in &d.models {
-            for s in dyn_slots(m).into_iter().filter(|s| !s.is_empty()) {
-                models.entry(plain_key(&s)).or_insert_with(|| (s.clone(), Vec::new(), Vec::new()));
+            for (i, s) in dyn_slots(m).into_iter().enumerate().filter(|(_, s)| !s.is_empty()) {
+                models.entry(slot_key(m, i, &s)).or_insert_with(|| (s.clone(), m.textures[i].iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect(), m.classes[i].clone()));
             }
         }
     }
@@ -170,7 +172,7 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
         let mut d = DynFile::from_bytes(&std::fs::read(f)?)?;
         for m in &mut d.models {
             let slots = dyn_slots(m);
-            m.pack = std::array::from_fn(|i| if slots[i].is_empty() { NO_MESH } else { mesh_of.get(&plain_key(&slots[i])).copied().unwrap_or(NO_MESH) });
+            m.pack = std::array::from_fn(|i| if slots[i].is_empty() { NO_MESH } else { mesh_of.get(&slot_key(m, i, &slots[i])).copied().unwrap_or(NO_MESH) });
         }
         std::fs::write(f, d.to_bytes(write)?)?;
     }

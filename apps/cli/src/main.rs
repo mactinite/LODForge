@@ -225,6 +225,8 @@ enum Command {
     RuntimeDynInfo(dyn_export::InfoArgs),
     /// Brings an earlier runtime output to format 1.7: .dyn.bin files, static pack with their models, build token, Build.txt.
     RuntimeDyn(runtime_dyn::Args),
+    /// Writes only Occlusion.esp into an output folder (use --exclude-plugin for a plugin without DynDOLOD masters).
+    RuntimeOcclusion(runtime_dyn::OcclusionArgs),
     /// Rebuilds only GrassMeshes.bin (grass model, simplified, card per .lfg grass type).
     RuntimeGrassPack(grass_pack::Args),
     /// CPU preview of TreeMeshes.bin meshes through the atlas pages (PNG).
@@ -328,6 +330,7 @@ fn main() -> Result<()> {
         Command::RuntimeCheck(a) => strip_statics::check(&a),
         Command::RuntimeDynInfo(a) => dyn_export::info(&a),
         Command::RuntimeDyn(a) => runtime_dyn::run(&a),
+        Command::RuntimeOcclusion(a) => runtime_dyn::occlusion(&a),
         Command::RuntimeGrassPack(a) => grass_pack::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
