@@ -98,6 +98,9 @@ pub struct Index {
     /// Snow grade applied to the albedo pages: `[knee, slope]` (absent: none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snow_grade: Option<[f32; 2]>,
+    /// Albedo alpha: `"binary"` (the alpha test's result at 0.5, every level) or absent (coverage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<String>,
 }
 
 /// `meshes\landscape\trees\treepineforest01.nif` -> `treepineforest01_<crc32 of the path>`.

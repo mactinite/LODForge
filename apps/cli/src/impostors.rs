@@ -65,9 +65,16 @@ pub struct Opts {
     /// Leave the albedo unlit (no baked light, transmittance or occlusion).
     #[arg(long = "impostor-unlit")]
     pub unlit: bool,
-    /// No snow grade (compression of bright, colourless texels; docs/runtime/impostors.md).
-    #[arg(long = "impostor-no-snow-grade")]
-    pub no_snow_grade: bool,
+    /// Albedo alpha in the pages: `coverage` (alpha-tested coverage, kept through the mips) or
+    /// `binary` (the alpha test's result, 0 or 255, at every level: opaque crown interiors for
+    /// CS Snow Cover's sky-exposure test).
+    #[arg(long = "impostor-alpha", value_enum, default_value = "coverage")]
+    pub alpha: AlphaMode,
+    /// Apply the snow grade (compression of bright, colourless texels in snow-covered types;
+    /// docs/runtime/impostors.md). Off by default: it addressed a glow that turned out not to come
+    /// from the impostors.
+    #[arg(long = "impostor-snow-grade")]
+    pub snow_grade: bool,
     /// Snow grade knee (encoded luminance 0..255) and slope above it.
     #[arg(long = "impostor-snow-knee", default_value_t = 48.0)]
     pub snow_knee: f32,
@@ -79,6 +86,12 @@ pub struct Opts {
     pub calibration: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AlphaMode {
+    Coverage,
+    Binary,
+}
+
 impl Opts {
     fn settings(&self) -> bake::Settings {
         let mut s = bake::Settings { grid: self.grid, frame_px: self.frame, units_per_px: self.units_per_px, min_frame: self.min_frame, max_frame: self.max_frame, large_height: self.large_height, large_frame: self.large_frame, mip_bias: self.mip_bias, ..Default::default() };
@@ -86,9 +99,9 @@ impl Opts {
         s
     }
 
-    /// The snow grade (off with --impostor-no-snow-grade or an unlit bake).
+    /// The snow grade (only with --impostor-snow-grade, never for an unlit bake).
     fn snow_grade(&self, s: &bake::Settings) -> lodforge_impostor::shade::SnowGrade {
-        lodforge_impostor::shade::SnowGrade { enabled: !self.no_snow_grade && s.shading.enabled, knee: self.snow_knee, slope: self.snow_slope, ..Default::default() }
+        lodforge_impostor::shade::SnowGrade { enabled: self.snow_grade && s.shading.enabled, knee: self.snow_knee, slope: self.snow_slope, ..Default::default() }
     }
 
     /// `type -> (brightness, tint)` from --impostor-calibration (`*` = every type).
@@ -543,7 +556,7 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
     let sizes: Vec<u32> = unique.iter().map(|&k| baked[k].1.size()).collect();
     let unique_slots = atlas::pack(&sizes, opts.page);
     let refs: Vec<&bake::Baked> = unique.iter().map(|&k| &baked[k].1).collect();
-    let pages = atlas::compose(&refs, &unique_slots, settings.alpha_ref);
+    let pages = atlas::compose(&refs, &unique_slots, settings.alpha_ref, opts.alpha == AlphaMode::Binary);
     let slots: Vec<atlas::Slot> = slot_of.iter().map(|&u| unique_slots[u]).collect();
     if let Some(png_dir) = &opts.png {
         dump_pngs(png_dir, set, &pages)?;
@@ -601,7 +614,7 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
         reports.push(TypeReport { name: j.name.clone(), model: j.model.clone(), refs: 0, grid: b.grid, frame_px: b.frame_px, atlas_px: size, quad_size: b.quad_size(), ms: *ms, cached: *cached, bytes, coverage: m.coverage, model_crc32: j.crc });
         types.push(m);
     }
-    let index = Index { version: lodforge_impostor::manifest::MANIFEST_VERSION, baker_version: bake::BAKER_VERSION, layout: "hemi-oct-z-up".into(), worlds: worlds.to_vec(), pages: page_infos, types, snow_grade: grade.enabled.then_some([grade.knee, grade.slope]) };
+    let index = Index { version: lodforge_impostor::manifest::MANIFEST_VERSION, baker_version: bake::BAKER_VERSION, layout: "hemi-oct-z-up".into(), worlds: worlds.to_vec(), pages: page_infos, types, snow_grade: grade.enabled.then_some([grade.knee, grade.slope]), alpha: (opts.alpha == AlphaMode::Binary).then(|| "binary".to_string()) };
     std::fs::write(dir.join("impostors.json"), serde_json::to_string_pretty(&index)?)?;
     Ok(SetReport { types: reports, pages: pages.len(), page_bytes, bake_ms, encode_ms, failed, base_index: HashMap::new() })
 }
@@ -721,6 +734,9 @@ pub struct RegradeArgs {
     /// the set to install).
     #[arg(long)]
     pub out: PathBuf,
+    /// Recompose and re-encode every page (also when the grade changes none of a page's types).
+    #[arg(long)]
+    pub all_pages: bool,
     #[command(flatten)]
     pub opts: Opts,
 }
@@ -734,9 +750,7 @@ pub fn run_regrade(a: &RegradeArgs) -> Result<()> {
     }
     let settings = a.opts.settings();
     let grade = a.opts.snow_grade(&settings);
-    if index.snow_grade.is_some() {
-        bail!("{}: already graded ({:?}); regrade the ungraded set", a.set.display(), index.snow_grade);
-    }
+    // Pages are recomposed from the (ungraded) cache, so an earlier grade in the set does not matter.
     let cache = a.opts.cache_dir();
     // Every type from the cache (shared rectangles: one bake per cache key).
     let mut bakes: HashMap<String, bake::Baked> = HashMap::new();
@@ -759,7 +773,9 @@ pub fn run_regrade(a: &RegradeArgs) -> Result<()> {
             changed_keys.insert(k.clone());
         }
     }
-    let changed_pages: std::collections::BTreeSet<u32> = index.types.iter().filter(|ty| changed_keys.contains(&ty.cache_key)).map(|ty| ty.page).collect();
+    // Every page when asked, or when the alpha mode changes; else the pages the grade touches.
+    let alpha_changes = (a.opts.alpha == AlphaMode::Binary) != (index.alpha.as_deref() == Some("binary"));
+    let changed_pages: std::collections::BTreeSet<u32> = if a.all_pages || alpha_changes { (0..index.pages.len() as u32).collect() } else { index.types.iter().filter(|ty| changed_keys.contains(&ty.cache_key)).map(|ty| ty.page).collect() };
     println!("{}: {} types, {} cached bakes, {} changed by the snow grade, on {} of {} pages", a.set.display(), index.types.len(), bakes.len(), changed_keys.len(), changed_pages.len(), index.pages.len());
     // A page can only be recomposed when every type on it came back from the cache.
     let missing_set: std::collections::HashSet<&str> = missing.iter().map(String::as_str).collect();
@@ -784,7 +800,7 @@ pub fn run_regrade(a: &RegradeArgs) -> Result<()> {
             refs.push(&bakes[&ty.cache_key]);
             slots.push(atlas::Slot { page: 0, x: ty.rect_px[0], y: ty.rect_px[1], size: ty.atlas_px });
         }
-        let page = atlas::compose(&refs, &slots, settings.alpha_ref).pop().context("no page")?;
+        let page = atlas::compose(&refs, &slots, settings.alpha_ref, a.opts.alpha == AlphaMode::Binary).pop().context("no page")?;
         let info = &index.pages[pi as usize];
         if (page.width, page.height, page.mip_levels()) != (info.width, info.height, info.mips) {
             bail!("page {pi}: recomposed as {}x{} ({} mips), the set has {}x{} ({} mips)", page.width, page.height, page.mip_levels(), info.width, info.height, info.mips);
@@ -794,6 +810,7 @@ pub fn run_regrade(a: &RegradeArgs) -> Result<()> {
         written += 1;
     }
     index.snow_grade = grade.enabled.then_some([grade.knee, grade.slope]);
+    index.alpha = (a.opts.alpha == AlphaMode::Binary).then(|| "binary".to_string());
     std::fs::write(a.out.join("impostors.json"), serde_json::to_string_pretty(&index)?)?;
     println!("  wrote {written} albedo pages + impostors.json to {} in {:.1} s", a.out.display(), t.elapsed().as_secs_f32());
     if !missing.is_empty() {

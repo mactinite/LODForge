@@ -131,35 +131,53 @@ calibration against the in-game 3D trees. `--impostor-calibration <csv>` sets th
 `type,brightness,r,g,b` (`*` = every type). They are applied at draw time, so changing them
 needs no rebake. (The runtime reads them but cannot apply them yet: CS's DistantTree pixel shader
 has no colour input. Until its own pixel shader (M2b), corrections have to be baked into the
-albedo, as the snow grade is.)
+albedo, as the optional snow grade below does.)
 
-**Snow grade** (`impostors.json` `snow_grade: [knee, slope]`, default `[48, 0.35]`). In game,
-CS's DistantTree path renders bright, near-colourless surfaces much brighter and cyan compared
-with the Lighting shader on the near tier's 3D tree LOD meshes, though both carry the same
-albedo. WIN snow pines near Whiterun read luma ~189 as impostors vs ~138 as 3D LOD meshes, while
-dark, saturated foliage matches. The albedo pages are therefore graded after baking:
+**Snow grade** (off by default; `--impostor-snow-grade`; `impostors.json` records it as
+`snow_grade: [knee, slope]`). It was written for a cyan winter glow near Whiterun (2026-10-25) that
+turned out **not** to come from the impostors. Those trees were near-tier mesh-pack trees (the mesh
+tier runs to `fBlockLevel0Distance`, 57344 in LOD-Dyn), and the same glow is on snowy LOD rocks.
+With the mesh tier cut to 8192 the impostors drew there and matched the 3D pines (luma 103-125 vs
+123-137). The grade stays available for calibration:
 - only snow-covered types are graded: at least 15% of the covered texels must be snow-like
-  (bright, low saturation, neutral to cool, blue >= red). On cs-base Tamriel that is 79 types,
-  all heavy-snow winter trees and shrubs. No other type is touched: grey dead wood and pale
-  flowers are warm or sparse, at most 13%;
-- texels with luma above `knee` (encoded 0..255) and low saturation (`(max - min) / max`: fully
-  at <= 0.12, not at all at >= 0.30), neutral to cool, get their luminance compressed above the
-  knee by `slope`;
-- the same texels move half-way toward grey (less cyan);
+  (bright, low saturation, neutral to cool, blue >= red). On cs-base Tamriel that is 79 types, all
+  heavy-snow winter trees and shrubs; grey dead wood and pale flowers stay below that (at most 13%);
+- texels with luma above `knee` (encoded 0..255) and low saturation (`(max - min) / max`: fully at
+  <= 0.12, not at all at >= 0.30), neutral to cool, get their luminance compressed above the knee
+  by `slope` (defaults 48 and 0.35);
+- the same texels move half-way toward grey;
 - saturated texels (needles, autumn leaves, flowers) are unchanged.
 
-Example: Whiterun snow pines go from mean 77,85,83 to 55,58,57. The grade runs when the pages are
-composed, after the bake cache, so changing it re-bakes nothing.
-`lodforge impostor-regrade <set> --out <dir>` applies it to an installed set. It reads every type
-back from the cache by its `cache_key` and re-encodes only the albedo pages that change, in the
-set's own rectangles: type indices, rectangles and normal-depth pages stay as they are.
-`--impostor-no-snow-grade`, `--impostor-snow-knee` and `--impostor-snow-slope` control it.
+The grade runs when the pages are composed, after the bake cache, so changing it re-bakes nothing.
 
-**Follow-up (open): per-type brightness / tint in the runtime.** The snow grade bakes a
-correction that belongs at draw time. Once the runtime has its own impostor pixel shader (M2b),
-it should apply each type's `brightness * tint` (and, if needed, a season-aware variant). Bakes
-can then drop the snow grade (`--impostor-no-snow-grade`), and corrections become calibration
-data (`--impostor-calibration`) instead of re-encoded pages.
+`lodforge impostor-regrade <set> --out <dir>` recomposes an installed set's albedo pages from the
+bake cache with the current compose settings (snow grade, `--impostor-alpha`). It reads every type
+by its `cache_key` and keeps the set's own rectangles, so type indices, rectangles, normal-depth
+pages and the runtime's trees files stay valid. It re-encodes only the pages that change
+(`--all-pages` for every page).
+
+**Known interaction: CS Snow Cover and fractional alpha.** In snowy weather, Community Shaders'
+(Bottled Shaders') `DistantTree.hlsl` applies Snow Cover to LOD billboards, and so to our
+impostors:
+- it derives one flat normal per quad from the screen derivatives of the world position (our
+  normal pages are not used) and adds +0.5 z, so the angle mask passes over the whole quad;
+- with `EnableExpensiveFoliage = 1` (on in cs-base), it takes `1 - alpha` of the texel two rows up
+  in the texture as sky exposure;
+- it then blends the colour toward its snow albedo x tint by that amount.
+
+TexGen billboards have on/off alpha, so their crowns are opaque inside and only top edges get
+snow. Impostor alpha is fractional coverage (mean 0.07-0.19 on pines), so a whole crown can read
+as sky-exposed and turn snow-coloured. Not observed in game so far, because the near tier covers
+the close range. If impostors look over-snowed in winter, bake or regrade with
+`--impostor-alpha binary`: alpha becomes the alpha test's result (0/255 at 0.5) at every mip
+level, with the same silhouette and opaque crown interiors. The index records it as
+`alpha: "binary"`. Off by default.
+
+**Follow-up (open): per-type brightness / tint in the runtime.** Corrections like the snow grade
+belong at draw time. Once the runtime has its own impostor pixel shader (M2b), it should apply each
+type's `brightness * tint` (and, if needed, a season-aware variant). Corrections then become
+calibration data (`--impostor-calibration`) instead of re-encoded pages. The same shader can skip
+Snow Cover for impostors whose albedo already carries snow.
 
 **Normal + depth page** (`pageNN_nd.dds`), linear:
 
