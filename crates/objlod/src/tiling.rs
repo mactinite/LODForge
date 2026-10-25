@@ -62,9 +62,21 @@ pub fn span(uvs: &[[f32; 2]]) -> ([f32; 2], [u32; 2]) {
     (shift, reps)
 }
 
+/// UVs beyond this many repeats (or non-finite) are broken data: such a shape gets no repeat
+/// tile and is never cut.
+pub const MAX_SANE_UV: f32 = 1024.0;
+
+/// Whether all UVs are finite and within [`MAX_SANE_UV`].
+pub fn sane(uvs: &[[f32; 2]]) -> bool {
+    uvs.iter().all(|uv| uv[0].is_finite() && uv[1].is_finite() && uv[0].abs() <= MAX_SANE_UV && uv[1].abs() <= MAX_SANE_UV)
+}
+
 /// The repeats of the tile a shape with these UVs is drawn from (capped at [`MAX_REPEATS`]),
-/// `None` when the UVs fit one repeat (the ordinary tile does).
+/// `None` when the UVs fit one repeat (the ordinary tile does) or are broken ([`sane`]).
 pub fn tile_repeats(uvs: &[[f32; 2]]) -> Option<(u32, u32)> {
+    if !sane(uvs) {
+        return None;
+    }
     let (shift, [ru, rv]) = span(uvs);
     if ru == 1 && rv == 1 && shift == [0.0; 2] {
         return None;
@@ -101,6 +113,9 @@ fn cut_lower_bound(uvs: &[[f32; 2]], triangles: &[[u16; 3]], cell: [f32; 2]) -> 
 /// cut every [`MAX_REPEATS`] repeats where it spans more. `None` when cutting would grow it past
 /// [`growth_limit`] (it then keeps its own texture).
 pub fn prepare(part: &MeshPart, (ru, rv): (u32, u32)) -> Option<MeshPart> {
+    if !sane(&part.uvs) || ru == 0 || rv == 0 {
+        return None;
+    }
     let (shift, reps) = span(&part.uvs);
     let mut p = part.clone();
     for uv in &mut p.uvs {
@@ -203,6 +218,20 @@ mod tests {
             assert!(lo >= -1e-4 && hi <= MAX_REPEATS as f32 + 1e-4, "{us:?}");
         }
         // A shape repeating hundreds of times is left alone.
-        assert!(prepare(&quad(2000.0, 2000.0, 0.0), (MAX_REPEATS, MAX_REPEATS)).is_none());
+        assert!(prepare(&quad(500.0, 500.0, 0.0), (MAX_REPEATS, MAX_REPEATS)).is_none());
+    }
+
+    #[test]
+    fn broken_uvs_get_no_tile_and_no_cut() {
+        // burntrubblenodirt05_lod_0: infinite UVs and 56,352 (this used to hang the cut).
+        let mut q = quad(3.0, 1.0, 0.0);
+        q.uvs[2] = [f32::INFINITY, 0.5];
+        assert_eq!(tile_repeats(&q.uvs), None);
+        assert!(prepare(&q, (4, 1)).is_none());
+        q.uvs[2] = [1.0, 56352.0];
+        assert_eq!(tile_repeats(&q.uvs), None);
+        assert!(prepare(&q, (MAX_REPEATS, MAX_REPEATS)).is_none());
+        q.uvs[2] = [f32::NAN, 0.0];
+        assert!(!sane(&q.uvs));
     }
 }

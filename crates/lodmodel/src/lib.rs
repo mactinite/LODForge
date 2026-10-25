@@ -52,8 +52,9 @@ pub const LEVELS: [LevelParams; 3] = [
     LevelParams { max_error: 140.0, max_ratio: 0.08, min_triangles: 4, normal_weight: 0.1, uv_weight: 0.01, permissive: true },
 ];
 
-/// Bumped whenever generation changes the output for the same input (cache key).
-pub const GENERATOR_VERSION: u32 = 1;
+/// Bumped whenever generation changes the output for the same input (cache key). 2: broken
+/// source UVs repaired ([`repair_uvs`]).
+pub const GENERATOR_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stats {
@@ -219,7 +220,12 @@ fn add_shape(nif: &Nif, s: &TriShape, parent: &Xf, meshes: &mut Vec<Mesh>, keys:
         }
     }
     if has[1] {
-        m.uvs.extend_from_slice(&s.uvs);
+        // Broken UVs in the source (USSEP's burntrubblenodirt05.nif stores infinite ones and
+        // 56,352) would reach the LOD model, poison the simplifier's UV error and hang anything
+        // that cuts along UV repeat lines.
+        let mut uvs = s.uvs.clone();
+        repair_uvs(&mut uvs, &s.triangles);
+        m.uvs.extend_from_slice(&uvs);
     }
     if has[4] {
         m.colors.extend_from_slice(&s.colors);
@@ -231,6 +237,37 @@ fn add_shape(nif: &Nif, s: &TriShape, parent: &Xf, meshes: &mut Vec<Mesh>, keys:
             .map(|t| [base + u32::from(t[0]), base + u32::from(t[1]), base + u32::from(t[2])]),
     );
     true
+}
+
+/// UVs beyond this many texture repeats are broken data, not tiling.
+pub const MAX_SANE_UV: f32 = 1024.0;
+
+/// Replaces non-finite UVs and UVs beyond [`MAX_SANE_UV`] by the mean of the valid UVs of the
+/// vertices sharing a triangle with them (0, 0 when there are none). Returns how many it replaced.
+pub fn repair_uvs(uvs: &mut [[f32; 2]], triangles: &[[u16; 3]]) -> usize {
+    let bad = |uv: &[f32; 2]| !(uv[0].is_finite() && uv[1].is_finite()) || uv[0].abs() > MAX_SANE_UV || uv[1].abs() > MAX_SANE_UV;
+    let broken: Vec<usize> = (0..uvs.len()).filter(|&i| bad(&uvs[i])).collect();
+    if broken.is_empty() {
+        return 0;
+    }
+    let mut fixed = Vec::with_capacity(broken.len());
+    for &i in &broken {
+        let (mut sum, mut n) = ([0.0f32; 2], 0u32);
+        for t in triangles.iter().filter(|t| t.iter().any(|&v| usize::from(v) == i)) {
+            for &v in t {
+                let uv = uvs.get(usize::from(v)).copied().unwrap_or([f32::NAN; 2]);
+                if usize::from(v) != i && !bad(&uv) {
+                    sum = [sum[0] + uv[0], sum[1] + uv[1]];
+                    n += 1;
+                }
+            }
+        }
+        fixed.push(if n > 0 { [sum[0] / n as f32, sum[1] / n as f32] } else { [0.0; 2] });
+    }
+    for (&i, uv) in broken.iter().zip(fixed) {
+        uvs[i] = uv;
+    }
+    broken.len()
 }
 
 /// Simplifies all meshes together; returns per-mesh index lists (mesh-local) and the error of
@@ -488,6 +525,23 @@ fn generate_impl(nif: &Nif, p: &LevelParams, name: &str, keep_names: bool) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Broken source UVs (infinite, NaN, 56,352) take their triangle neighbours' mean; good ones
+    /// are kept, an isolated broken one becomes 0, 0.
+    #[test]
+    fn broken_uvs_are_repaired() {
+        let mut uvs = [[0.0, 0.0], [1.0, 0.0], [f32::INFINITY, 0.5], [0.0, 56352.0], [f32::NAN, 1.0], [3.0, 2.0]];
+        let tris = [[0, 1, 2], [1, 2, 3], [0, 1, 5]];
+        assert_eq!(repair_uvs(&mut uvs, &tris), 3);
+        // 2 shares triangles with 0 and 1 (valid) and 3 (broken): mean of 0, 1, 1 -> (2/3, 0).
+        assert!((uvs[2][0] - 2.0 / 3.0).abs() < 1e-6 && uvs[2][1] == 0.0, "{:?}", uvs[2]);
+        // 3 only touches 1 and 2; 2 was broken when the means were taken.
+        assert_eq!(uvs[3], [1.0, 0.0]);
+        assert_eq!(uvs[4], [0.0, 0.0]);
+        assert_eq!(uvs[5], [3.0, 2.0]);
+        assert!(uvs.iter().all(|uv| uv[0].is_finite() && uv[1].is_finite()));
+        assert_eq!(repair_uvs(&mut uvs, &tris), 0);
+    }
 
     /// A subdivided flat grid with one shader collapses to a few triangles and round-trips.
     #[test]
