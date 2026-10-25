@@ -65,7 +65,7 @@ pub struct Report {
     pub direct_parents: usize,
     /// Per child worldspace: (EditorID, items, twins, city copies, billboard trees with an
     /// impostor type, billboard trees without one).
-    pub child_copies_per_world: Vec<(String, usize, usize, usize, usize, usize)>,
+    pub child_copies_per_world: Vec<(String, usize, usize, usize, usize, usize, usize)>,
     /// Items whose original or base has no defining plugin (left out).
     pub unnamed: usize,
     pub bytes: usize,
@@ -76,8 +76,8 @@ impl Report {
         format!(
             "runtime dynamic LOD: {} files, {} items ({} with a direct enable parent below the chain top) + {} child-world copies, {} models; {} large references ({} instanced, {} merged in .bto only); {} resets, {} disabled, {} migration large refs; {} without a plugin left out; {:.2} MB",
             self.files, self.items, self.direct_parents, self.copies, self.models, self.large, self.large_instanced, self.large_merged, self.resets, self.disabled, self.migration, self.unnamed, self.bytes as f64 / 1e6
-        ) + &self.child_copies_per_world.iter().map(|(w, n, t, cc, ti, tn)| format!("
-  parent copies in {w}: {n} items ({t} twins of child references, {cc} copies of the child's own content); billboard trees: {ti} with an impostor type, {tn} without")).collect::<String>()
+        ) + &self.child_copies_per_world.iter().map(|(w, n, t, cc, ti, tn, ob)| format!("
+  parent copies in {w}: {n} items ({t} twins of child references, {cc} copies of the child's own content); billboard trees: {ti} with an impostor type, {tn} without; {ob} in child cells outside the bounds")).collect::<String>()
     }
 }
 
@@ -357,6 +357,8 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
         // Parent copies for the child worldspaces that use this world's LOD (walled cities).
         // Billboard trees there are in no `.trees.bin` (they stay in the parent's `.bto`): their
         // items carry the impostor type of their base.
+        // The parent's trees drawn as impostors (`.trees.bin`, default season).
+        let parent_trees: HashSet<(String, u32)> = std::fs::read(dir.join(format!("{}.trees.bin", world.editor_id))).ok().and_then(|b| lodforge_instances::trees::TreeFile::from_bytes(&b).ok()).map(|t| t.cells.values().flatten().filter_map(|r| t.common.plugins.get(usize::from(r.plugin)).map(|n| (n.to_ascii_lowercase(), r.form))).collect()).unwrap_or_default();
         let impostors: HashMap<u32, u32> = crate::runtime_trees::set_from_index(p, &impostor_root.join("textures").join("LODForge").join("Impostors").join(&world.editor_id).join("impostors.json")).map(|s| s.base_index).unwrap_or_default();
         let in_child_dynamic: HashSet<u32> = if in_child { w.dynamic.iter().filter(|d| !d.replace).map(|d| d.ref_id).collect() } else { HashSet::new() };
         for x in all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0) {
@@ -365,13 +367,36 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
             let mut cf = DynFile::new(Common { world: x.editor_id.clone(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("parent_copies_of={}\nbounds={},{},{},{}", world.editor_id, b.0, b.1, b.2, b.3), token: crate::instances::build_token() });
             let xr = names.split(x.form_id).map(|(n, l)| cf.form(n, l)).unwrap_or_default();
             cf.header = DynHeader { world: xr, south_west: f.header.south_west, near_grid: near as u8, far_grid: far as u8, glow_multiple: 1.75, lod_world: world.editor_id.clone(), flags: 0 };
-            // (twins, city copies, trees with an impostor type, trees without a mesh or type)
-            let mut counts = (0usize, 0usize, 0usize, 0usize);
+            // (twins, city copies, trees with an impostor type, trees without a mesh or type,
+            // copies in child cells outside the bounds)
+            let mut counts = (0usize, 0usize, 0usize, 0usize, 0usize);
             for l in w.lines {
                 let cell = ((l.position[0] / 4096.0).floor() as i32, (l.position[1] / 4096.0).floor() as i32);
-                if cell.0 < b.0 || cell.0 > b.2 || cell.1 < b.1 || cell.1 > b.3 || in_child_dynamic.contains(&l.ref_id) || l.columns[..3].iter().all(|c| c.is_empty()) {
+                let inside = cell.0 >= b.0 && cell.0 <= b.2 && cell.1 >= b.1 && cell.1 <= b.3;
+                if (!inside && !x.cells.contains_key(&cell)) || in_child_dynamic.contains(&l.ref_id) || l.columns[..3].iter().all(|c| c.is_empty()) {
                     continue;
                 }
+                // Outside the bounds (a cell the child has beyond them) the runtime still draws the
+                // parent's own instances and impostors; only the levels merged into the parent's
+                // `.bto` (which the engine hides in the child's cells) need a copy.
+                let mut columns = l.columns.clone();
+                if !inside {
+                    let key = names.split(l.ref_id).map(|(n, lf)| (n.to_ascii_lowercase(), lf));
+                    if key.as_ref().is_some_and(|k| parent_trees.contains(k)) {
+                        continue;
+                    }
+                    let bits = key.and_then(|k| inst.get(&k).copied()).unwrap_or(0);
+                    for (k, bit) in [(0, LRG_INST4), (1, LRG_INST8), (2, LRG_INST16)] {
+                        if bits & bit != 0 {
+                            columns[k].clear();
+                        }
+                    }
+                    if columns[..3].iter().all(|c| c.is_empty()) {
+                        continue;
+                    }
+                    counts.4 += 1;
+                }
+                let l = &lodforge_dyndolod::export::RefLine { columns, ..l.clone() };
                 // The original: a parent reference, or for the city's own content copied into the
                 // parent, the child reference itself (hidden while its 3D is loaded, as any item).
                 let (orig, base_id) = if lodforge_dyndolod::childworld::is_copy(l.ref_id) {
@@ -415,7 +440,7 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
                     }
                 }
             }
-            rep.child_copies_per_world.push((x.editor_id.clone(), cf.items(), counts.0, counts.1, counts.2, counts.3));
+            rep.child_copies_per_world.push((x.editor_id.clone(), cf.items(), counts.0, counts.1, counts.2, counts.3, counts.4));
             if cf.items() == 0 {
                 continue;
             }
@@ -479,6 +504,9 @@ pub struct InfoArgs {
     /// with other textures or a snow/ash class than the item's plain model.
     #[arg(long)]
     pub statics: Option<std::path::PathBuf>,
+    /// Print these items in full (`<form hex>`, any plugin), with their model slots and variants.
+    #[arg(long, value_delimiter = ',')]
+    pub item: Vec<String>,
 }
 
 pub fn info(a: &InfoArgs) -> Result<()> {
@@ -526,6 +554,16 @@ pub fn info(a: &InfoArgs) -> Result<()> {
             }
         }
         println!("statics: {found} items instanced there at LOD4, {variant} with textures or classes the item does not carry");
+    }
+    for want in &a.item {
+        let form = u32::from_str_radix(want.trim().trim_start_matches("0x"), 16).unwrap_or(0) & 0x00FF_FFFF;
+        for i in items.iter().filter(|i| i.original.form == form) {
+            let m = &f.models[i.model as usize];
+            println!("item {}:{:06X} flags {:#x} twin {}:{:06X} impostor {} model #{} {:?} lod {:?} pack {:?}", f.common.plugins[usize::from(i.original.plugin)], i.original.form, i.flags, f.common.plugins.get(usize::from(i.direct_parent.plugin)).map_or("-", String::as_str), i.direct_parent.form, i.impostor, i.model, m.model, m.lod, m.pack);
+            for s in 0..4 {
+                println!("  slot {s}: textures {:?} classes {:?}", m.textures[s], m.classes[s]);
+            }
+        }
     }
     for i in items.iter().take(a.items) {
         let m = &f.models[i.model as usize];
@@ -575,12 +613,13 @@ pub fn variants(p: &Profile, s: &crate::dyndolod_build::SeasonExport, lines: &[l
 /// The export lines of `world` inside the bounds of a child worldspace that uses its LOD (the
 /// parent copies' candidates).
 pub fn child_bound_lines(c: &Config, all_worlds: &[Worldspace], world: &Worldspace, lines: &[lodforge_dyndolod::export::RefLine]) -> Vec<lodforge_dyndolod::export::RefLine> {
-    let bounds: Vec<(i32, i32, i32, i32)> = all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0).filter_map(|x| crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id).0).collect();
+    let children: Vec<(Option<(i32, i32, i32, i32)>, &Worldspace)> = all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0).map(|x| (crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id).0, x)).filter(|(b, _)| b.is_some()).collect();
+    // Inside a child's bounds, or in any cell the child has (the engine hides the parent's LOD there).
     lines
         .iter()
         .filter(|l| {
             let (x, y) = ((l.position[0] / 4096.0).floor() as i32, (l.position[1] / 4096.0).floor() as i32);
-            bounds.iter().any(|b| x >= b.0 && x <= b.2 && y >= b.1 && y <= b.3)
+            children.iter().any(|(b, w)| b.is_some_and(|b| x >= b.0 && x <= b.2 && y >= b.1 && y <= b.3) || w.cells.contains_key(&(x, y)))
         })
         .cloned()
         .collect()

@@ -99,7 +99,11 @@ pub fn run(a: &Args) -> Result<()> {
     enc.write_header()?.write_image_data(&px)?;
     for &mi in &ids {
         if let Some(m) = pack.meshes.get(mi as usize) {
-            println!("  {mi}: {} ({} triangles, {} clusters)", m.model, m.triangles, m.cluster_count);
+            let pages: std::collections::BTreeSet<u16> = (m.first_cluster..m.first_cluster + m.cluster_count).filter_map(|c| pack.clusters.get(c as usize)).map(|c| c.page).collect();
+            let vs = &pack.vertices[m.first_vertex as usize..(m.first_vertex + m.vertex_count) as usize];
+            let mean = |k: usize| vs.iter().map(|v| f64::from(v.color[k])).sum::<f64>() / vs.len().max(1) as f64;
+            let amin = vs.iter().map(|v| v.color[3]).min().unwrap_or(0);
+            println!("  {mi}: {} ({} triangles, {} clusters, pages {:?} of {}: {:?}); vertex colour mean RGBA {:.0} {:.0} {:.0} {:.0}, alpha min {amin}", m.model, m.triangles, m.cluster_count, pages, pack.pages.len(), pages.iter().filter_map(|&p| pack.pages.get(usize::from(p))).map(|p| (p.albedo.as_str(), p.class)).collect::<Vec<_>>(), mean(0), mean(1), mean(2), mean(3));
         }
     }
     println!("wrote {}", a.out.display());

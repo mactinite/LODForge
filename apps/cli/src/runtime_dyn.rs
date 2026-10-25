@@ -155,6 +155,26 @@ pub fn run(a: &Args) -> Result<()> {
         println!("{world}: export {} dynamic, {} child copies in {:.1} s", we.dynamic.len(), we.child_copies.len(), t.elapsed().as_secs_f64());
         // The AltTextures and VC side texts the parent copies' draw variants come from.
         crate::dyndolod_build::add_side_files(&p, &c, &mut we);
+        // LODFORGE_DYN_NEAR=x,y,r: every export line near a point, with its columns (diagnostics).
+        for x in all.iter().filter(|x| x.parent == Some(ws.form_id) && x.parent_flags & 0x02 != 0) {
+            let cells: Vec<(i32, i32)> = x.cells.keys().copied().collect();
+            if let (Some(x0), Some(x1), Some(y0), Some(y1)) = (cells.iter().map(|c| c.0).min(), cells.iter().map(|c| c.0).max(), cells.iter().map(|c| c.1).min(), cells.iter().map(|c| c.1).max()) {
+                let b = crate::dyndolod_build::child_config(&c, &x.editor_id, &ws.editor_id).0;
+                let outside = b.map_or(0, |b| cells.iter().filter(|c| c.0 < b.0 || c.0 > b.2 || c.1 < b.1 || c.1 > b.3).count());
+                println!("  {}: {} cells, extent ({x0},{y0})..({x1},{y1}); config bounds {:?}; {outside} cells outside them", x.editor_id, cells.len(), b);
+            }
+        }
+        if let Some(v) = std::env::var("LODFORGE_DYN_NEAR").ok().map(|s| s.split(',').filter_map(|t| t.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 3) {
+            for l in &we.seasons[0].lines {
+                let d = ((l.position[0] - v[0]).powi(2) + (l.position[1] - v[1]).powi(2)).sqrt();
+                if d < v[2] {
+                    println!("  near {d:6.0} {:08X} {} at ({:.0},{:.0},{:.0}) cols {:?}", l.ref_id, l.full_model, l.position[0], l.position[1], l.position[2], &l.columns[..3]);
+                }
+            }
+            for d in we.dynamic.iter().filter_map(|d| ws.refs.get(&d.ref_id).map(|r| (d, r))).filter(|(_, r)| ((r.position[0] - v[0]).powi(2) + (r.position[1] - v[1]).powi(2)).sqrt() < v[2]) {
+                println!("  near dynamic {:08X} {} at ({:.0},{:.0},{:.0})", d.0.ref_id, d.0.model, d.1.position[0], d.1.position[1], d.1.position[2]);
+            }
+        }
         let cl = crate::dyn_export::child_bound_lines(&c, &all, ws, &we.seasons[0].lines);
         let v = crate::dyn_export::variants(&p, &we.seasons[0], &cl);
         if !cl.is_empty() {

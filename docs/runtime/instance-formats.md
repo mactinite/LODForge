@@ -607,7 +607,12 @@ A child worldspace that uses its parent's LOD (a walled city: `WhiterunWorld`, `
 `parent_copy` items. The engine hides the parent's LOD in the child's cells, so without these the
 strip inside the child's bounds but outside its walls (stables, farms, outer walls, nearby trees)
 is empty. The items are the parent's LOD references (default-season export lines with an LOD4,
-LOD8 or LOD16 model) whose cell lies inside the child's `DCHW` bounds, except the parent's
+LOD8 or LOD16 model) whose cell lies inside the child's `DCHW` bounds **or in any cell the child
+worldspace has** (mods add child cells far beyond the configured bounds: WhiterunWorld has 113
+cells, 93 of them outside `4,-3,7,1`; the engine hides the parent's `.bto` in all of them).
+Outside the bounds the runtime still draws the parent's own instances (`.statics.bin`) and
+impostors (`.trees.bin`) itself, so a copy there carries only the levels merged into the parent's
+`.bto` (the other `DMDL` slots are empty) and no tree the `.trees.bin` draws. Except the parent's
 dynamic items already flagged `in_child_worlds` (drawn from the parent's file). Among them:
 - **child content copied into the parent** (the city's own references, as LOD in the parent):
   the item's original is the child reference itself, so the usual rule (hidden while the
