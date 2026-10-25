@@ -245,11 +245,14 @@ pub struct SnowGrade {
     /// above which not at all.
     pub sat_full: f32,
     pub sat_none: f32,
+    /// A type is graded only when at least this share of its covered texels is snow-like
+    /// ([`snow_share`]): snow-covered (winter) trees, not bark, grey wood or pale flowers.
+    pub min_share: f32,
 }
 
 impl Default for SnowGrade {
     fn default() -> Self {
-        SnowGrade { enabled: true, knee: 48.0, slope: 0.35, neutral: 0.5, sat_full: 0.12, sat_none: 0.30 }
+        SnowGrade { enabled: true, knee: 48.0, slope: 0.35, neutral: 0.5, sat_full: 0.12, sat_none: 0.30, min_share: 0.15 }
     }
 }
 
@@ -274,7 +277,8 @@ pub fn grade_snow(albedo: &mut [u8], g: &SnowGrade) -> usize {
         let mx = r.max(gr).max(b);
         let mn = r.min(gr).min(b);
         let sat = if mx > 0.0 { (mx - mn) / mx } else { 0.0 };
-        let w = 1.0 - smoothstep(g.sat_full, g.sat_none, sat);
+        // Snow is neutral to cool (blue >= red); grey wood and pale greens are warm.
+        let w = (1.0 - smoothstep(g.sat_full, g.sat_none, sat)) * smoothstep(-8.0, 4.0, b - r);
         if w <= 0.0 {
             continue;
         }
@@ -312,5 +316,52 @@ mod grade_tests {
         let mut off = vec![200, 225, 230, 255];
         assert_eq!(grade_snow(&mut off, &SnowGrade { enabled: false, ..g }), 0);
         assert_eq!(off, vec![200, 225, 230, 255]);
+    }
+}
+
+/// Share of the covered texels (alpha >= 128) that [`grade_snow`] treats as snow (weight >= 0.5).
+pub fn snow_share(albedo: &[u8], g: &SnowGrade) -> f32 {
+    let (mut covered, mut snow) = (0u64, 0u64);
+    for p in albedo.chunks_exact(4) {
+        if p[3] < 128 {
+            continue;
+        }
+        covered += 1;
+        let (r, gr, b) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
+        let l = 0.299 * r + 0.587 * gr + 0.114 * b;
+        let mx = r.max(gr).max(b);
+        let sat = if mx > 0.0 { (mx - r.min(gr).min(b)) / mx } else { 0.0 };
+        if l > g.knee && (1.0 - smoothstep(g.sat_full, g.sat_none, sat)) * smoothstep(-8.0, 4.0, b - r) >= 0.5 {
+            snow += 1;
+        }
+    }
+    snow as f32 / covered.max(1) as f32
+}
+
+/// [`grade_snow`] of one type's albedo when it is snow-covered ([`SnowGrade::min_share`]);
+/// returns the number of texels changed (0: not graded).
+pub fn grade_snow_type(albedo: &mut [u8], g: &SnowGrade) -> usize {
+    if !g.enabled || snow_share(albedo, g) < g.min_share {
+        return 0;
+    }
+    grade_snow(albedo, g)
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn only_snow_covered_types_are_graded() {
+        let g = SnowGrade::default();
+        // 40% bright cool snow texels: graded.
+        let mut snowy: Vec<u8> = (0..10).flat_map(|i| if i < 4 { [205, 220, 228, 255] } else { [36, 39, 17, 255] }).collect();
+        assert!(grade_snow_type(&mut snowy, &g) > 0);
+        // Pale warm grey wood (dead pine) and a few cool texels (10%): left alone.
+        let mut wood: Vec<u8> = (0..10).flat_map(|i| if i < 1 { [205, 220, 228, 255] } else { [120, 112, 100, 255] }).collect();
+        let before = wood.clone();
+        assert_eq!(grade_snow_type(&mut wood, &g), 0);
+        assert_eq!(wood, before);
+        assert!(snow_share(&before, &g) < 0.15);
     }
 }

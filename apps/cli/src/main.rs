@@ -199,6 +199,8 @@ enum Command {
     Impostors(impostors::Args),
     /// Per-type colour statistics of a baked impostor set (diagnostics).
     ImpostorStats(impostors::StatsArgs),
+    /// Applies the snow grade to an installed impostor set from the bake cache (no re-bake).
+    ImpostorRegrade(impostors::RegradeArgs),
     /// Billboard tree LOD (.lst/.btt + atlas) from the load order.
     TreeLod(tree_lod::Args),
     /// Everything xLODGen does (terrain, objects, trees; all worldspaces and seasons) in one run.
@@ -321,6 +323,7 @@ fn main() -> Result<()> {
         Command::TreeLod(a) => tree_lod::run(&a),
         Command::Impostors(a) => impostors::run(&a),
         Command::ImpostorStats(a) => impostors::run_stats(&a),
+        Command::ImpostorRegrade(a) => impostors::run_regrade(&a),
         Command::Build(a) => build::run(&a),
         Command::View(a) => view::run(&a),
         Command::Info(a) => info::run(&a),

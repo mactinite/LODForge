@@ -505,7 +505,7 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
     let bake_ms = t_bake.elapsed().as_millis();
     // Snow grade on the pre-lit albedo (after the cache: changing it re-bakes nothing).
     let grade = opts.snow_grade(&settings);
-    let graded: usize = baked.iter_mut().map(|(_, b, ..)| lodforge_impostor::shade::grade_snow(&mut b.albedo, &grade)).filter(|&n| n > 0).count();
+    let graded: usize = baked.iter_mut().map(|(_, b, ..)| lodforge_impostor::shade::grade_snow_type(&mut b.albedo, &grade)).filter(|&n| n > 0).count();
     if graded > 0 {
         println!("  snow grade (knee {}, slope {}): {graded} types changed", grade.knee, grade.slope);
     }
@@ -704,6 +704,100 @@ pub fn run_stats(a: &StatsArgs) -> Result<()> {
         }
         let m = |c: usize| sum[c] as f64 / k.max(1) as f64;
         println!("{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{:.3}\t{:.3}\t{}", t.name, t.frame_px, m(0), m(1), m(2), clip as f64 / k.max(1) as f64, cov as f64 / (255.0 * all.max(1) as f64), t.prelit);
+    }
+    Ok(())
+}
+
+/// `lodforge impostor-regrade`: applies the snow grade to an existing set without re-baking or
+/// re-packing it. Every type is read back from the bake cache by the `cache_key` its manifest
+/// records; only the albedo pages holding a type the grade changes are composed again (in the
+/// set's own rectangles) and re-encoded. Type indices, rectangles and the normal-depth pages stay
+/// as they are, so the runtime's instance files remain valid.
+#[derive(clap::Args)]
+pub struct RegradeArgs {
+    /// The set folder to read (holds impostors.json and the pages).
+    pub set: PathBuf,
+    /// Where to write the changed pages and impostors.json (a separate folder; copy them over
+    /// the set to install).
+    #[arg(long)]
+    pub out: PathBuf,
+    #[command(flatten)]
+    pub opts: Opts,
+}
+
+pub fn run_regrade(a: &RegradeArgs) -> Result<()> {
+    let t = Instant::now();
+    let path = a.set.join("impostors.json");
+    let mut index: lodforge_impostor::manifest::Index = serde_json::from_slice(&std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?)?;
+    if index.types.iter().any(|t| !t.prelit) {
+        bail!("{}: the set is not pre-lit (unlit albedo); the snow grade applies to pre-lit sets only", a.set.display());
+    }
+    let settings = a.opts.settings();
+    let grade = a.opts.snow_grade(&settings);
+    if index.snow_grade.is_some() {
+        bail!("{}: already graded ({:?}); regrade the ungraded set", a.set.display(), index.snow_grade);
+    }
+    let cache = a.opts.cache_dir();
+    // Every type from the cache (shared rectangles: one bake per cache key).
+    let mut bakes: HashMap<String, bake::Baked> = HashMap::new();
+    let mut missing = Vec::new();
+    for ty in &index.types {
+        if bakes.contains_key(&ty.cache_key) {
+            continue;
+        }
+        match std::fs::read(cache.join(format!("{}.lfic", ty.cache_key))).ok().and_then(|d| bake::decode_cache(&d)) {
+            Some(b) if b.size() == ty.atlas_px => {
+                bakes.insert(ty.cache_key.clone(), b);
+            }
+            _ => missing.push(ty.name.clone()),
+        }
+    }
+    // Which bakes the grade changes.
+    let mut changed_keys = std::collections::HashSet::new();
+    for (k, b) in bakes.iter_mut() {
+        if lodforge_impostor::shade::grade_snow_type(&mut b.albedo, &grade) > 0 {
+            changed_keys.insert(k.clone());
+        }
+    }
+    let changed_pages: std::collections::BTreeSet<u32> = index.types.iter().filter(|ty| changed_keys.contains(&ty.cache_key)).map(|ty| ty.page).collect();
+    println!("{}: {} types, {} cached bakes, {} changed by the snow grade, on {} of {} pages", a.set.display(), index.types.len(), bakes.len(), changed_keys.len(), changed_pages.len(), index.pages.len());
+    // A page can only be recomposed when every type on it came back from the cache.
+    let missing_set: std::collections::HashSet<&str> = missing.iter().map(String::as_str).collect();
+    std::fs::create_dir_all(&a.out)?;
+    let gpu = lodforge_gpu::Gpu::new()?;
+    let mut written = 0;
+    let mut skipped = Vec::new();
+    for &pi in &changed_pages {
+        let on: Vec<&lodforge_impostor::manifest::TypeManifest> = index.types.iter().filter(|ty| ty.page == pi).collect();
+        if on.iter().any(|ty| missing_set.contains(ty.name.as_str())) {
+            skipped.push(pi);
+            continue;
+        }
+        // One bake per rectangle.
+        let mut seen = std::collections::HashSet::new();
+        let mut refs: Vec<&bake::Baked> = Vec::new();
+        let mut slots: Vec<atlas::Slot> = Vec::new();
+        for ty in on {
+            if !seen.insert((ty.rect_px[0], ty.rect_px[1])) {
+                continue;
+            }
+            refs.push(&bakes[&ty.cache_key]);
+            slots.push(atlas::Slot { page: 0, x: ty.rect_px[0], y: ty.rect_px[1], size: ty.atlas_px });
+        }
+        let page = atlas::compose(&refs, &slots, settings.alpha_ref).pop().context("no page")?;
+        let info = &index.pages[pi as usize];
+        if (page.width, page.height, page.mip_levels()) != (info.width, info.height, info.mips) {
+            bail!("page {pi}: recomposed as {}x{} ({} mips), the set has {}x{} ({} mips)", page.width, page.height, page.mip_levels(), info.width, info.height, info.mips);
+        }
+        let name = info.albedo.rsplit(['\\', '/']).next().unwrap_or_default().to_string();
+        std::fs::write(a.out.join(&name), atlas::page_dds(&gpu, &page, atlas::Map::Albedo)?)?;
+        written += 1;
+    }
+    index.snow_grade = grade.enabled.then_some([grade.knee, grade.slope]);
+    std::fs::write(a.out.join("impostors.json"), serde_json::to_string_pretty(&index)?)?;
+    println!("  wrote {written} albedo pages + impostors.json to {} in {:.1} s", a.out.display(), t.elapsed().as_secs_f32());
+    if !missing.is_empty() {
+        println!("  {} types not in the cache ({}...); their pages were left as they are: {:?}", missing.len(), missing.iter().take(5).cloned().collect::<Vec<_>>().join(", "), skipped);
     }
     Ok(())
 }
