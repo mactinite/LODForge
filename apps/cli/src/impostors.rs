@@ -65,6 +65,14 @@ pub struct Opts {
     /// Leave the albedo unlit (no baked light, transmittance or occlusion).
     #[arg(long = "impostor-unlit")]
     pub unlit: bool,
+    /// No snow grade (compression of bright, colourless texels; docs/runtime/impostors.md).
+    #[arg(long = "impostor-no-snow-grade")]
+    pub no_snow_grade: bool,
+    /// Snow grade knee (encoded luminance 0..255) and slope above it.
+    #[arg(long = "impostor-snow-knee", default_value_t = 48.0)]
+    pub snow_knee: f32,
+    #[arg(long = "impostor-snow-slope", default_value_t = 0.35)]
+    pub snow_slope: f32,
     /// Per-type colour correction: CSV `type,brightness,r,g,b` (type = manifest name, or `*` for
     /// every type; later lines win), written into the manifests.
     #[arg(long = "impostor-calibration")]
@@ -76,6 +84,11 @@ impl Opts {
         let mut s = bake::Settings { grid: self.grid, frame_px: self.frame, units_per_px: self.units_per_px, min_frame: self.min_frame, max_frame: self.max_frame, large_height: self.large_height, large_frame: self.large_frame, mip_bias: self.mip_bias, ..Default::default() };
         s.shading.enabled = !self.unlit;
         s
+    }
+
+    /// The snow grade (off with --impostor-no-snow-grade or an unlit bake).
+    fn snow_grade(&self, s: &bake::Settings) -> lodforge_impostor::shade::SnowGrade {
+        lodforge_impostor::shade::SnowGrade { enabled: !self.no_snow_grade && s.shading.enabled, knee: self.snow_knee, slope: self.snow_slope, ..Default::default() }
     }
 
     /// `type -> (brightness, tint)` from --impostor-calibration (`*` = every type).
@@ -124,6 +137,10 @@ pub struct Args {
     /// impostor preview, until the runtime instance files exist.
     #[arg(long)]
     pub preview_instances: bool,
+    /// Read earlier LOD output enabled in the profile too (by default mods LODForge generated and
+    /// DynDOLOD output are left out, as in `build`).
+    #[arg(long)]
+    pub keep_lod_mods: bool,
     /// Per-type report (CSV: time, layout, texels, bytes); default
     /// `<out>\LODForge_ImpostorReport_<set>.csv`.
     #[arg(long)]
@@ -185,7 +202,9 @@ pub fn run(a: &Args) -> Result<()> {
     // As `build`: earlier LOD output (installed billboards decide which bases are trees) is not
     // read.
     let mut prof = a.profile.clone();
-    prof.exclude_mod.extend(crate::profile::generated_lod_mods(&prof.instance, &prof.profile));
+    if !a.keep_lod_mods {
+        prof.exclude_mod.extend(crate::profile::generated_lod_mods(&prof.instance, &prof.profile));
+    }
     let p = prof.open()?;
     let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
     let gpu = lodforge_gpu::Gpu::new()?;
@@ -484,6 +503,12 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
         baked.push((j, b, key_hex, ms, cached));
     }
     let bake_ms = t_bake.elapsed().as_millis();
+    // Snow grade on the pre-lit albedo (after the cache: changing it re-bakes nothing).
+    let grade = opts.snow_grade(&settings);
+    let graded: usize = baked.iter_mut().map(|(_, b, ..)| lodforge_impostor::shade::grade_snow(&mut b.albedo, &grade)).filter(|&n| n > 0).count();
+    if graded > 0 {
+        println!("  snow grade (knee {}, slope {}): {graded} types changed", grade.knee, grade.slope);
+    }
 
     // Pages.
     let t_enc = Instant::now();
@@ -576,7 +601,7 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
         reports.push(TypeReport { name: j.name.clone(), model: j.model.clone(), refs: 0, grid: b.grid, frame_px: b.frame_px, atlas_px: size, quad_size: b.quad_size(), ms: *ms, cached: *cached, bytes, coverage: m.coverage, model_crc32: j.crc });
         types.push(m);
     }
-    let index = Index { version: lodforge_impostor::manifest::MANIFEST_VERSION, baker_version: bake::BAKER_VERSION, layout: "hemi-oct-z-up".into(), worlds: worlds.to_vec(), pages: page_infos, types };
+    let index = Index { version: lodforge_impostor::manifest::MANIFEST_VERSION, baker_version: bake::BAKER_VERSION, layout: "hemi-oct-z-up".into(), worlds: worlds.to_vec(), pages: page_infos, types, snow_grade: grade.enabled.then_some([grade.knee, grade.slope]) };
     std::fs::write(dir.join("impostors.json"), serde_json::to_string_pretty(&index)?)?;
     Ok(SetReport { types: reports, pages: pages.len(), page_bytes, bake_ms, encode_ms, failed, base_index: HashMap::new() })
 }
@@ -615,6 +640,70 @@ fn dump_pngs(dir: &Path, set: &str, pages: &[atlas::Page]) -> Result<()> {
         write(format!("{set}_page{i:02}_normal.png"), p.width, p.height, &normal)?;
         let depth: Vec<u8> = p.normal_depth.chunks_exact(4).zip(p.albedo.chunks_exact(4)).flat_map(|(c, a)| [c[3], c[3], c[3], a[3].max(64)]).collect();
         write(format!("{set}_page{i:02}_depth.png"), p.width, p.height, &depth)?;
+    }
+    Ok(())
+}
+
+/// `lodforge impostor-stats`: per-type colour statistics of a baked set (diagnostics).
+#[derive(clap::Args)]
+pub struct StatsArgs {
+    /// The set folder (holds impostors.json and the pages).
+    pub set: PathBuf,
+    /// Only types whose name contains this.
+    #[arg(long)]
+    pub filter: Option<String>,
+}
+
+/// Prints, per type: mean albedo RGB over covered texels (alpha >= 128) of the side frames
+/// (the horizon ring and the row next to it), the share of those texels with a channel >= 250,
+/// and the mean coverage.
+pub fn run_stats(a: &StatsArgs) -> Result<()> {
+    let index: lodforge_impostor::manifest::Index = serde_json::from_slice(&std::fs::read(a.set.join("impostors.json"))?)?;
+    let mut pages: HashMap<u32, (u32, Vec<u8>)> = HashMap::new();
+    println!("type\tframe\tR\tG\tB\tclipped\tcoverage\tprelit");
+    for t in &index.types {
+        if let Some(f) = &a.filter
+            && !t.name.contains(f.as_str())
+        {
+            continue;
+        }
+        if !pages.contains_key(&t.page) {
+            let file = a.set.join(format!("page{:02}.dds", t.page));
+            let b = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let info = lodforge_dds::parse(&b).map_err(|e| anyhow::anyhow!("{}: {e:?}", file.display()))?;
+            let img = lodforge_dds::decode(&b, &info, 0).map_err(|e| anyhow::anyhow!("{}: {e:?}", file.display()))?;
+            pages.insert(t.page, (info.width, img.rgba));
+        }
+        let (w, px) = &pages[&t.page];
+        let (n, f) = (t.grid as usize, t.frame_px as usize);
+        let (mut sum, mut k, mut clip, mut cov, mut all) = ([0u64; 3], 0u64, 0u64, 0u64, 0u64);
+        for j in 0..n {
+            for i in 0..n {
+                let ring = i.min(j).min(n - 1 - i).min(n - 1 - j);
+                if ring > 1 {
+                    continue;
+                }
+                for y in 0..f {
+                    for x in 0..f {
+                        let o = (((t.rect_px[1] as usize + j * f + y) * *w as usize) + t.rect_px[0] as usize + i * f + x) * 4;
+                        let p = &px[o..o + 4];
+                        all += 1;
+                        cov += u64::from(p[3]);
+                        if p[3] >= 128 {
+                            k += 1;
+                            for c in 0..3 {
+                                sum[c] += u64::from(p[c]);
+                            }
+                            if p[..3].iter().any(|&c| c >= 250) {
+                                clip += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let m = |c: usize| sum[c] as f64 / k.max(1) as f64;
+        println!("{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{:.3}\t{:.3}\t{}", t.name, t.frame_px, m(0), m(1), m(2), clip as f64 / k.max(1) as f64, cov as f64 / (255.0 * all.max(1) as f64), t.prelit);
     }
     Ok(())
 }
