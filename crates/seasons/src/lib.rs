@@ -80,7 +80,9 @@ pub struct SwapFile {
 pub fn parse_swap_ini(text: &str) -> SwapFile {
     let mut f = SwapFile::default();
     let mut section = String::new();
-    for line in text.lines() {
+    // A UTF-8 byte order mark (Ulvenwald's `_AUT`/`_WIN` files) would hide the first section
+    // header and file its lines under no section; Seasons of Skyrim reads them as usual.
+    for line in text.trim_start_matches('\u{feff}').lines() {
         let line = line.split(';').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
@@ -215,6 +217,13 @@ mod tests {
         assert_eq!(lt[0].1, SwapRef::FormId { object_id: 0x80D, plugin: "Seasonal Landscapes.esp".into() });
         assert_eq!(lt[1], (SwapRef::EditorId("LDirt01".into()), SwapRef::EditorId("LDirtSPR".into())));
         assert_eq!(f.sections["trees"].len(), 1);
+    }
+
+    #[test]
+    fn skips_byte_order_mark() {
+        let f = parse_swap_ini("\u{feff}[Trees]\r\n;TreeAspen01|TreeAspen01_autumn\r\n0x06A9E6~Skyrim.esm|0x01F2E5~Ulvenwald.esp\r\n");
+        assert_eq!(f.sections.keys().collect::<Vec<_>>(), ["trees"]);
+        assert_eq!(f.sections["trees"][0].1, SwapRef::FormId { object_id: 0x1F2E5, plugin: "Ulvenwald.esp".into() });
     }
 
     #[test]

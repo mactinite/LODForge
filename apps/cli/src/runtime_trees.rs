@@ -74,6 +74,9 @@ pub fn run(a: &Args) -> Result<()> {
     let t0 = Instant::now();
     let p = a.profile.open()?;
     let out = a.out.clone().unwrap_or_else(|| a.data.clone());
+    // Keep the earlier build's token, so the rewritten files match the ones left in place.
+    let has_build_txt = |d: &std::path::Path| crate::instances::out_dir(d).join(crate::instances::BUILD_TXT).is_file();
+    crate::instances::init_build_token(if has_build_txt(&out) { &out } else { &a.data });
     let sets_dir = a.data.join("textures").join("LODForge").join("Impostors");
     let worlds: Vec<String> = if a.worlds.is_empty() {
         let mut v: Vec<String> = std::fs::read_dir(&sets_dir).with_context(|| format!("listing {}", sets_dir.display()))?.flatten().filter(|e| e.path().join("impostors.json").is_file()).filter_map(|e| e.file_name().to_str().map(str::to_string)).collect();
