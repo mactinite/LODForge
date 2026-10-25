@@ -798,7 +798,7 @@ pub fn run(a: &Args) -> Result<()> {
                 dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(w)).map(|world| crate::dyn_export::DynWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases, large_columns: large_columns.get(w) })
             })
             .collect();
-        match crate::dyn_export::write(&p, c, &inputs, &dyn_worlds, &undersides, names, &out, a.rt.write_options()) {
+        match crate::dyn_export::write(&p, c, &inputs, &dyn_worlds, &undersides, names, &out, a.rt.write_options(), crate::dyn_export::WriteFlags { large_refs_instanced: !a.rt.runtime_no_large_refs, workarounds: crate::dyndolod_build::workarounds_on(c, &a.dyn_opts) }) {
             Ok(r) => {
                 if !a.json {
                     println!("  {}", r.summary());

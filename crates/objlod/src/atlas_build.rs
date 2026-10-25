@@ -136,18 +136,9 @@ fn node_at<'a>(mut n: &'a mut Node, path: &[bool]) -> &'a mut Node {
 /// 4.1.5o; the public xEdit source sorts by the larger side), then each block goes into the first
 /// free node (depth-first, right before down), which is split into a right and a down node.
 fn fit(blocks: &mut [BinBlock], width: u32, height: u32) -> bool {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for i in 0..blocks.len().saturating_sub(1) {
-            if (blocks[i].h, blocks[i].w) < (blocks[i + 1].h, blocks[i + 1].w) {
-                blocks.swap(i, i + 1);
-                changed = true;
-            }
-        }
-    }
+    // Tallest first, then widest; stable (the same order the former bubble sort gave).
+    blocks.sort_by(|a, b| (b.h, b.w).cmp(&(a.h, a.w)));
     let mut root = Node { w: width, h: height, ..Default::default() };
-    let mut ok = true;
     let mut path = Vec::new();
     for b in blocks.iter_mut() {
         path.clear();
@@ -159,10 +150,11 @@ fn fit(blocks: &mut [BinBlock], width: u32, height: u32) -> bool {
             b.x = n.x;
             b.y = n.y;
         } else {
-            ok = false;
+            // The caller drops blocks and retries; the positions of a failed fit are not used.
+            return false;
         }
     }
-    ok
+    true
 }
 
 /// One atlas texture.
@@ -228,6 +220,17 @@ pub fn layout(textures: &[(String, u32, u32)], width: u32, height: u32, base: &s
     let mut num = 0usize;
     while !blocks.is_empty() {
         let mut rest: Vec<BinBlock> = Vec::new();
+        // Blocks whose total area exceeds the page never fit: drop them (smallest first, the
+        // order the retry loop below drops them in) without trying, so a page costs a few fits
+        // instead of one per dropped block.
+        blocks.sort_by(|a, b| (b.h, b.w).cmp(&(a.h, a.w)));
+        let page_area = u64::from(width) * u64::from(height);
+        let mut area: u64 = blocks.iter().map(|b| u64::from(b.w) * u64::from(b.h)).sum();
+        while blocks.len() > 2 && area > page_area {
+            let b = blocks.pop().unwrap();
+            area -= u64::from(b.w) * u64::from(b.h);
+            rest.push(b);
+        }
         loop {
             if fit(&mut blocks, width, height) {
                 break;
@@ -281,5 +284,89 @@ mod tests {
         assert_eq!((a.x, a.y, a.page), (0, 0, 0));
         assert_eq!(texture_asset_name("Data\\Textures\\LOD\\x.dds"), "Textures\\LOD\\x.dds");
         assert_eq!(texture_asset_name("lod\\x.dds"), "textures\\lod\\x.dds");
+    }
+}
+
+#[cfg(test)]
+mod layout_equivalence {
+    use super::*;
+
+    /// The layout before the area pre-check, sort and early exit (2026-10-24), for comparison.
+    fn old_fit(blocks: &mut [BinBlock], width: u32, height: u32) -> bool {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in 0..blocks.len().saturating_sub(1) {
+                if (blocks[i].h, blocks[i].w) < (blocks[i + 1].h, blocks[i + 1].w) {
+                    blocks.swap(i, i + 1);
+                    changed = true;
+                }
+            }
+        }
+        let mut root = Node { w: width, h: height, ..Default::default() };
+        let mut ok = true;
+        let mut path = Vec::new();
+        for b in blocks.iter_mut() {
+            path.clear();
+            if find_path(&root, b.w, b.h, &mut path) {
+                let n = node_at(&mut root, &path);
+                n.used = true;
+                n.down = Some(Box::new(Node { x: n.x, y: n.y + b.h, w: n.w, h: n.h - b.h, ..Default::default() }));
+                n.right = Some(Box::new(Node { x: n.x + b.w, y: n.y, w: n.w - b.w, h: b.h, ..Default::default() }));
+                b.x = n.x;
+                b.y = n.y;
+            } else {
+                ok = false;
+            }
+        }
+        ok
+    }
+
+    fn old_layout(textures: &[(String, u32, u32)], width: u32, height: u32) -> Vec<(usize, u32, u32)> {
+        let mut out = vec![(usize::MAX, 0, 0); textures.len()];
+        let mut blocks: Vec<BinBlock> = textures.iter().enumerate().map(|(i, (_, w, h))| BinBlock { index: i, w: *w, h: *h, x: 0, y: 0 }).collect();
+        let mut page = 0;
+        while !blocks.is_empty() {
+            let mut rest = Vec::new();
+            loop {
+                if old_fit(&mut blocks, width, height) {
+                    break;
+                }
+                if blocks.len() > 2 {
+                    rest.push(blocks.pop().unwrap());
+                } else {
+                    return out;
+                }
+            }
+            for b in &blocks {
+                out[b.index] = (page, b.x, b.y);
+            }
+            blocks = rest;
+            page += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn same_layout_as_before() {
+        let mut s = 0x1234_5678u64;
+        let mut rnd = |n: u32| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s % u64::from(n)) as u32
+        };
+        for case in 0..40 {
+            let n = 5 + rnd(300) as usize;
+            let t: Vec<(String, u32, u32)> = (0..n).map(|i| (format!("t{i}"), 16 << rnd(6), 16 << rnd(6))).collect();
+            let page = if case % 2 == 0 { 1024 } else { 2048 };
+            let new = layout(&t, page, page, "x");
+            let old = old_layout(&t, page, page);
+            for (i, e) in new.entries.iter().enumerate() {
+                let k = t.iter().position(|x| x.0 == e.texture).unwrap();
+                assert_eq!((e.page, e.x, e.y), old[k], "case {case} entry {i}");
+            }
+            assert_eq!(new.entries.len(), old.iter().filter(|o| o.0 != usize::MAX).count());
+        }
     }
 }

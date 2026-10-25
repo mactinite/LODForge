@@ -34,6 +34,12 @@ pub const GLOW_LEVEL_NONE: u32 = 3;
 pub const CHILD_COPY: u32 = 1 << 13;
 pub const IN_CHILD_WORLDS: u32 = 1 << 14;
 pub const FROM_CHILD_WORLD: u32 = 1 << 15;
+/// The direct enable parent's own XESP opposite flag.
+pub const DIRECT_OPPOSITE: u32 = 1 << 16;
+
+/// `DHDR.flags`: every eligible large reference was instanced (a large reference missing from
+/// `.statics.bin` is in the `.bto` or has no LOD; see `DLRG`).
+pub const HDR_LARGE_REFS_INSTANCED: u16 = 1;
 
 /// `DMDL.flags`.
 pub const MODEL_FULL: u32 = 1;
@@ -77,6 +83,9 @@ pub struct DynItem {
     pub destruction_type: u8,
     pub cell: (i16, i16),
     pub base: FormRef,
+    /// The direct enable parent when it differs from `parent` (the top of the chain); `plugin ==
+    /// NONE` otherwise. Its own opposite flag is [`DIRECT_OPPOSITE`].
+    pub direct_parent: FormRef,
 }
 
 impl DynItem {
@@ -113,9 +122,9 @@ impl DynItem {
         b.i16(self.cell.0);
         b.i16(self.cell.1);
         b.u16(self.base.plugin);
-        b.u16(0);
+        b.u16(self.direct_parent.plugin);
         b.u32(self.base.form);
-        b.u32(0);
+        b.u32(self.direct_parent.form);
     }
 
     fn read(r: &mut Cur<'_>) -> Result<DynItem> {
@@ -129,10 +138,10 @@ impl DynItem {
         r.u16()?;
         let cell = (r.i16()?, r.i16()?);
         let bp = r.u16()?;
-        r.u16()?;
+        let dp = r.u16()?;
         let bf = r.u32()?;
-        r.u32()?;
-        Ok(DynItem { pos, angles, scale, original: FormRef { plugin: op, form: of }, parent: FormRef { plugin: pp, form: pf }, model, flags, hash, destruction_stage, destruction_type, cell, base: FormRef { plugin: bp, form: bf } })
+        let df = r.u32()?;
+        Ok(DynItem { pos, angles, scale, original: FormRef { plugin: op, form: of }, parent: FormRef { plugin: pp, form: pf }, model, flags, hash, destruction_stage, destruction_type, cell, base: FormRef { plugin: bp, form: bf }, direct_parent: FormRef { plugin: dp, form: df } })
     }
 }
 
@@ -157,6 +166,7 @@ pub struct DynHeader {
     pub far_grid: u8,
     pub glow_multiple: f32,
     pub lod_world: String,
+    pub flags: u16,
 }
 
 /// `DCHW` entry.
@@ -197,6 +207,9 @@ pub struct DynFile {
     pub seasons: Vec<(String, Vec<(FormRef, u32)>)>,
     pub resets: Vec<FormRef>,
     pub disabled: Vec<FormRef>,
+    /// `DMIG`: persistent large references DynDOLOD's large-reference workaround toggles (its
+    /// `[Markers]` entries, this world and its own-LOD child worlds), for save migration.
+    pub migration: Vec<FormRef>,
     pub bases: Vec<FormRef>,
     pub child_worlds: Vec<ChildWorld>,
     pub underside: Option<Underside>,
@@ -255,16 +268,20 @@ impl DynFile {
     }
 
     /// Adds an item. `angles` in radians as the plugin stores them; `parent` `None` without an
-    /// enable parent.
+    /// enable parent; `direct` the direct enable parent when it differs from `parent`.
     #[allow(clippy::too_many_arguments)]
-    pub fn add(&mut self, pos: [f32; 3], angles: [f32; 3], scale: f32, original: (&str, u32), parent: Option<(&str, u32)>, model: u32, flags: u32, cell: (i16, i16), base: (&str, u32)) {
+    pub fn add(&mut self, pos: [f32; 3], angles: [f32; 3], scale: f32, original: (&str, u32), parent: Option<(&str, u32)>, model: u32, flags: u32, cell: (i16, i16), base: (&str, u32), direct: Option<(&str, u32)>) {
         let o = self.form(original.0, original.1);
         let p = match parent {
             Some((n, f)) => self.form(n, f),
             None => FormRef { plugin: NONE, form: 0 },
         };
         let b = self.form(base.0, base.1);
-        let item = DynItem { pos, angles: angles.map(angle_u16), scale: f16::from_f32(scale), original: o, parent: p, model, flags, hash: ref_hash(original.0, original.1), destruction_stage: 0xFF, destruction_type: 0, cell, base: b };
+        let d = match direct {
+            Some((n, f)) => self.form(n, f),
+            None => FormRef { plugin: NONE, form: 0 },
+        };
+        let item = DynItem { pos, angles: angles.map(angle_u16), scale: f16::from_f32(scale), original: o, parent: p, model, flags, hash: ref_hash(original.0, original.1), destruction_stage: 0xFF, destruction_type: 0, cell, base: b, direct_parent: d };
         self.cells.entry(cell_of(pos)).or_default().push(item);
     }
 
@@ -283,7 +300,7 @@ impl DynFile {
         b.i16(h.south_west.1);
         b.u8(h.near_grid);
         b.u8(h.far_grid);
-        b.u16(0);
+        b.u16(h.flags);
         b.f32(h.glow_multiple);
         b.str(&h.lod_world);
         chunks.push(Chunk { tag: *b"DHDR", data: b.0 });
@@ -318,7 +335,7 @@ impl DynFile {
             }
             chunks.push(Chunk { tag: *b"DSEA", data: b.0 });
         }
-        for (tag, list) in [(b"DRST", &self.resets), (b"DDIS", &self.disabled), (b"DBAS", &self.bases)] {
+        for (tag, list) in [(b"DRST", &self.resets), (b"DDIS", &self.disabled), (b"DBAS", &self.bases), (b"DMIG", &self.migration)] {
             let mut b = Buf::default();
             form_list(&mut b, list);
             chunks.push(Chunk { tag: *tag, data: b.0 });
@@ -385,7 +402,9 @@ impl DynFile {
         if let Some(ch) = c.chunk(b"DHDR") {
             let mut r = Cur::new(&ch.data);
             let world = read_form(&mut r)?;
-            f.header = DynHeader { world, south_west: (r.i16()?, r.i16()?), near_grid: r.u8()?, far_grid: r.u8()?, glow_multiple: { r.u16()?; r.f32()? }, lod_world: r.str()? };
+            let south_west = (r.i16()?, r.i16()?);
+            let (near_grid, far_grid, flags) = (r.u8()?, r.u8()?, r.u16()?);
+            f.header = DynHeader { world, south_west, near_grid, far_grid, flags, glow_multiple: r.f32()?, lod_world: r.str()? };
         }
         if let Some(ch) = c.chunk(b"DMDL") {
             let mut r = Cur::new(&ch.data);
@@ -412,7 +431,7 @@ impl DynFile {
                 f.seasons.push((code, v));
             }
         }
-        for (tag, list) in [(b"DRST", &mut f.resets), (b"DDIS", &mut f.disabled), (b"DBAS", &mut f.bases)] {
+        for (tag, list) in [(b"DRST", &mut f.resets), (b"DDIS", &mut f.disabled), (b"DBAS", &mut f.bases), (b"DMIG", &mut f.migration)] {
             if let Some(ch) = c.chunk(tag) {
                 *list = read_form_list(&mut Cur::new(&ch.data))?;
             }

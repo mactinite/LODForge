@@ -519,9 +519,9 @@ Record (64 bytes), one per original reference that gets dynamic LOD (or child-wo
 | 46 | u16 | reserved, 0 |
 | 48 | i16[2] | cell of the original (its `CELL` grid; for persistent references the cell their position is in) |
 | 52 | u16 | base_plugin (`PLUG` index of the base the item shows, after season-independent swaps) |
-| 54 | u16 | reserved, 0 |
+| 54 | u16 | direct_parent_plugin (`PLUG` index of the direct enable parent when it differs from `parent` (the chain has more links); 0xFFFF otherwise) |
 | 56 | u32 | base_form |
-| 60 | u32 | reserved, 0 |
+| 60 | u32 | direct_parent_form (local form id of that direct parent; 0 = none). Its own opposite flag is bit 16 |
 
 Flags:
 
@@ -541,13 +541,16 @@ Flags:
 | 13 | child_copy: a child-world reference copied into this world (the original lives in a child world). Drawn while the item's cell is attached in this world (where DynDOLOD.esm placed a plain reference); beyond the loaded cells its LOD is in the `.bto`. Grid bits are 0 and no parent is set |
 | 14 | in_child_worlds: also shown while the player is in a child world that uses this world's LOD |
 | 15 | from_child_world: the item was produced for a child world's own dynamic LOD |
-| 16-31 | reserved, 0 |
+| 16 | direct_opposite: the direct parent's own XESP opposite flag |
+| 17-31 | reserved, 0 |
 
 Meta chunks (besides `WRLD`, `PLUG`, `PARM`, `BTOK`):
 
 **`DHDR`**: `u16 world_plugin`, `u16 reserved`, `u32 world_form` (the worldspace record),
 `i16 sw_x`, `i16 sw_y` (LOD origin cell, lodsettings), `u8 near_grid`, `u8 far_grid` (defaults,
-odd diameters in cells), `u16 flags` (0), `f32 glow_multiple`, `str lod_world` (EditorID whose LOD
+odd diameters in cells), `u16 flags` (bit 0: every eligible large reference was instanced, so a large
+reference missing from `.statics.bin` is in the `.bto` or has no LOD; off for outputs updated by
+`runtime-dyn`, whose large references keep the earlier routing), `f32 glow_multiple`, `str lod_world` (EditorID whose LOD
 this world uses; the world itself for a main world).
 
 **`DMDL`** (models): `u32 count`, then per entry: `u32 flags` (bit 0 full model, bit 1 animated,
@@ -561,11 +564,16 @@ season `str code` (`SPR`...), `u32 n`, then `n` x (`u16 plugin`, `u16 reserved`,
 `u32 model`): the `DMDL` entry the item of that original uses in that season.
 
 **`DRST`** (reset list, F6), **`DDIS`** (disabled list, F7), **`DBAS`** (bases that need Has Distant
-LOD, F8): each `u32 n`, then `n` x (`u16 plugin`, `u16 reserved`, `u32 form`).
+LOD, F8), **`DMIG`** (migration large references, since 1.7): each `u32 n`, then `n` x (`u16 plugin`, `u16 reserved`, `u32 form`).
 - `DRST`: persistent references with the Is Full LOD flag whose LOD this build provides (object,
   tree or dynamic LOD). DynDOLOD.esp overrides them without the flag; without that plugin the
   runtime clears the flag (`0x10000`) when the form loads, and resets them (F6).
 - `DDIS`: originals of `replace` items, to be disabled.
+- `DMIG` (migration large references): the persistent large references DynDOLOD's large-reference
+  workaround toggles, i.e. the `plugin;id` entries of `[Markers]` in `DynDOLOD_NG_<World>.txt`
+  (this world and its child worlds with their own LOD, all cells merged, sorted, no duplicates);
+  empty when the workarounds are off. Used once to re-enable what an old DynDOLOD save left
+  disabled; written whether or not DynDOLOD.esp is.
 - `DBAS`: bases of this worldspace's LOD references that lack Has Distant LOD (`0x8000`); the
   runtime sets the flag at data load (F8). (DynDOLOD's `[Bases]` list holds the same set when its
   DLL handles it.)
@@ -600,6 +608,11 @@ reference is not instanced there.
 default, next to the `.dyn.bin` files. `--runtime-no-dyndolod-plugins` leaves them out (Occlusion.esp
 is still written) for a runtime that draws everything from the `.dyn.bin` files; use it once the
 plugin covers dynamic LOD, the lists and large references.
+
+`lodforge runtime-dyn --data <earlier output> [--out <staging>]` brings an earlier runtime output
+to 1.7 without a full build: fresh export, `.dyn.bin` files, `StaticMeshes.bin` rebuilt with their
+models (+ static atlas pages), `BTOK` stamped into every runtime file, `Build.txt`. Its `.bto`
+files are not touched, so `DHDR` bit 0 is off.
 
 ### Build token (`BTOK`, all files since 1.7) and `Build.txt`
 

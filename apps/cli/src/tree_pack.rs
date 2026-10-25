@@ -194,7 +194,16 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
     }
     let mut loaded: Vec<(String, String, Vec<Part>)> = Vec::new();
     let mut sizes: BTreeMap<(u8, String), (u32, u32)> = BTreeMap::new();
-    for (key, (model, shapes, classes)) in models {
+    let t_load = Instant::now();
+    let mut slow: Vec<(f64, String)> = Vec::new();
+    for (mi, (key, (model, shapes, classes))) in models.iter().enumerate() {
+        let t_model = Instant::now();
+        if std::env::var_os("LODFORGE_PACK_TRACE").is_some() {
+            eprintln!("  pack: {mi} {model}");
+        }
+        if mi % 500 == 0 && std::env::var_os("LODFORGE_PACK_PROGRESS").is_some() {
+            eprintln!("  pack: model {mi} of {} after {:.1} s ({model})", models.len(), t_load.elapsed().as_secs_f64());
+        }
         let Some(lm) = load(model) else { continue };
         let mut parts = Vec::new();
         for (i, part) in lm.parts.into_iter().enumerate() {
@@ -250,6 +259,14 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
         if !parts.is_empty() {
             loaded.push((key.clone(), model.clone(), parts));
         }
+        let dt = t_model.elapsed().as_secs_f64();
+        if dt > 1.0 {
+            slow.push((dt, model.clone()));
+        }
+    }
+    if std::env::var_os("LODFORGE_PACK_PROGRESS").is_some() {
+        slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+        eprintln!("  pack: {} models loaded in {:.1} s; slowest: {:?}", models.len(), t_load.elapsed().as_secs_f64(), &slow[..slow.len().min(8)]);
     }
     rep.textures = sizes.len();
     // Atlas: the object LOD planner and renderer, largest tiles first; one page family per LOD

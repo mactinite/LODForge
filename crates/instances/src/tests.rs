@@ -250,15 +250,16 @@ fn dyn_round_trip() {
     let mut c = common("Tamriel", "");
     c.token = "ABC123".into();
     let mut f = DynFile::new(c);
-    f.header = DynHeader { world: FormRef { plugin: 0, form: 0x3C }, south_west: (-96, -96), near_grid: 11, far_grid: 21, glow_multiple: 1.75, lod_world: "Tamriel".into() };
+    f.header = DynHeader { world: FormRef { plugin: 0, form: 0x3C }, south_west: (-96, -96), near_grid: 11, far_grid: 21, glow_multiple: 1.75, lod_world: "Tamriel".into(), flags: HDR_LARGE_REFS_INSTANCED };
     f.common.plugin_index("Skyrim.esm");
     let m = f.model("a", || DynModel { flags: MODEL_FULL, pack: [3, NO_MESH, 4, NO_MESH], bounds: [-1.0, -2.0, -3.0, 1.0, 2.0, 3.0], model: r"meshes\a.nif".into(), lod: [r"meshes\lod\a_lod_0.nif".into(), String::new(), String::new()] });
     assert_eq!(f.model("a", DynModel::default), m);
-    f.add([5000.0, -10.0, 30.0], [0.1, 0.0, 3.0], 1.5, ("Skyrim.esm", 0x15B13), Some(("Skyrim.esm", 0x7265C)), m, GRID_FAR | LARGE | INITIALLY_ENABLED, (1, -1), ("Skyrim.esm", 0xB23FC));
-    f.add([5100.0, 20.0, 30.0], [0.0; 3], 1.0, ("Dawnguard.esm", 0x12), None, m, GRID_NEVER_FADE | (GLOW_LEVEL_NONE << GLOW_LEVEL_SHIFT), (1, 0), ("Skyrim.esm", 0x10));
+    f.add([5000.0, -10.0, 30.0], [0.1, 0.0, 3.0], 1.5, ("Skyrim.esm", 0x15B13), Some(("Skyrim.esm", 0x7265C)), m, GRID_FAR | LARGE | INITIALLY_ENABLED, (1, -1), ("Skyrim.esm", 0xB23FC), Some(("Skyrim.esm", 0x7265D)));
+    f.add([5100.0, 20.0, 30.0], [0.0; 3], 1.0, ("Dawnguard.esm", 0x12), None, m, GRID_NEVER_FADE | (GLOW_LEVEL_NONE << GLOW_LEVEL_SHIFT), (1, 0), ("Skyrim.esm", 0x10), None);
     f.seasons.push(("WIN".into(), vec![(FormRef { plugin: 0, form: 0x15B13 }, m)]));
     f.resets.push(FormRef { plugin: 0, form: 0x33DCB });
     f.disabled.push(FormRef { plugin: 1, form: 0x12 });
+    f.migration.push(FormRef { plugin: 0, form: 0x15B13 });
     f.child_worlds.push(ChildWorld { world: FormRef { plugin: 0, form: 0x1A26F }, flags: CHILD_USES_PARENT_LOD | CHILD_HAS_BOUNDS, bounds: [1, -4, 9, 3], editor_id: "WhiterunWorld".into() });
     f.underside = Some(Underside { model: r"meshes\terrain\tamriel\tamriel_underside.nif".into(), height: 500.0, worlds: vec![FormRef { plugin: 0, form: 0x3C }] });
     f.large.insert((1, -1), vec![LargeRef { reference: FormRef { plugin: 0, form: 0x15B13 }, lod: LRG_INST4 | LRG_DYN, bounds: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] }]);
@@ -270,7 +271,7 @@ fn dyn_round_trip() {
         assert_eq!(back.header, f.header);
         assert_eq!(back.models, f.models);
         assert_eq!(back.seasons, f.seasons);
-        assert_eq!((&back.resets, &back.disabled, &back.bases), (&f.resets, &f.disabled, &f.bases));
+        assert_eq!((&back.resets, &back.disabled, &back.bases, &back.migration), (&f.resets, &f.disabled, &f.bases, &f.migration));
         assert_eq!(back.child_worlds, f.child_worlds);
         assert_eq!(back.underside, f.underside);
         assert_eq!(back.large, f.large);
@@ -282,4 +283,17 @@ fn dyn_round_trip() {
     assert_eq!(it.grid(), GRID_FAR);
     assert!(it.has_parent());
     assert!(!f.cells[&(1, 0)][0].has_parent());
+}
+
+#[test]
+fn dyn_direct_parent_offsets() {
+    use crate::dynlod::*;
+    let mut f = DynFile::new(common("W", ""));
+    f.add([0.0; 3], [0.0; 3], 1.0, ("A.esm", 1), Some(("A.esm", 2)), 0, 0, (0, 0), ("A.esm", 3), Some(("B.esm", 4)));
+    let bytes = f.to_bytes(WriteOptions { zstd: None, crc: true }).unwrap();
+    let c = crate::container::Container::parse(&bytes, crate::container::Kind::Dyn).unwrap();
+    let raw = c.payload(&c.index[0]).unwrap();
+    assert_eq!(raw.len(), 64);
+    assert_eq!(u16::from_le_bytes([raw[54], raw[55]]), 1); // B.esm
+    assert_eq!(u32::from_le_bytes(raw[60..64].try_into().unwrap()), 4);
 }

@@ -36,6 +36,15 @@ pub struct DynWorld<'a> {
     pub large_columns: Option<&'a HashMap<u32, u16>>,
 }
 
+/// What the build did that the `.dyn.bin` files record.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WriteFlags {
+    /// Every eligible large reference is instanced (`DHDR` flag).
+    pub large_refs_instanced: bool,
+    /// DynDOLOD's large-reference workarounds apply (its `[Markers]` would be written): fill `DMIG`.
+    pub workarounds: bool,
+}
+
 #[derive(Default, Debug)]
 pub struct Report {
     pub files: usize,
@@ -47,6 +56,8 @@ pub struct Report {
     pub large_merged: usize,
     pub resets: usize,
     pub disabled: usize,
+    pub migration: usize,
+    pub direct_parents: usize,
     /// Items whose original or base has no defining plugin (left out).
     pub unnamed: usize,
     pub bytes: usize,
@@ -55,8 +66,8 @@ pub struct Report {
 impl Report {
     pub fn summary(&self) -> String {
         format!(
-            "runtime dynamic LOD: {} files, {} items + {} child-world copies, {} models; {} large references ({} instanced, {} merged in .bto only); {} resets, {} disabled; {} without a plugin left out; {:.2} MB",
-            self.files, self.items, self.copies, self.models, self.large, self.large_instanced, self.large_merged, self.resets, self.disabled, self.unnamed, self.bytes as f64 / 1e6
+            "runtime dynamic LOD: {} files, {} items ({} with a direct enable parent below the chain top) + {} child-world copies, {} models; {} large references ({} instanced, {} merged in .bto only); {} resets, {} disabled, {} migration large refs; {} without a plugin left out; {:.2} MB",
+            self.files, self.items, self.direct_parents, self.copies, self.models, self.large, self.large_instanced, self.large_merged, self.resets, self.disabled, self.migration, self.unnamed, self.bytes as f64 / 1e6
         )
     }
 }
@@ -148,7 +159,7 @@ fn instanced(out: &Path, world: &str) -> Result<HashMap<(String, u32), u16>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, names: &FormNames, out: &Path, opts: lodforge_instances::WriteOptions) -> Result<Report> {
+pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, names: &FormNames, out: &Path, opts: lodforge_instances::WriteOptions, wf: WriteFlags) -> Result<Report> {
     let dir = crate::instances::out_dir(out);
     std::fs::create_dir_all(&dir)?;
     let mut rep = Report::default();
@@ -161,7 +172,7 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
         let sw = crate::dyndolod_build::south_west(p, &world.editor_id);
         let world_ref = names.split(world.form_id).map(|(n, l)| f.form(n, l)).unwrap_or_default();
         let lod_world = if world.parent_flags & 0x02 != 0 { world.parent.and_then(|pid| all_worlds.iter().find(|x| x.form_id == pid)).map_or(world.editor_id.clone(), |x| x.editor_id.clone()) } else { world.editor_id.clone() };
-        f.header = DynHeader { world: world_ref, south_west: (sw.0 as i16, sw.1 as i16), near_grid: near as u8, far_grid: far as u8, glow_multiple: 1.75, lod_world };
+        f.header = DynHeader { world: world_ref, south_west: (sw.0 as i16, sw.1 as i16), near_grid: near as u8, far_grid: far as u8, glow_multiple: 1.75, lod_world, flags: if wf.large_refs_instanced { HDR_LARGE_REFS_INSTANCED } else { 0 } };
         let in_child = all_worlds.iter().any(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 != 0);
         let mut dyn_ids = HashSet::new();
         for d in w.dynamic {
@@ -188,8 +199,16 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
                 flags |= FROM_CHILD_WORLD;
             }
             let parent = if d.enable_parent != 0 { names.split(d.enable_parent) } else { None };
+            // The direct parent too when the chain has more links (a script can toggle a middle one).
+            let direct = if d.enable_parent != 0 && r.enable_parent && r.enable_parent_id != d.enable_parent { names.split(r.enable_parent_id) } else { None };
+            if direct.is_some() && r.enable_parent_flags & 1 != 0 {
+                flags |= DIRECT_OPPOSITE;
+            }
             let cell = r.cell.map_or_else(|| cell_of(r.position), |(x, y)| (x as i16, y as i16));
-            f.add(r.position, r.rotation, if r.has_scale { r.scale } else { 1.0 }, (on, ol), parent, model, flags, cell, (bn, bl));
+            f.add(r.position, r.rotation, if r.has_scale { r.scale } else { 1.0 }, (on, ol), parent, model, flags, cell, (bn, bl), direct);
+            if direct.is_some() {
+                rep.direct_parents += 1;
+            }
             if d.replace {
                 let o = f.form(on, ol);
                 f.disabled.push(o);
@@ -229,7 +248,7 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
             if full {
                 flags |= FULL;
             }
-            f.add(pl.position, pl.rotation, if pl.has_scale { pl.scale } else { 1.0 }, (on, ol), None, m, flags, cell_of(pl.position), (bn, bl));
+            f.add(pl.position, pl.rotation, if pl.has_scale { pl.scale } else { 1.0 }, (on, ol), None, m, flags, cell_of(pl.position), (bn, bl), None);
             rep.copies += 1;
         }
         // Persistent Is Full LOD references whose LOD this build provides: the runtime clears the
@@ -300,9 +319,28 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
             f.large.entry((cell.0 as i16, cell.1 as i16)).or_default().push(LargeRef { reference, lod, bounds });
             rep.large += 1;
         }
+        // DynDOLOD's large-reference workaround: the persistent large references its markers toggle
+        // (`[Markers]`), in this world and its child worlds with their own LOD.
+        if wf.workarounds {
+            let mut ids: Vec<u32> = lodforge_dyndolod::largerefs::marker_cells(&p.load_order, world, &c.bases).into_iter().flat_map(|m| m.persistent).collect();
+            for x in all_worlds.iter().filter(|x| x.parent == Some(world.form_id) && x.parent_flags & 0x02 == 0) {
+                if crate::dyndolod_build::child_config(c, &x.editor_id, &world.editor_id).0.is_some() {
+                    ids.extend(lodforge_dyndolod::largerefs::marker_cells(&p.load_order, x, &c.bases).into_iter().flat_map(|m| m.persistent));
+                }
+            }
+            ids.sort_unstable();
+            ids.dedup();
+            for id in ids {
+                if let Some((n, l)) = names.split(id) {
+                    let r = f.form(n, l);
+                    f.migration.push(r);
+                }
+            }
+        }
+        rep.migration += f.migration.len();
         rep.resets += f.resets.len();
         rep.disabled += f.disabled.len();
-        if f.items() == 0 && f.large.is_empty() && f.underside.is_none() && f.resets.is_empty() {
+        if f.items() == 0 && f.large.is_empty() && f.underside.is_none() && f.resets.is_empty() && f.migration.is_empty() {
             continue;
         }
         f.finish();
