@@ -545,7 +545,8 @@ Flags:
 | 17 | parent_copy: a parent-world reference in a `<Child>.dyn.bin` (see "Child worldspaces" below) |
 | 18 | tree: the base is a tree (`TREE`, or a `STAT` with tree LOD); when `DMDL` slot 0 has no mesh (billboard LOD4), draw the impostor type at offset 46 (or the parent's `.trees.bin` record of the same reference) |
 | 19 | twin: a `parent_copy` duplicating a child-world reference (same model and place, or a known pair); the twin is in the direct parent fields (54, 60). Hide the item while the twin's 3D is loaded |
-| 20-31 | reserved, 0 |
+| 20 | parent_instanced: a `parent_copy` outside the child's bounds whose reference the parent's `.statics.bin` also instances (same `hash` = the records' `ref_hash`). Its instanced levels are left out of the `DMDL` slots; with none left the item draws nothing itself and is there for its base (the runtime shows the base's full model near the player and hides the parent's instances of that hash meanwhile) |
+| 21-31 | reserved, 0 |
 
 Meta chunks (besides `WRLD`, `PLUG`, `PARM`, `BTOK`):
 
@@ -612,7 +613,9 @@ worldspace has** (mods add child cells far beyond the configured bounds: Whiteru
 cells, 93 of them outside `4,-3,7,1`; the engine hides the parent's `.bto` in all of them).
 Outside the bounds the runtime still draws the parent's own instances (`.statics.bin`) and
 impostors (`.trees.bin`) itself, so a copy there carries only the levels merged into the parent's
-`.bto` (the other `DMDL` slots are empty) and no tree the `.trees.bin` draws. Except the parent's
+`.bto` (the other `DMDL` slots are empty) and no tree the `.trees.bin` draws; it has flag 20
+`parent_instanced` when some of its levels are the parent's instances, and is written even when
+all are (no `DMDL` slots left), so the runtime knows the base. Except the parent's
 dynamic items already flagged `in_child_worlds` (drawn from the parent's file). Among them:
 - **child content copied into the parent** (the city's own references, as LOD in the parent):
   the item's original is the child reference itself, so the usual rule (hidden while the

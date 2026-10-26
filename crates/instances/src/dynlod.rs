@@ -46,6 +46,11 @@ pub const TREE: u32 = 1 << 18;
 /// pair): the twin is in the `direct_parent` fields (54, 60). Hide the item while the twin's 3D
 /// is loaded.
 pub const TWIN: u32 = 1 << 19;
+/// A `parent_copy` outside the child's bounds whose reference the parent's `.statics.bin` also
+/// instances. Its instanced LOD levels are left out of the item's `DMDL` slots; with none left the
+/// item has no LOD of its own. The runtime finds those instances by `hash` (= the records'
+/// `ref_hash`); the item is there so the base is known, e.g. to show the full model near the player.
+pub const PARENT_INSTANCED: u32 = 1 << 20;
 /// The direct enable parent's own XESP opposite flag.
 pub const DIRECT_OPPOSITE: u32 = 1 << 16;
 

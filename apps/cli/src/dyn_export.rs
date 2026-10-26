@@ -381,19 +381,27 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
                 // Outside the bounds (a cell the child has beyond them) the runtime still draws the
                 // parent's own instances and impostors; only the levels merged into the parent's
                 // `.bto` (which the engine hides in the child's cells) need a copy.
+                // Instanced levels are cleared; the item stays (flag `parent_instanced`) even with none
+                // left, so the runtime knows the base: it shows the full model near the player and
+                // hides the parent's instances of the same `hash` meanwhile.
                 let mut columns = l.columns.clone();
+                let mut parent_instanced = false;
                 if !inside {
                     let key = names.split(l.ref_id).map(|(n, lf)| (n.to_ascii_lowercase(), lf));
+                    // A tree the parent's `.trees.bin` draws: no LOD of its own here, but the item
+                    // (with its impostor type) lets the runtime treat it as a copy near the player.
                     if key.as_ref().is_some_and(|k| parent_trees.contains(k)) {
-                        continue;
+                        columns = Default::default();
+                        parent_instanced = true;
                     }
                     let bits = key.and_then(|k| inst.get(&k).copied()).unwrap_or(0);
                     for (k, bit) in [(0, LRG_INST4), (1, LRG_INST8), (2, LRG_INST16)] {
                         if bits & bit != 0 {
                             columns[k].clear();
+                            parent_instanced = true;
                         }
                     }
-                    if columns[..3].iter().all(|c| c.is_empty()) {
+                    if !parent_instanced && columns[..3].iter().all(|c| c.is_empty()) {
                         continue;
                     }
                     counts.4 += 1;
@@ -425,6 +433,9 @@ pub fn write(p: &Profile, c: &Config, worlds: &[DynWorld<'_>], all_worlds: &[Wor
                 if twin.is_some() {
                     flags |= TWIN;
                     counts.0 += 1;
+                }
+                if parent_instanced {
+                    flags |= PARENT_INSTANCED;
                 }
                 if orig != l.ref_id {
                     counts.1 += 1;
