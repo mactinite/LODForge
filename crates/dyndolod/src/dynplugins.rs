@@ -939,7 +939,7 @@ mod tests {
     }
 
     fn dynamic(id: u32, model: &str) -> DynamicRef {
-        DynamicRef { ref_id: id, base: 0x800, grid: crate::rules::Grid::NearLod, initially_enabled: true, enable_parent: 0, opposite_parent: false, large: false, persistent: false, replace: false, model: model.into() }
+        DynamicRef { ref_id: id, base: 0x800, grid: crate::rules::Grid::NearLod, initially_enabled: true, enable_parent: 0, opposite_parent: false, large: false, persistent: false, replace: false, model: model.into(), columns: Default::default() }
     }
 
     #[test]

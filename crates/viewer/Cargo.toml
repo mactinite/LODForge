@@ -9,6 +9,7 @@ description = "LOD inspection viewer: renders a worldspace's generated LOD as th
 lodforge-nif.workspace = true
 lodforge-dds.workspace = true
 lodforge-gpu.workspace = true
+lodforge-impostor.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 egui.workspace = true

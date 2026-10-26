@@ -32,6 +32,8 @@ pub struct LoadOptions {
     pub terrain: bool,
     pub objects: bool,
     pub trees: bool,
+    /// The LODForge runtime impostor preview (`impostors` layer).
+    pub impostors: bool,
     /// Files nearest this point (x, y) load first.
     pub start: [f32; 2],
 }
@@ -45,6 +47,7 @@ impl Default for LoadOptions {
             terrain: true,
             objects: true,
             trees: true,
+            impostors: false,
             start: [0.0, 0.0],
         }
     }
@@ -104,9 +107,18 @@ pub struct GpuTrees {
     pub unknown_types: usize,
 }
 
+/// The impostor preview: instances grouped by atlas page, one texture bind group per page.
+pub struct GpuImpostors {
+    pub buffer: wgpu::Buffer,
+    pub pages: Vec<(Range<u32>, Arc<TextureBindGroup>)>,
+    pub count: u32,
+    pub types: usize,
+}
+
 pub enum LoadEvent {
     Quad(Box<GpuQuad>),
     Trees(Box<GpuTrees>),
+    Impostors(Box<GpuImpostors>),
     Message(String),
     Done,
 }
@@ -117,6 +129,7 @@ pub struct Scene {
     pub quads: Vec<GpuQuad>,
     pub by_id: HashMap<(QuadId, FileKind), usize>,
     pub trees: Option<GpuTrees>,
+    pub impostors: Option<GpuImpostors>,
     pub present_terrain: HashSet<QuadId>,
     pub present_objects: HashSet<QuadId>,
     pub bounds: Aabb,
@@ -136,7 +149,7 @@ impl Scene {
     }
 
     pub fn loaded(&self) -> usize {
-        self.quads.len() + usize::from(self.trees.is_some())
+        self.quads.len() + usize::from(self.trees.is_some()) + usize::from(self.impostors.is_some())
     }
 
     pub fn apply(&mut self, ev: LoadEvent) {
@@ -155,6 +168,7 @@ impl Scene {
                 self.quads.push(*q);
             }
             LoadEvent::Trees(t) => self.trees = Some(*t),
+            LoadEvent::Impostors(t) => self.impostors = Some(*t),
             LoadEvent::Message(m) => self.messages.push(m),
             LoadEvent::Done => self.done = true,
         }
@@ -307,7 +321,7 @@ fn plan(world: &WorldFiles, o: &LoadOptions) -> Vec<(QuadFile, FileKind)> {
 
 /// Number of files the loader will stream (quads plus one for the trees).
 pub fn total_items(world: &WorldFiles, o: &LoadOptions) -> usize {
-    plan(world, o).len() + usize::from(o.trees && !world.trees.is_empty())
+    plan(world, o).len() + usize::from(o.trees && !world.trees.is_empty()) + usize::from(o.impostors)
 }
 
 /// Drops top mips of the terrain textures per level until they fit the budget.
@@ -368,6 +382,9 @@ pub fn start(loader: Loader) -> Receiver<LoadEvent> {
             }
             if loader.options.trees {
                 load_trees(&loader, &tx);
+            }
+            if loader.options.impostors {
+                load_impostors(&loader, &tx);
             }
             items.par_iter().for_each_with(tx.clone(), |tx, (f, kind)| {
                 if loader.cancel.load(Ordering::Relaxed) {
@@ -565,4 +582,40 @@ fn load_trees(l: &Loader, tx: &Sender<LoadEvent>) {
         blocks,
         unknown_types,
     })));
+}
+
+/// Loads the worldspace's impostor set and preview instances (see [`crate::impostors`]).
+fn load_impostors(l: &Loader, tx: &Sender<LoadEvent>) {
+    let w = &l.world.world;
+    let msg = |m: String| {
+        let _ = tx.send(LoadEvent::Message(m));
+    };
+    let Some(index) = l.files.read(&crate::impostors::index_path(w)).and_then(|b| crate::impostors::parse_index(&b)) else {
+        msg(format!("impostors: no readable {}", crate::impostors::index_path(w)));
+        return;
+    };
+    let Some(inst) = l.files.read(&crate::impostors::preview_path(w)).and_then(|b| crate::impostors::parse_preview(&b)) else {
+        msg(format!("impostors: no readable {}", crate::impostors::preview_path(w)));
+        return;
+    };
+    let (gpu, ranges, unknown) = crate::impostors::instances(&inst, &index);
+    if unknown > 0 {
+        msg(format!("impostors: {unknown} instances of unknown types"));
+    }
+    let pages = index
+        .pages
+        .iter()
+        .zip(ranges)
+        .map(|(p, r)| {
+            let albedo = l.cache.get(l.files.as_ref(), &p.albedo, true);
+            let nd = l.cache.get(l.files.as_ref(), &p.normal_depth, false);
+            if albedo.is_none() || nd.is_none() {
+                msg(format!("impostors: page {} textures missing ({}, {})", p.index, p.albedo, p.normal_depth));
+            }
+            (r, Arc::new(l.layouts.texture_bind_group(&l.device, albedo, nd, false)))
+        })
+        .collect();
+    let contents: Vec<crate::impostors::ImpostorInstance> = if gpu.is_empty() { vec![bytemuck::Zeroable::zeroed()] } else { gpu.clone() };
+    let buffer = l.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("impostors"), contents: bytemuck::cast_slice(&contents), usage: wgpu::BufferUsages::VERTEX });
+    let _ = tx.send(LoadEvent::Impostors(Box::new(GpuImpostors { buffer, pages, count: gpu.len() as u32, types: index.types.len() })));
 }

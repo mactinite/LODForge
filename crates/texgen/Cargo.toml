@@ -11,3 +11,4 @@ bytemuck.workspace = true
 lodforge-gpu.workspace = true
 lodforge-nif.workspace = true
 lodforge-dds.workspace = true
+half.workspace = true

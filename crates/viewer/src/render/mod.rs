@@ -288,6 +288,14 @@ impl LineVertex {
     };
 }
 
+/// [`crate::impostors::ImpostorInstance`]: pos + yaw, centre + scale, rect, (quad, grid, frame px,
+/// flags), tint (rgb, w pre-lit).
+const IMPOSTOR_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: std::mem::size_of::<crate::impostors::ImpostorInstance>() as u64,
+    step_mode: wgpu::VertexStepMode::Instance,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4],
+};
+
 const TREE_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: std::mem::size_of::<crate::trees::TreeInstance>() as u64,
     step_mode: wgpu::VertexStepMode::Instance,
@@ -553,6 +561,8 @@ pub struct Frame<'a> {
     pub shapes: Vec<DrawShape<'a>>,
     /// Tree billboard instances, their count and the atlas bind group.
     pub trees: Option<(&'a wgpu::Buffer, u32, &'a wgpu::BindGroup)>,
+    /// Impostor instances (one buffer) and per atlas page its instance range and bind group.
+    pub impostors: Option<(&'a wgpu::Buffer, Vec<(Range<u32>, &'a wgpu::BindGroup)>)>,
     /// Lines tested against depth.
     pub lines: Vec<LineVertex>,
     /// Lines drawn over everything.
@@ -580,6 +590,7 @@ pub struct Renderer {
     mesh_nocull: wgpu::RenderPipeline,
     mesh_blend: wgpu::RenderPipeline,
     tree: wgpu::RenderPipeline,
+    impostor: wgpu::RenderPipeline,
     sky: wgpu::RenderPipeline,
     line_depth: wgpu::RenderPipeline,
     line_overlay: wgpu::RenderPipeline,
@@ -728,6 +739,27 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let impostor = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("impostor"),
+            layout: Some(&tree_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_impostor"),
+                buffers: &[IMPOSTOR_INSTANCE_LAYOUT],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: depth(true, wgpu::CompareFunction::GreaterEqual),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_impostor"),
+                targets: &[target(None)],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
         let line = |label: &str, compare: wgpu::CompareFunction| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -803,6 +835,7 @@ impl Renderer {
             mesh_nocull,
             mesh_blend,
             tree,
+            impostor,
             sky,
             line_depth,
             line_overlay,
@@ -972,6 +1005,17 @@ impl Renderer {
                         pass.set_vertex_buffer(0, inst.slice(..));
                         pass.set_index_buffer(self.tree_quad.slice(..), wgpu::IndexFormat::Uint16);
                         pass.draw_indexed(0..6, 0, 0..count);
+                    }
+                }
+                if let Some((inst, pages)) = &frame.impostors {
+                    pass.set_pipeline(&self.impostor);
+                    pass.set_vertex_buffer(0, inst.slice(..));
+                    pass.set_index_buffer(self.tree_quad.slice(..), wgpu::IndexFormat::Uint16);
+                    for (range, bg) in pages {
+                        if !range.is_empty() {
+                            pass.set_bind_group(1, *bg, &[]);
+                            pass.draw_indexed(0..6, 0, range.clone());
+                        }
                     }
                 }
             }

@@ -135,6 +135,9 @@ pub struct Args {
     /// Grass density in percent (default: the export's `GrassDensity`, else 50).
     #[arg(long)]
     pub grass_density: Option<f32>,
+    /// `build --runtime lodforge`: instanced references and the statics files (not a flag).
+    #[arg(skip)]
+    pub runtime: Option<crate::instances::RuntimeObjects>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -249,6 +252,10 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     // LOD models can be absolute paths (DynDOLOD's templates); everything else comes from the VFS.
     let read = |path: &str| -> Option<Vec<u8>> { if Path::new(path).is_absolute() { std::fs::read(path).ok() } else { vfs.read(path).ok().flatten() } };
     let mut written_total = 0;
+    // Runtime instancing: the default season's instances per quad (season copies reuse them) and
+    // every instanced model, for the statics files.
+    let mut default_instances: std::collections::HashMap<lodforge_objlod::Quad, Vec<lodforge_objlod::instancing::Instance>> = std::collections::HashMap::new();
+    let mut mesh_cache: std::collections::HashMap<String, std::sync::Arc<lodforge_objlod::mesh::LodMesh>> = std::collections::HashMap::new();
     let job_count = jobs.len();
     for (export, atlas) in &jobs {
         let t0 = Instant::now();
@@ -333,6 +340,56 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         if a.loose_atlas_uv {
             opts.recut_overshoot = false;
         }
+        if let Some(rt) = &a.runtime {
+            let mut inst = rt.instancing(&export.season);
+            let counts = inst.count_world(&export.statics, |r| opts.alt_textures.has_ref(&r.ref_id));
+            if export.season.is_empty() {
+                // How many placements and triangles each copy threshold would instance (LOD4).
+                let tris = |m: &str| read(m).and_then(|b| lodforge_objlod::mesh::import(m, &b).ok()).map(|lm| lm.parts.iter().map(|p| p.triangles.len()).sum::<usize>()).unwrap_or(0);
+                let lod4: Vec<(&String, usize, usize)> = counts.iter().filter(|((k, _), _)| *k == 0).map(|((_, m), &n)| (m, n, tris(m))).collect();
+                let mut line = format!("  static instancing candidates ({world}, LOD4, plain materials):");
+                for nmin in [2usize, 4, 8, 16, 32, 64, 128] {
+                    let sel: Vec<_> = lod4.iter().filter(|(_, n, _)| *n >= nmin).collect();
+                    let placements: usize = sel.iter().map(|(_, n, _)| n).sum();
+                    let triangles: usize = sel.iter().map(|(_, n, t)| n * t).sum();
+                    line.push_str(&format!(" N>={nmin}: {} models {placements} refs {:.1}M tris;", sel.len(), triangles as f64 / 1e6));
+                }
+                println!("{line}");
+                // Why LOD4 placements are not candidates.
+                let mut why: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
+                let mut tri_cache: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for r in &export.statics {
+                    let Some(m) = r.model(0).map(|m| m.to_ascii_lowercase().replace('/', "\\")) else { continue };
+                    let class = lodforge_objlod::material::MaterialClass::parse(r.material());
+                    let reason = if inst.is_runtime_ref(r) {
+                        "runtime tree"
+                    } else if m.ends_with(".dds") {
+                        "billboard"
+                    } else if r.is_large_ref() {
+                        "large ref"
+                    } else if m.contains("glow") {
+                        "glow"
+                    } else if class.is_snow_or_ash() {
+                        "snow/ash material"
+                    } else if !matches!(class, lodforge_objlod::material::MaterialClass::Plain | lodforge_objlod::material::MaterialClass::PassThru) {
+                        "material object"
+                    } else if opts.alt_textures.has_ref(&r.ref_id) {
+                        "alt textures"
+                    } else {
+                        "candidate"
+                    };
+                    let t = *tri_cache.entry(m.clone()).or_insert_with(|| tris(&m));
+                    let e = why.entry(reason).or_default();
+                    e.0 += 1;
+                    e.1 += t;
+                }
+                println!("  LOD4 placements by reason: {}", why.iter().map(|(k, (n, t))| format!("{k} {n} refs {:.1}M tris", *t as f64 / 1e6)).collect::<Vec<_>>().join("; "));
+            }
+            if inst.min_copies > 0 {
+                inst.world_counts = std::sync::Arc::new(counts);
+            }
+            opts.instancing = Some(inst);
+        }
         let lod = ObjectLod::new(export, atlas, opts, grid, &read);
         let load_ms = t0.elapsed().as_millis();
         if !lod.missing_models.is_empty() {
@@ -345,6 +402,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
         let t = Instant::now();
         let mut built = Vec::new();
         let mut copied: Vec<String> = Vec::new();
+        let mut copied_quads: Vec<lodforge_objlod::Quad> = Vec::new();
         let quads = lod.quads();
         for level in lod.levels() {
             if a.level.is_some_and(|l| l != level) {
@@ -360,6 +418,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
                 let (from, to) = (out_dir.join(file_name(&world, q, None)), out_dir.join(file_name(&world, q, Some(&export.season))));
                 if std::fs::copy(&from, &to).is_ok() {
                     copied.push(file_name(&world, q, Some(&export.season)));
+                    copied_quads.push(*q);
                     false
                 } else {
                     true
@@ -410,6 +469,32 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
                     c.only_ours,
                     c.only_golden
                 );
+            }
+        }
+        if let Some(rt) = &a.runtime {
+            let season_code = export.season.to_ascii_uppercase();
+            for b in &built {
+                for i in &b.instances {
+                    if !mesh_cache.contains_key(&i.model)
+                        && let Some(m) = lod.mesh(&i.model)
+                    {
+                        mesh_cache.insert(i.model.clone(), m.clone());
+                    }
+                }
+            }
+            let mut quads: Vec<(lodforge_objlod::Quad, &[lodforge_objlod::instancing::Instance])> = built.iter().filter(|b| !b.instances.is_empty()).map(|b| (b.quad, b.instances.as_slice())).collect();
+            quads.extend(copied_quads.iter().filter_map(|q| default_instances.get(q).map(|v| (*q, v.as_slice()))));
+            let f = crate::instances::statics_file(&world, &season_code, rt, &quads, |m| mesh_cache.get(m).cloned());
+            if !a.dry_run {
+                let (path, size) = crate::instances::write_statics(&a.out, &f, rt.write)?;
+                println!("  runtime instances: {} in {} blocks, {} meshes; {} ({:.1} MB)", f.records(), f.blocks.len(), f.meshes.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6);
+            }
+            if season_code.is_empty() {
+                for b in &built {
+                    if !b.instances.is_empty() {
+                        default_instances.insert(b.quad, b.instances.clone());
+                    }
+                }
             }
         }
         let write_ms = t.elapsed().as_millis();

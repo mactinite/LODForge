@@ -398,3 +398,39 @@ mod tests {
         assert!(!mod_world_ignored(&HashSet::new(), "jks skyrim.esp", "jks skyrim.esp"));
     }
 }
+
+/// Parent references that duplicate content of `child` (the child has the object itself), each
+/// with its child twin: the parent sides of known pairs (`ChildworldMatches.txt`) whose child
+/// side is in `child`, and parent twins, i.e. a parent reference with the [`ref_key`] (model,
+/// position / 100, scale) of a child reference. Used by runtimes that draw the parent's LOD
+/// inside a child worldspace's cells: such a duplicate is shown only while its twin's own 3D is
+/// not loaded, everything else of the parent there (stables, farms) is missing from the child.
+pub fn parent_duplicates(lo: &LoadOrder, parent: &Worldspace, child: &Worldspace, bases: &HashMap<u32, Base>, matches: &HashMap<(String, u32), Vec<(String, u32)>>) -> HashMap<u32, u32> {
+    let owner = owners(lo);
+    let identity = |id: u32| {
+        owner.get(&owner_key(id)).map(|&i| {
+            let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
+            (lo.plugins[i].plugin.name.to_ascii_lowercase(), local)
+        })
+    };
+    let model_of = |p: &Placement| bases.get(&p.base).map(|b| b.model.as_str()).unwrap_or("");
+    let live = |p: &Placement| p.flags & lodforge_esp::record::FLAG_DELETED == 0;
+    let mut child_ids: Vec<u32> = child.refs.iter().filter(|(_, p)| live(p)).map(|(&id, _)| id).collect();
+    child_ids.sort_unstable();
+    let mut child_keys: HashMap<(String, [i64; 4]), u32> = HashMap::new();
+    let mut paired: HashMap<(String, u32), u32> = HashMap::new();
+    for &id in &child_ids {
+        child_keys.entry(ref_key(model_of(&child.refs[&id]), &child.refs[&id])).or_insert(id);
+        if let Some(parents) = identity(id).and_then(|k| matches.get(&k)) {
+            for pk in parents {
+                paired.entry(pk.clone()).or_insert(id);
+            }
+        }
+    }
+    parent
+        .refs
+        .iter()
+        .filter(|(id, _)| !is_copy(**id))
+        .filter_map(|(&id, p)| identity(id).and_then(|k| paired.get(&k).copied()).or_else(|| child_keys.get(&ref_key(model_of(p), p)).copied()).map(|twin| (id, twin)))
+        .collect()
+}

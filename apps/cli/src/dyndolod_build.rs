@@ -783,6 +783,12 @@ pub fn base_lod_data(p: &Profile, c: &Config, ids: impl IntoIterator<Item = u32>
     Ok(data)
 }
 
+/// DynDOLOD's large-reference workarounds (`WorkaroundLargeReferencesBugs`, on with DLL NG) unless
+/// large references are not used.
+pub fn workarounds_on(c: &Config, opts: &Opts) -> bool {
+    !opts.no_large_ref_workarounds && c.num("WorkaroundLargeReferencesBugs", 1) == 1 && c.num("IgnoreLargeReferences", 0) == 0
+}
+
 /// Plugin stage: DynDOLOD.esm, DynDOLOD.esp and `SKSE\Plugins\DynDOLOD_Data\` in `out`. When
 /// `out` already holds plugins of an earlier LODForge build they are updated in place: same form
 /// ids for the same records, new ids after theirs, same run token (unless `opts` says otherwise).
@@ -830,7 +836,7 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
         })
         .collect();
     // WorkaroundLargeReferencesBugs (on with DLL NG) unless large references are not used.
-    let workarounds = (!opts.no_large_ref_workarounds && c.num("WorkaroundLargeReferencesBugs", 1) == 1 && c.num("IgnoreLargeReferences", 0) == 0).then_some(lodforge_dyndolod::dynplugins::Workarounds { margin });
+    let workarounds = workarounds_on(c, opts).then_some(lodforge_dyndolod::dynplugins::Workarounds { margin });
     // PBR (and other) texture swaps on the dynamic LOD base copies, as in the AltTextures.
     let cache = lodforge_dyndolod::sidefiles::ModelCache::default();
     let read = |path: &str| p.vfs.read(path).ok().flatten();

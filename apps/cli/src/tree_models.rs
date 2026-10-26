@@ -328,7 +328,7 @@ pub fn cloud_finish(gpu: &lodforge_gpu::Gpu, renderer: &lodforge_texgen::Rendere
             .tiles
             .iter()
             .zip(&scenes)
-            .map(|(t, sc)| (lodforge_texgen::Item { scene: sc, textures: &tex, scale: 1.0 }, lodforge_texgen::View { yaw_deg: 0.0, x0: t.a0, x1: t.a1, z0: t.b0, z1: t.b1, width: t.width, height: t.height }))
+            .map(|(t, sc)| (lodforge_texgen::Item { scene: sc, textures: &tex, scale: 1.0 }, lodforge_texgen::View { yaw_deg: 0.0, x0: t.a0, x1: t.a1, z0: t.b0, z1: t.b1, width: t.width, height: t.height, basis: None }))
             .collect();
         let mut imgs = lodforge_texgen::final_images(gpu, renderer, &views, &s, true);
         if cp.dither {
@@ -686,7 +686,7 @@ pub fn run(a: &Args) -> Result<()> {
             let h = crate::dyndolod_build::header(&p, &c, ws, "", &a.profile.game_dir().join("Data"), "");
             let we = crate::dyndolod_build::export_world(&p, &c, r, ws, &[], &h, &[])?;
             let s = &we.seasons[0];
-            let rows = crate::tree_report::rows(&p, &c, r, ws, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "");
+            let rows = crate::tree_report::rows(&p, &c, r, ws, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "", &std::collections::HashMap::new());
             let mut m = HashMap::new();
             for row in rows {
                 *m.entry(lodforge_dyndolod::bases::model_path(&row.model).to_ascii_lowercase()).or_default() += row.refs;

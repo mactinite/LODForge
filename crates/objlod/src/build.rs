@@ -85,6 +85,9 @@ pub struct Options<'a> {
     /// re-cut at the tile edges first, so every piece samples its own tile instead of reaching
     /// into the neighbouring tiles on the page. LODGen remaps such shapes as they are.
     pub recut_overshoot: bool,
+    /// Instanced object LOD for the LODForge Runtime (`crate::instancing`); `None` merges every
+    /// reference as before.
+    pub instancing: Option<crate::instancing::Instancing>,
 }
 
 /// UV slack a shape may have past its atlas tile without being re-cut (half a texel of a
@@ -111,6 +114,7 @@ impl Default for Options<'_> {
             recut_overshoot: true,
             grass: None,
             height_map: false,
+            instancing: None,
         }
     }
 }
@@ -121,6 +125,57 @@ impl Default for Options<'_> {
 pub const DEFAULT_HIDDEN_RULE: HiddenRule = HiddenRule { terrain: TerrainKind::Btr, samples: Samples::Vertices, shift: 0.0, water: true, outside_hidden: false };
 
 impl<'a> Options<'a> {
+    /// How an instance of `r` with `mesh` (model `model_l`, lower case) at LOD `level` must be
+    /// drawn to match its merged `.bto` shapes: the reference's AltTextures per part (diffuse,
+    /// normal; `None` without entries) and per part the LOD material class ([`PART_SNOW`] ...,
+    /// HD by the same rule as the shape names) with [`PART_WHITEN`] for parts the VC side file
+    /// whitens (empty: all plain, colours as stored).
+    ///
+    /// [`PART_SNOW`]: crate::instancing::PART_SNOW
+    /// [`PART_WHITEN`]: crate::instancing::PART_WHITEN
+    #[allow(clippy::type_complexity)]
+    pub fn instance_variant(&self, r: &StaticRef, level: i32, model_l: &str, mesh: &LodMesh) -> (Option<Vec<(String, String)>>, Vec<u8>) {
+        let alt: Vec<Option<&[String]>> = mesh.parts.iter().map(|p| self.alt_textures.textures_for(&r.ref_id, p.index, &p.name)).collect();
+        let alt_textures = alt.iter().any(Option::is_some).then(|| {
+            mesh.parts
+                .iter()
+                .zip(&alt)
+                .map(|(p, a)| {
+                    let t = a.unwrap_or(&p.textures[..]);
+                    (t.first().cloned().unwrap_or_default(), t.get(1).cloned().unwrap_or_default())
+                })
+                .collect()
+        });
+        let class = MaterialClass::parse(r.material());
+        let part_classes: Vec<u8> = if class.is_snow_or_ash() {
+            let passthru = is_passthru_model(model_l, &self.passthru_masks);
+            let model_hd = self.hd.mesh_masks.iter().any(|m| model_l.contains(m.as_str()));
+            let ctx = Context { class: class.clone(), large_ref: r.is_large_ref(), level, passthru, hd: &self.hd, model_hd };
+            mesh.parts
+                .iter()
+                .zip(&alt)
+                .map(|(p, a)| {
+                    let hd = crate::material::is_hd(&ctx, a.unwrap_or(&p.textures[..]));
+                    match (class == MaterialClass::Snow, hd) {
+                        (true, false) => crate::instancing::PART_SNOW,
+                        (true, true) => crate::instancing::PART_SNOW_HD,
+                        (false, false) => crate::instancing::PART_ASH,
+                        (false, true) => crate::instancing::PART_ASH_HD,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let whiten: Vec<bool> = mesh.parts.iter().map(|p| p.colors.is_some() && self.vc.verdict(&r.full_model, &p.name) == VcVerdict::White).collect();
+        let part_classes = if whiten.iter().any(|&w| w) {
+            (0..mesh.parts.len()).map(|i| part_classes.get(i).copied().unwrap_or(crate::instancing::PART_PLAIN) | if whiten[i] { crate::instancing::PART_WHITEN } else { 0 }).collect()
+        } else {
+            part_classes
+        };
+        (alt_textures, part_classes)
+    }
+
     pub fn from_export(e: &ExportFile) -> Options<'a> {
         let lower = |v: Vec<&str>| v.into_iter().map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect::<Vec<_>>();
         match e.dialect {
@@ -177,6 +232,9 @@ pub struct BuiltQuad {
     pub vertices: usize,
     /// The object height map cells this LOD4 quad's shapes raise (`Options::height_map`).
     pub heights: Option<crate::heightmap::Cells>,
+    /// Placements left out of the merged shapes for the runtime to draw instanced
+    /// ([`Options::instancing`]).
+    pub instances: Vec<crate::instancing::Instance>,
 }
 
 /// The builder of one worldspace / season.
@@ -297,9 +355,38 @@ impl<'a> ObjectLod<'a> {
         let (mut atlased, mut reuv_parts, mut vc_white, mut overshoot_parts) = (0usize, 0usize, 0usize, 0usize);
         let view = if self.opts.remove_unseen_faces { self.opts.terrain.as_deref().map(|t| t.view(q)) } else { None };
         let rule = self.opts.hidden_rule;
-        for &ri in refs {
+        // Runtime instancing: references the runtime draws leave the merged shapes.
+        let routes: Option<Vec<crate::instancing::Route>> = self.opts.instancing.as_ref().map(|inst| {
+            let list: Vec<&StaticRef> = refs.iter().map(|&ri| &self.export.statics[ri]).collect();
+            inst.plan(&list, k, |r, m| {
+                (!inst.alt_textures && self.opts.alt_textures.has_ref(&r.ref_id)) || (!inst.vc_whiten && self.mesh(m).is_some_and(|mesh| mesh.parts.iter().any(|p| p.colors.is_some() && self.opts.vc.verdict(&r.full_model, &p.name) == VcVerdict::White)))
+            })
+        });
+        let mut instances: Vec<crate::instancing::Instance> = Vec::new();
+        for (n, &ri) in refs.iter().enumerate() {
             let r: &StaticRef = &self.export.statics[ri];
             let Some(model) = r.model(k) else { continue };
+            match routes.as_ref().map(|v| v[n]) {
+                Some(crate::instancing::Route::Drop) => {
+                    Stats::add(&self.stats.runtime_dropped, 1);
+                    continue;
+                }
+                Some(crate::instancing::Route::Instance) => {
+                    let model_l = model.to_ascii_lowercase().replace('/', "\\");
+                    // A model that is missing or has no geometry draws nothing either way.
+                    if let Some(mesh) = self.mesh(&model_l).filter(|m| !m.parts.is_empty()) {
+                        Stats::add(&self.stats.instanced, 1);
+                        let runtime_ref = self.opts.instancing.as_ref().is_some_and(|i| i.is_runtime_ref(r));
+                        let (alt_textures, part_classes) = self.opts.instance_variant(r, q.level, &model_l, mesh);
+                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures, part_classes });
+                        placed += 1;
+                    } else {
+                        missing += 1;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             let model_l = model.to_ascii_lowercase().replace('/', "\\");
             if model_l.ends_with(".dds") {
                 // A tree billboard (spec 6.1, `billboard`): one shape of two crossed quads.
@@ -572,12 +659,12 @@ impl<'a> ObjectLod<'a> {
             && let Some(g) = &self.opts.grass
         {
             let mut grass_chunks: Vec<Chunk> = Vec::new();
-            let (mut instances, mut unmapped) = (0usize, 0usize);
+            let (mut grass_count, mut unmapped) = (0usize, 0usize);
             for cy in q.y..q.y + 4 {
                 for cx in q.x..q.x + 4 {
                     let Some(cell) = crate::grass::read_cell(g, (cx, cy)) else { continue };
                     for (gt, insts) in &cell {
-                        instances += insts.len();
+                        grass_count += insts.len();
                         if gt.billboard_1.is_empty() {
                             unmapped += insts.len();
                             continue;
@@ -592,7 +679,7 @@ impl<'a> ObjectLod<'a> {
                     }
                 }
             }
-            Stats::add(&self.stats.grass_instances, instances);
+            Stats::add(&self.stats.grass_instances, grass_count);
             Stats::add(&self.stats.grass_unmapped, unmapped);
             if !grass_chunks.is_empty() {
                 chunks.entry(format!("~grass|{}", crate::grass::NAME)).or_default().extend(grass_chunks);
@@ -638,7 +725,7 @@ impl<'a> ObjectLod<'a> {
             crate::heightmap::rasterize(&shapes, q.level, origin, &mut cells);
             cells
         });
-        Some(BuiltQuad { quad: *q, nif, shapes: shapes.len(), triangles, vertices, heights })
+        Some(BuiltQuad { quad: *q, nif, shapes: shapes.len(), triangles, vertices, heights, instances })
     }
 }
 

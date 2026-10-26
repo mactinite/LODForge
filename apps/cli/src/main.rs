@@ -8,6 +8,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod btr_compare;
 mod dyndolod_build;
+mod dyn_export;
+mod runtime_dyn;
 mod e2e_compare;
 mod large_refs;
 mod plugin_dump;
@@ -17,12 +19,20 @@ mod grass_types;
 mod occlusion;
 mod build;
 mod info;
+mod instances;
+mod runtime_trees;
+mod strip_statics;
+mod tree_pack;
+mod tree_pack_preview;
+mod grass_far;
+mod grass_pack;
 mod lod_models;
 mod lod_sources;
 mod tree_report;
 mod tree_models;
 mod inspect;
 mod glow_atlas;
+mod impostors;
 mod object_atlas;
 mod object_atlas_plan;
 mod pbr_linear;
@@ -185,6 +195,12 @@ enum Command {
     GrassBillboards(texgen_billboards::GrassArgs),
     /// TexGen stitched object-LOD textures (mini atlases, _n, PBR twins) from the DynDOLOD rules.
     TexgenStitched(texgen_stitched::Args),
+    /// Hemi-octahedral tree impostor atlases + manifests for the LODForge runtime.
+    Impostors(impostors::Args),
+    /// Per-type colour statistics of a baked impostor set (diagnostics).
+    ImpostorStats(impostors::StatsArgs),
+    /// Applies the snow grade to an installed impostor set from the bake cache (no re-bake).
+    ImpostorRegrade(impostors::RegradeArgs),
     /// Billboard tree LOD (.lst/.btt + atlas) from the load order.
     TreeLod(tree_lod::Args),
     /// Everything xLODGen does (terrain, objects, trees; all worldspaces and seasons) in one run.
@@ -199,6 +215,32 @@ enum Command {
     LodSources(lod_sources::Args),
     /// What LOD every tree base gets in a DynDOLOD-mode export (3D model, billboard, none) and why
     TreeReport(tree_report::Args),
+    /// Far grass for the LODForge Runtime (`.lfg`) from an NGIO grass cache, with sizes per density level.
+    RuntimeGrass(grass_far::Args),
+    /// Shapes (draws) and triangles of a worldspace's object LOD files per level.
+    BtoStats(instances::StatsArgs),
+    /// Rewrites only the trees files of a `build --runtime lodforge` output (export + existing impostor sets).
+    RuntimeTrees(runtime_trees::Args),
+    /// Removes from .statics.bin files the instances of references the matching .trees.bin draws.
+    RuntimeStripStatics(strip_statics::Args),
+    /// Lists statics instances whose mesh has no pack mesh.
+    RuntimeCheck(strip_statics::CheckArgs),
+    /// Summary of a `.dyn.bin` (dynamic LOD for LODForge Runtime): items by flag, models without a pack mesh, lists.
+    RuntimeDynInfo(dyn_export::InfoArgs),
+    /// Brings an earlier runtime output to format 1.7: .dyn.bin files, static pack with their models, build token, Build.txt.
+    RuntimeDyn(runtime_dyn::Args),
+    /// Writes only Occlusion.esp into an output folder (use --exclude-plugin for a plugin without DynDOLOD masters).
+    RuntimeOcclusion(runtime_dyn::OcclusionArgs),
+    /// Retypes .dyn.bin tree items against the current impostor sets and stamps a new token into every runtime file.
+    RuntimeRetype(runtime_dyn::RetypeArgs),
+    /// Rebuilds only GrassMeshes.bin (grass model, simplified, card per .lfg grass type).
+    RuntimeGrassPack(grass_pack::Args),
+    /// CPU preview of TreeMeshes.bin meshes through the atlas pages (PNG).
+    TreePackPreview(tree_pack_preview::Args),
+    /// Rebuilds only StaticMeshes.bin from the statics files of an output.
+    RuntimeStaticsPack(tree_pack::StaticsArgs),
+    /// Projects what static instancing would take out of .bto per copy threshold (export only).
+    RuntimeStaticsPlan(runtime_trees::PlanArgs),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
     TreeModels(tree_models::Args),
     /// LOD models generated from full models where DynDOLOD's rules want LOD and none is installed.
@@ -281,11 +323,27 @@ fn main() -> Result<()> {
         Command::ObjectLod(a) => object_lod::run(&a),
         Command::ObjectExport(a) => object_export::run(&a),
         Command::TreeLod(a) => tree_lod::run(&a),
+        Command::Impostors(a) => impostors::run(&a),
+        Command::ImpostorStats(a) => impostors::run_stats(&a),
+        Command::ImpostorRegrade(a) => impostors::run_regrade(&a),
         Command::Build(a) => build::run(&a),
         Command::View(a) => view::run(&a),
         Command::Info(a) => info::run(&a),
         Command::LodSources(a) => lod_sources::run(&a),
         Command::TreeReport(a) => tree_report::run(&a),
+        Command::RuntimeGrass(a) => grass_far::run(&a),
+        Command::BtoStats(a) => instances::bto_stats(&a),
+        Command::RuntimeTrees(a) => runtime_trees::run(&a),
+        Command::RuntimeStripStatics(a) => strip_statics::run(&a),
+        Command::RuntimeCheck(a) => strip_statics::check(&a),
+        Command::RuntimeDynInfo(a) => dyn_export::info(&a),
+        Command::RuntimeDyn(a) => runtime_dyn::run(&a),
+        Command::RuntimeOcclusion(a) => runtime_dyn::occlusion(&a),
+        Command::RuntimeRetype(a) => runtime_dyn::retype(&a),
+        Command::RuntimeGrassPack(a) => grass_pack::run(&a),
+        Command::TreePackPreview(a) => tree_pack_preview::run(&a),
+        Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
+        Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),
         Command::PluginDump(a) => plugin_dump::run(&a),

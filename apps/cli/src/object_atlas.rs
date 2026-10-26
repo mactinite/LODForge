@@ -518,6 +518,21 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                     let Some(mut rgba) = load(d, MipKind::Color) else {
                         return (None, chain(&flat(), MipKind::Normal), None);
                     };
+                    // `=o` (mesh packs): the shape has no alpha test; its alpha (often specular or
+                    // a mask) must not cut holes on an alpha-tested page.
+                    if e.texture.split_once('=').is_some_and(|(_, o)| o == "o") {
+                        rgba.chunks_exact_mut(4).for_each(|px| px[3] = 255);
+                    }
+                    // `=tNNN` (tree mesh pack): the shape alpha-tests at NNN; remap alpha so that
+                    // NNN lands on the page's 128 (piecewise linear, 0 and 255 kept).
+                    if let Some(t) = e.texture.split_once("=t").and_then(|(_, t)| t.parse::<u8>().ok()).filter(|&t| t != 128 && t > 0 && t < 255) {
+                        let t = f32::from(t);
+                        for px in rgba.chunks_exact_mut(4) {
+                            let a = f32::from(px[3]);
+                            let r = if a < t { a * 128.0 / t } else { 128.0 + (a - t) * 127.0 / (255.0 - t) };
+                            px[3] = r.round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
                     // Far-LOD bake matching: the planner's per-diffuse RGB factors.
                     if let Some(t) = layout.tones.get(&d.to_lowercase()) {
                         for px in rgba.chunks_exact_mut(4) {

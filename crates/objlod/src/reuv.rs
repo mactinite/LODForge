@@ -72,6 +72,9 @@ pub fn needs_recut(uvs: &[[f32; 2]], tol: f32) -> bool {
     uvs.iter().any(|uv| uv[0] < -tol || uv[0] > 1.0 + tol || uv[1] < -tol || uv[1] > 1.0 + tol)
 }
 
+/// Most UV cells (repeats) one triangle is cut into; beyond that its UVs are taken as broken.
+pub const MAX_CELLS: f32 = 1024.0;
+
 /// The re-cut part: every triangle within one integer UV cell, UVs wrapped into 0..1.
 pub fn recut(part: &MeshPart) -> MeshPart {
     let vert = |i: usize| V {
@@ -102,7 +105,23 @@ pub fn recut(part: &MeshPart) -> MeshPart {
         }
     };
     for tri in &part.triangles {
-        let poly = vec![vert(tri[0] as usize), vert(tri[1] as usize), vert(tri[2] as usize)];
+        let mut poly = vec![vert(tri[0] as usize), vert(tri[1] as usize), vert(tri[2] as usize)];
+        // Broken UVs (non-finite, or a triangle over more than MAX_CELLS repeats, e.g. a generated
+        // LOD model with UVs up to 56352) are not cut: the triangle stays whole with its UVs
+        // squeezed into one repeat. Cutting them would take hours and millions of pieces.
+        let span = |a: usize| {
+            let lo = poly.iter().map(|v| v.uv[a]).fold(f32::INFINITY, f32::min);
+            let hi = poly.iter().map(|v| v.uv[a]).fold(f32::NEG_INFINITY, f32::max);
+            hi.floor() - lo.floor() + 1.0
+        };
+        let cells = span(0) * span(1);
+        if !cells.is_finite() || cells > MAX_CELLS {
+            for v in &mut poly {
+                v.uv = v.uv.map(|x| if x.is_finite() { x.rem_euclid(1.0) } else { 0.0 });
+            }
+            push_polygon(&poly, &mut out, &mut tris);
+            continue;
+        }
         // Cuts at the integer u lines strictly inside the triangle's u range, then the v lines.
         let mut pieces = vec![poly];
         for axis in 0..2 {
@@ -217,5 +236,15 @@ mod tests {
         assert_eq!(r.triangles.len(), 2);
         assert!(r.uvs.iter().all(|uv| (0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1])));
         assert_eq!(r.uvs[1], [1.0, 0.0]);
+    }
+
+    #[test]
+    fn huge_and_infinite_uvs_are_not_cut() {
+        let t = std::time::Instant::now();
+        let a = recut(&quad([[0.0, 0.0], [1324.0, 0.0], [1324.0, 56352.0], [0.0, 56352.0]]));
+        assert_eq!(a.triangles.len(), 2);
+        let b = recut(&quad([[f32::NEG_INFINITY, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]));
+        assert!(b.uvs.iter().all(|v| v[0].is_finite() && v[1].is_finite()));
+        assert!(t.elapsed().as_secs_f64() < 1.0);
     }
 }

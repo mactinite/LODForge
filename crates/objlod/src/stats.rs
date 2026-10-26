@@ -39,6 +39,9 @@ pub struct Stats {
     pub repeat_tiled_parts: AtomicUsize,
     /// Parts whose colours the VC side file marked white (dropped).
     pub vc_whitened: AtomicUsize,
+    /// Placements written as runtime instances, and runtime references dropped (billboards).
+    pub instanced: AtomicUsize,
+    pub runtime_dropped: AtomicUsize,
 }
 
 impl Stats {

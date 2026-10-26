@@ -601,6 +601,9 @@ pub struct DynamicRef {
     pub replace: bool,
     /// Model for the copy: the dynamic LOD model / LOD level 0, or the full model.
     pub model: String,
+    /// The rule's object LOD columns for LOD4, LOD8, LOD16, LOD32 (empty = none; may be a billboard
+    /// `.dds`), for runtimes that draw the item at object LOD distances too.
+    pub columns: [String; 4],
 }
 
 /// References that get dynamic LOD: their rule (reference or mask) has a grid, and either the
@@ -717,6 +720,7 @@ pub fn build_dynamic(inp: &ExportInput<'_>) -> Result<Vec<DynamicRef>, String> {
             persistent: p.flags & lodforge_esp::record::FLAG_PERSISTENT != 0,
             replace,
             model,
+            columns: inp.resolver.columns(r, b, lod),
         });
     }
     Ok(out)

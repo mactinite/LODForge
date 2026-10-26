@@ -1,0 +1,13 @@
+[package]
+name = "lodforge-instances"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "LODForge Runtime instance files: trees (.trees.bin), repeated statics (.statics.bin) and far grass (.lfg); writers, readers, docs/runtime/instance-formats.md"
+
+[dependencies]
+lodforge-grass.workspace = true
+half.workspace = true
+crc32fast = "1"
+zstd = { version = "0.13", default-features = false }
+thiserror.workspace = true
