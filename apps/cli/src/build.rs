@@ -159,18 +159,47 @@ impl Materials {
 
 /// `--json`: one line when a stage starts, so a front end can show what is running.
 pub(crate) fn begin(json: bool, world: &str, stage: &str, season: Option<&str>) {
+    let t = START.get_or_init(Instant::now).elapsed().as_millis();
+    let line = format!("{{\"event\":\"begin\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{},\"t\":{t}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()));
+    timing_log(&line);
     if json {
-        println!("{{\"event\":\"begin\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()));
+        println!("{line}");
     }
 }
 
 pub(crate) static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
+/// Every build's stage events, one JSON line each, in `%LOCALAPPDATA%\LODForge\logs\
+/// build-<unix time>.jsonl` (the UI keeps no log, and a slow build is otherwise lost).
+static TIMING_LOG: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+/// Opens the timing log of this build and writes its command line as the first line.
+pub(crate) fn open_timing_log() -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("LODForge").join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let path = dir.join(format!("build-{secs}.jsonl"));
+    let f = std::fs::File::create(&path).ok()?;
+    *TIMING_LOG.lock().unwrap() = Some(f);
+    let args: Vec<String> = std::env::args().skip(1).map(|a| a.replace('\\', "\\\\").replace('"', "\\\"")).collect();
+    timing_log(&format!("{{\"event\":\"start\",\"version\":\"{}\",\"args\":[\"{}\"]}}", env!("CARGO_PKG_VERSION"), args.join("\",\"")));
+    Some(path)
+}
+
+pub(crate) fn timing_log(line: &str) {
+    use std::io::Write;
+    if let Some(f) = TIMING_LOG.lock().unwrap().as_mut() {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 pub(crate) fn event(json: bool, world: &str, stage: &str, season: Option<&str>, ms: u128) {
+    let (bs, bpx, bn) = lodforge_gpu::bc7_stats::snapshot();
+    let t = START.get_or_init(Instant::now).elapsed().as_millis();
+    let line = format!("{{\"event\":\"stage\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{},\"ms\":{ms},\"t\":{t},\"bc7_s\":{bs:.2},\"bc7_mpx\":{},\"bc7_calls\":{bn}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()), bpx / 1_000_000);
+    timing_log(&line);
     if json {
-        let (bs, bpx, bn) = lodforge_gpu::bc7_stats::snapshot();
-        let t = START.get_or_init(Instant::now).elapsed().as_millis();
-        println!("{{\"event\":\"stage\",\"world\":\"{world}\",\"stage\":\"{stage}\",\"season\":{},\"ms\":{ms},\"t\":{t},\"bc7_s\":{bs:.2},\"bc7_mpx\":{},\"bc7_calls\":{bn}}}", season.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".into()), bpx / 1_000_000);
+        println!("{line}");
     } else {
         println!("== {world} {stage}{} done in {ms} ms", season.map(|s| format!(" [{s}]")).unwrap_or_default());
     }
@@ -230,6 +259,7 @@ fn ensure_mo2_mod(a: &Args, name: &str) -> Result<PathBuf> {
 pub fn run(a: &Args) -> Result<()> {
     let total = Instant::now();
     START.get_or_init(Instant::now);
+    let timing_path = open_timing_log();
     let out = match (&a.out, &a.mo2_mod) {
         (Some(o), _) => o.clone(),
         (None, Some(name)) => ensure_mo2_mod(a, name)?,
@@ -949,9 +979,16 @@ pub fn run(a: &Args) -> Result<()> {
     if a.dyn_opts.work_dir.is_none() {
         std::fs::remove_dir_all(&work).ok();
     }
+    timing_log(&format!("{{\"event\":\"done\",\"ms\":{},\"failed\":{}}}", total.elapsed().as_millis(), failed.len()));
     if a.json {
         println!("{{\"event\":\"done\",\"ms\":{},\"failed\":{}}}", total.elapsed().as_millis(), failed.len());
+        if let Some(p) = &timing_path {
+            println!("{{\"event\":\"timing-log\",\"path\":\"{}\"}}", p.display().to_string().replace('\\', "\\\\"));
+        }
     } else {
+        if let Some(p) = &timing_path {
+            println!("stage timings: {}", p.display());
+        }
         println!("LODForge build finished in {:.1} s; {} failed stage(s)", total.elapsed().as_secs_f64(), failed.len());
         for f in &failed {
             println!("  {f}");

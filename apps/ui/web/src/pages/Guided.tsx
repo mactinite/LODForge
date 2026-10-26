@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { Alert, Badge, Button, Card, Checkbox, Chip, Group, Radio, Select, SimpleGrid, Stack, Stepper, Switch, Text, TextInput, Title } from "@mantine/core";
 import { IconFolder, IconInfoCircle, IconRefresh } from "@tabler/icons-react";
 
@@ -94,6 +94,7 @@ export function Guided(p: Props) {
                   <Stat label="Plugins" value={info.plugins} />
                   <Stat label="LOD worldspaces" value={info.worlds.length} />
                   <Stat label="Seasons" value={info.seasons.length || "none"} />
+                  <Stat label="LODForge Runtime" value={info.runtime_plugin ? "installed" : "not installed"} />
                   <Stat label="Scan" value={`${info.ms} ms`} />
                 </Group>
                 {info.missing_archives > 0 && (
@@ -191,6 +192,7 @@ export function Guided(p: Props) {
                 {control("grass")}
               </Stack>
             </SimpleGrid>
+            <RuntimeCard info={info} values={values} set={set} control={control} />
             <Alert variant="light" icon={<IconInfoCircle />}>
               Every other option (terrain, billboards, plugins, input) is in the Advanced tab; config files such as the child worldspace lists are under Config files.
             </Alert>
@@ -232,6 +234,45 @@ export function Guided(p: Props) {
         )}
       </Group>
     </Stack>
+  );
+}
+
+/** LODForge Runtime on/off, with what it changes and what it needs from the load order. */
+function RuntimeCard({ info, values, set, control }: { info: ProfileInfo | null; values: Values; set: (k: string, v: string | number | boolean) => void; control: (key: string) => ReactNode }) {
+  const on = values.runtime === "lodforge";
+  const plugin = info?.runtime_plugin;
+  return (
+    <Card withBorder>
+      <Group justify="space-between" wrap="nowrap" align="flex-start">
+        <div>
+          <Group gap="xs">
+            <Text fw={600}>LODForge Runtime</Text>
+            {plugin === true && <Badge size="xs" color="green" variant="light">plugin installed</Badge>}
+            {plugin === false && <Badge size="xs" color="yellow" variant="light">plugin not in this profile</Badge>}
+          </Group>
+          <Text size="xs" c="dimmed" maw={640}>
+            Distant trees become octahedral impostors (3D LOD4 models up close), repeated objects and large references are drawn instanced, and far grass comes from the grass cache. Adds the impostor bake and runtime stages to the build.
+          </Text>
+        </div>
+        <Switch checked={on} onChange={(e) => set("runtime", e.currentTarget.checked ? "lodforge" : "none")} />
+      </Group>
+      {on && plugin === false && (
+        <Alert color="yellow" mt="sm" variant="light">
+          This profile has no SKSE\Plugins\LODForgeRuntime.dll. Without the plugin the game shows no trees and no instanced objects from this output.
+        </Alert>
+      )}
+      {on && values.runtimeGrass !== false && info && info.grass_cache === 0 && (
+        <Text size="xs" c="dimmed" mt="xs">
+          No NGIO grass cache in the load order, so no far grass is written (set a cache folder in the Advanced tab).
+        </Text>
+      )}
+      {on && (
+        <SimpleGrid cols={{ base: 1, md: 2 }} mt="sm">
+          {control("impostorUnitsPerPx")}
+          {control("runtimeGrass")}
+        </SimpleGrid>
+      )}
+    </Card>
   );
 }
 

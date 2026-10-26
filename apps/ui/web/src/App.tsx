@@ -36,8 +36,11 @@ export function App() {
   const command = useMemo(() => buildArgs(target, values, output), [target, values, output]);
   // Rough stage count for the progress bar.
   const expected = useMemo(() => {
-    const perWorld = (values.terrain ? 3 + target.seasons.length : 0) + (values.objects ? 4 : 0) + (values.trees ? 1 : 0);
-    const once = (values.texgen ? 2 : 0) + (values.objects ? 2 : 0) + (values.plugins ? 1 : 0) + (values.occlusion ? 1 : 0) + (values.treeLod === "ultra" && values.treeModels !== "off" ? 1 : 0);
+    const runtime = values.runtime === "lodforge";
+    const ultra = values.treeLod === "ultra" || runtime;
+    // Runtime: impostors, runtime-trees, objects-instancing and grass per worldspace; runtime-dyn and tree-pack once.
+    const perWorld = (values.terrain ? 3 + target.seasons.length : 0) + (values.objects ? 4 : 0) + (values.trees ? 1 : 0) + (runtime ? 3 + (values.runtimeGrass !== false ? 1 : 0) : 0);
+    const once = (values.texgen ? 2 : 0) + (values.objects ? 2 : 0) + (values.plugins ? 1 : 0) + (values.occlusion ? 1 : 0) + (ultra && values.treeModels !== "off" ? 1 : 0) + (values.lodModels ? 1 : 0) + (runtime ? 2 : 0);
     return Math.max(1, perWorld * Math.max(1, target.worlds.length) + once);
   }, [values, target]);
 

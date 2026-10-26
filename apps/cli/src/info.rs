@@ -29,11 +29,14 @@ pub fn run(a: &Args) -> Result<()> {
         }
     }
     seasons.sort_by_key(|s| ["SPR", "SUM", "AUT", "WIN"].iter().position(|x| x == s));
+    // LODForge Runtime: its SKSE plugin in the load order, and the NGIO grass cache far grass reads.
+    let runtime_plugin = p.vfs.exists(r"skse\plugins\lodforgeruntime.dll");
+    let grass_cache = p.vfs.list_prefix("grass\\").iter().filter(|f| f.ends_with(".cgid")).count();
     if a.json {
         let q = |v: &[String]| v.iter().map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join(",");
-        println!("{{\"plugins\":{},\"worlds\":[{}],\"seasons\":[{}],\"missing_archives\":{},\"ms\":{}}}", p.plugin_names.len(), q(&worlds), q(&seasons), p.missing_archives.len(), t.elapsed().as_millis());
+        println!("{{\"plugins\":{},\"worlds\":[{}],\"seasons\":[{}],\"missing_archives\":{},\"runtime_plugin\":{runtime_plugin},\"grass_cache\":{grass_cache},\"ms\":{}}}", p.plugin_names.len(), q(&worlds), q(&seasons), p.missing_archives.len(), t.elapsed().as_millis());
     } else {
-        println!("{} plugins; LOD worldspaces: {worlds:?}; seasons with swap files: {seasons:?}; {} missing archives; {} ms", p.plugin_names.len(), p.missing_archives.len(), t.elapsed().as_millis());
+        println!("{} plugins; LOD worldspaces: {worlds:?}; seasons with swap files: {seasons:?}; {} missing archives; LODForge Runtime plugin: {}; grass cache files: {grass_cache}; {} ms", p.plugin_names.len(), p.missing_archives.len(), if runtime_plugin { "yes" } else { "no" }, t.elapsed().as_millis());
     }
     Ok(())
 }

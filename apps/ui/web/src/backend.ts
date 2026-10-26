@@ -19,6 +19,10 @@ export interface ProfileInfo {
   worlds: string[];
   seasons: string[];
   missing_archives: number;
+  /** SKSE\Plugins\LODForgeRuntime.dll is in the load order (older CLIs leave it out). */
+  runtime_plugin?: boolean;
+  /** NGIO grass cache files (Grass\*.cgid) in the load order. */
+  grass_cache?: number;
   ms: number;
 }
 
@@ -75,7 +79,7 @@ const mock = (() => {
         case "list_profiles":
           return r(["Default", "Testing"]);
         case "profile_info":
-          return r({ plugins: 236, worlds: ["Tamriel", "MarkarthWorld", "Blackreach", "DLC2SolstheimWorld"], seasons: ["SPR", "SUM", "AUT", "WIN"], missing_archives: 0, ms: 212 });
+          return r({ plugins: 236, worlds: ["Tamriel", "MarkarthWorld", "Blackreach", "DLC2SolstheimWorld"], seasons: ["SPR", "SUM", "AUT", "WIN"], missing_archives: 0, runtime_plugin: true, grass_cache: 0, ms: 212 });
         case "mo2_running":
           return r(false);
         case "config_files":

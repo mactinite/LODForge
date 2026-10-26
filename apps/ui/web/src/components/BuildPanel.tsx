@@ -5,6 +5,36 @@ import { IconAlertTriangle, IconCheck, IconPlayerStop } from "@tabler/icons-reac
 
 import { BuildState } from "../state";
 
+/** Plain names for the CLI's stage ids; runtime stages are marked so a runtime build's extra work is visible. */
+export const STAGE_LABELS: Record<string, { label: string; runtime?: boolean }> = {
+  texgen: { label: "Billboards (TexGen)" },
+  "texgen-stitched": { label: "Stitched LOD textures" },
+  "dyndolod-config": { label: "Rules and LOD models" },
+  "lod-models": { label: "Generate missing LOD models" },
+  "tree-models": { label: "Generate 3D tree models" },
+  "terrain-meshes": { label: "Terrain meshes" },
+  "terrain-textures": { label: "Terrain textures" },
+  "dyndolod-export": { label: "Object export" },
+  "far-lod-models": { label: "Far LOD models" },
+  impostors: { label: "Octahedral impostors", runtime: true },
+  "runtime-trees": { label: "Runtime trees (impostors + 3D near tier)", runtime: true },
+  "runtime-grass": { label: "Far grass", runtime: true },
+  "runtime-dyn": { label: "Dynamic LOD data", runtime: true },
+  "tree-pack": { label: "Instanced mesh packs", runtime: true },
+  "dyndolod-atlas": { label: "Object LOD atlas" },
+  "objects-atlas": { label: "Object LOD atlas" },
+  "pbr-linear": { label: "PBR linear textures" },
+  objects: { label: "Object LOD meshes" },
+  trees: { label: "Tree LOD" },
+  grass: { label: "Grass LOD" },
+  "grass-lod1": { label: "Grass LOD" },
+  underside: { label: "Terrain underside" },
+  plugins: { label: "DynDOLOD plugins" },
+  occlusion: { label: "Occlusion" },
+};
+
+export const stageLabel = (stage: string) => STAGE_LABELS[stage]?.label ?? stage;
+
 const fmt = (ms: number) => (ms >= 90000 ? `${(ms / 60000).toFixed(1)} min` : `${(ms / 1000).toFixed(1)} s`);
 
 /** Progress, stage table, a per-stage timing chart and the log of a running or finished build. */
@@ -19,11 +49,14 @@ export function BuildPanel({ state, expected, onCancel }: { state: BuildState; e
     () =>
       state.stages
         .filter((s) => s.ms !== null)
-        .map((s) => ({ stage: `${s.world === "all" ? "" : s.world + " "}${s.stage}${s.season ? ` [${s.season}]` : ""}`, seconds: Math.round((s.ms ?? 0) / 100) / 10 }))
+        .map((s) => ({ stage: `${s.world === "all" ? "" : s.world + " "}${stageLabel(s.stage)}${s.season ? ` [${s.season}]` : ""}`, seconds: Math.round((s.ms ?? 0) / 100) / 10 }))
         .sort((a, b) => b.seconds - a.seconds)
         .slice(0, 12),
     [state.stages],
   );
+  // Running stages, for the line under the progress bar (the terrain lane runs beside the object stages).
+  const running = state.stages.filter((s) => s.state === "running");
+  const runtimeMs = state.stages.filter((s) => STAGE_LABELS[s.stage]?.runtime && s.ms !== null).reduce((a, s) => a + (s.ms ?? 0), 0);
   if (!state.startedAt) return null;
   return (
     <Stack>
@@ -44,9 +77,19 @@ export function BuildPanel({ state, expected, onCancel }: { state: BuildState; e
         </Group>
       </Group>
       <Progress value={pct} animated={state.running} color={ok || state.running ? "orange" : "red"} />
+      {state.running && running.length > 0 && (
+        <Text size="xs" c="dimmed">
+          Now: {running.map((s) => `${s.world === "all" ? "" : s.world + " "}${stageLabel(s.stage)}${s.season ? ` [${s.season}]` : ""}`).join(" · ")}
+        </Text>
+      )}
+      {runtimeMs > 0 && (
+        <Text size="xs" c="dimmed">
+          LODForge Runtime stages so far: {fmt(runtimeMs)}
+        </Text>
+      )}
       {failed.length > 0 && !state.running && (
         <Alert color="red" title="Stages that did not finish" icon={<IconAlertTriangle />}>
-          {failed.map((f) => `${f.world} ${f.stage}${f.season ? ` [${f.season}]` : ""}`).join(", ")}. The errors are in the log.
+          {failed.map((f) => `${f.world} ${stageLabel(f.stage)}${f.season ? ` [${f.season}]` : ""}`).join(", ")}. The errors are in the log.
         </Alert>
       )}
       <Tabs defaultValue="stages">
@@ -72,7 +115,14 @@ export function BuildPanel({ state, expected, onCancel }: { state: BuildState; e
                 {state.stages.map((s, i) => (
                   <Table.Tr key={s.key + i}>
                     <Table.Td>{s.world}</Table.Td>
-                    <Table.Td>{s.stage}</Table.Td>
+                    <Table.Td>
+                      {stageLabel(s.stage)}
+                      {STAGE_LABELS[s.stage]?.runtime && (
+                        <Badge size="xs" variant="light" color="teal" ml={6}>
+                          runtime
+                        </Badge>
+                      )}
+                    </Table.Td>
                     <Table.Td>{s.season}</Table.Td>
                     <Table.Td ta="right">{s.state === "running" ? <Loader size="xs" /> : s.state === "failed" ? <Badge color="red">failed</Badge> : fmt(s.ms ?? 0)}</Table.Td>
                   </Table.Tr>

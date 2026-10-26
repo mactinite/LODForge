@@ -31,10 +31,11 @@ export type Option =
 
 export type Values = Record<string, OptionValue>;
 
-export type Group = "stages" | "objects" | "trees" | "terrain" | "textures" | "grass" | "plugins" | "input";
+export type Group = "stages" | "runtime" | "objects" | "trees" | "terrain" | "textures" | "grass" | "plugins" | "input";
 
 export const GROUPS: { id: Group; label: string; description: string }[] = [
   { id: "stages", label: "Stages", description: "What the build generates." },
+  { id: "runtime", label: "LODForge Runtime", description: "Instance files for the LODForge Runtime SKSE plugin: octahedral tree impostors, instanced object LOD, far grass and dynamic LOD." },
   { id: "objects", label: "Objects (DynDOLOD)", description: "Object LOD rules, child worldspaces and LOD models." },
   { id: "trees", label: "Trees", description: "Billboards, Ultra tree LOD and generated 3D tree models." },
   { id: "terrain", label: "Terrain", description: "Terrain LOD meshes and textures." },
@@ -44,7 +45,8 @@ export const GROUPS: { id: Group; label: string; description: string }[] = [
   { id: "input", label: "Input", description: "Which mods and plugins the build reads." },
 ];
 
-const isUltra = (v: Values) => v.treeLod === "ultra";
+const isRuntime = (v: Values) => v.runtime === "lodforge";
+const isUltra = (v: Values) => v.treeLod === "ultra" || isRuntime(v);
 const hasModels = (v: Values) => isUltra(v) && v.treeModels !== "off";
 
 export const OPTIONS: Option[] = [
@@ -53,6 +55,31 @@ export const OPTIONS: Option[] = [
   { key: "objects", flag: "--no-objects", negate: true, kind: "bool", default: true, group: "stages", label: "Object LOD", explain: "Distant buildings, rocks, mountains and (Ultra) trees with the texture atlas." },
   { key: "trees", flag: "--no-trees", negate: true, kind: "bool", default: true, group: "stages", label: "Tree LOD", explain: "The game's billboard tree LOD (Classic), or the empty tree lists Ultra needs." },
   { key: "texgen", flag: "--texgen", kind: "bool", default: true, group: "stages", label: "Render billboards (TexGen)", explain: "Render tree and trunk billboards and the stitched LOD textures from the load order first, so no TexGen output has to be installed." },
+  // LODForge Runtime
+  { key: "runtime", flag: "--runtime", kind: "choice", default: "none", group: "runtime", label: "Runtime", explain: "Who draws distant trees and repeated objects.", choices: [
+    { value: "none", label: "Game + DynDOLOD DLL", explain: "Classic output: everything merged into the game's .bto/.btt files." },
+    { value: "lodforge", label: "LODForge Runtime", explain: "Trees become octahedral impostors (3D LOD4 models up close), repeated objects and large references are instanced, far grass from the grass cache. Needs the LODForge Runtime SKSE plugin." },
+  ] },
+  { key: "impostorUnitsPerPx", flag: "--impostor-units-per-px", kind: "number", default: 12, min: 6, max: 24, step: 2, group: "runtime", when: isRuntime, label: "Impostor resolution", explain: "Game units per impostor pixel; frames are sized by tree height (smaller = sharper, more VRAM).", format: (n) => `${n} units/px` },
+  { key: "impostorMaxFrame", flag: "--impostor-max-frame", kind: "choice", default: "128", group: "runtime", when: isRuntime, expert: true, label: "Largest impostor frame", explain: "Upper limit of the per-view frame size (large trees use the large-tree frame).", choices: [
+    { value: "64", label: "64 px", explain: "Least VRAM." },
+    { value: "128", label: "128 px", explain: "Default." },
+    { value: "256", label: "256 px", explain: "Sharpest; pages fill up four times faster." },
+  ] },
+  { key: "impostorLargeFrame", flag: "--impostor-large-frame", kind: "choice", default: "256", group: "runtime", when: isRuntime, expert: true, label: "Large-tree impostor frame", explain: "Frame size of trees taller than 2600 units (giant oaks, Aspens on Riften hills).", choices: [
+    { value: "0", label: "No large tier", explain: "Large trees use the normal frame limit." },
+    { value: "256", label: "256 px", explain: "Default." },
+    { value: "512", label: "512 px", explain: "Very sharp; large VRAM cost." },
+  ] },
+  { key: "impostorAlpha", flag: "--impostor-alpha", kind: "choice", default: "coverage", group: "runtime", when: isRuntime, expert: true, label: "Impostor alpha", explain: "How crown coverage is stored in the impostor pages.", choices: [
+    { value: "coverage", label: "Coverage", explain: "Alpha-tested coverage kept through the mips (default)." },
+    { value: "binary", label: "Binary", explain: "Opaque crown interiors; for Community Shaders Snow Cover's sky-exposure test." },
+  ] },
+  { key: "runtimeGrass", flag: "--runtime-no-grass", negate: true, kind: "bool", default: true, group: "runtime", when: isRuntime, label: "Far grass", explain: "Far grass (.lfg) from the NGIO grass cache. Skipped automatically when the load order has no Grass\\*.cgid cache." },
+  { key: "runtimeGrassCache", flag: "--runtime-grass-cache", kind: "text", default: "", group: "runtime", when: (v) => isRuntime(v) && v.runtimeGrass !== false, expert: true, label: "Grass cache folder", placeholder: "Grass\\ of the load order", explain: "Folder with the NGIO grass cache (.cgid) when it is not in the load order." },
+  { key: "runtimeLargeRefs", flag: "--runtime-no-large-refs", negate: true, kind: "bool", default: true, group: "runtime", when: isRuntime, expert: true, label: "Instanced large references", explain: "The runtime draws and hands off every eligible large reference (no large-reference grid bugs)." },
+  { key: "runtimeMinCopies", flag: "--runtime-min-copies", kind: "number", default: 8, min: 0, max: 64, step: 1, group: "runtime", when: isRuntime, expert: true, label: "Instancing threshold", explain: "LOD models with at least this many copies per LOD level are instanced instead of merged (0 = off).", format: (n) => (n ? `${n} copies` : "off") },
+  { key: "runtimeNoDyndolodPlugins", flag: "--runtime-no-dyndolod-plugins", kind: "bool", default: false, group: "runtime", when: isRuntime, expert: true, label: "No DynDOLOD plugins", explain: "Skip DynDOLOD.esm/.esp: the runtime draws dynamic LOD from the .dyn.bin files. Occlusion.esp is still written." },
   // Objects
   { key: "preset", flag: "--preset", kind: "choice", default: "Medium", group: "objects", label: "Object LOD detail", explain: "DynDOLOD's rule preset.", choices: [
     { value: "Low", label: "Low", explain: "Only larger objects get LOD; small rocks, trims, roads, fences and clutter are left out." },
@@ -71,7 +98,7 @@ export const OPTIONS: Option[] = [
   { key: "staticLod", flag: "--static-lod", kind: "bool", default: false, group: "objects", expert: true, label: "Static LOD only", explain: "Static rules only; no dynamic LOD (no DynDOLOD.esm/.esp)." },
   { key: "largeRefWorkarounds", flag: "--no-large-ref-workarounds", negate: true, kind: "bool", default: true, group: "objects", expert: true, label: "Large reference workarounds", explain: "Markers, RNAM entries and reverts that hide the engine's large-reference bugs." },
   // Trees
-  { key: "treeLod", flag: "--tree-lod", kind: "choice", default: "classic", group: "trees", label: "Tree LOD", explain: "Where distant trees come from.", choices: [
+  { key: "treeLod", flag: "--tree-lod", kind: "choice", default: "classic", group: "trees", when: (v) => !isRuntime(v), label: "Tree LOD", explain: "Where distant trees come from.", choices: [
     { value: "classic", label: "Classic", explain: "Billboards in the game's tree LOD (at most 256 tree types per worldspace)." },
     { value: "ultra", label: "Ultra", explain: "Every tree in object LOD: 3D models where the preset asks for them (High: LOD4), billboards elsewhere." },
   ] },
@@ -127,12 +154,12 @@ export const OPTIONS: Option[] = [
   ] },
   { key: "farLodMatch", flag: "--far-lod-match", kind: "number", default: 0.5, min: 0, max: 1, step: 0.05, group: "textures", expert: true, label: "Far LOD texture match", explain: "Moves LOD8+-only pre-baked textures toward the LOD4 texture's brightness.", format: (n) => n.toFixed(2) },
   // Grass
-  { key: "grass", flag: "--grass", kind: "choice", default: "off", group: "grass", label: "Grass LOD", explain: "Distant grass.", choices: [
+  { key: "grass", flag: "--grass", kind: "choice", default: "off", group: "grass", when: (v) => !isRuntime(v), label: "Grass LOD", explain: "Distant grass.", choices: [
     { value: "off", label: "Off", explain: "No grass LOD." },
     { value: "go", label: "Grass Optimizations meshes", explain: "Crossed-plane grass meshes for Community Shaders' Grass Optimizations; no cache needed." },
     { value: "bto", label: "Grass in object LOD", explain: "Grass billboards in the nearest object LOD, like DynDOLOD. Needs an NGIO grass cache." },
   ] },
-  { key: "grassDensity", flag: "--grass-density", kind: "number", default: 50, min: 5, max: 100, step: 5, group: "grass", when: (v) => v.grass === "bto", label: "Grass density", explain: "Share of the cached grass placements kept in LOD.", format: (n) => `${n}%` },
+  { key: "grassDensity", flag: "--grass-density", kind: "number", default: 50, min: 5, max: 100, step: 5, group: "grass", when: (v) => !isRuntime(v) && v.grass === "bto", label: "Grass density", explain: "Share of the cached grass placements kept in LOD.", format: (n) => `${n}%` },
   // Plugins
   { key: "plugins", flag: "--no-plugins", negate: true, kind: "bool", default: true, group: "plugins", label: "Dynamic LOD plugins", explain: "DynDOLOD.esm, DynDOLOD.esp and the DynDOLOD DLL NG data files." },
   { key: "occlusion", flag: "--no-occlusion", negate: true, kind: "bool", default: true, group: "plugins", label: "Occlusion", explain: "Occlusion.esp from the new terrain and object LOD." },
