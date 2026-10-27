@@ -761,7 +761,8 @@ impl Renderer {
                 buffers: &[PACK_VERTEX_LAYOUT, PACK_INSTANCE_LAYOUT],
                 compilation_options: Default::default(),
             },
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            // LODFORGE_VIEW_PACK_CULL=1: cull back faces as for .bto shapes (shows flipped pack triangles).
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, front_face: wgpu::FrontFace::Ccw, cull_mode: std::env::var_os("LODFORGE_VIEW_PACK_CULL").map(|_| wgpu::Face::Back), ..Default::default() },
             depth_stencil: depth(true, wgpu::CompareFunction::GreaterEqual),
             multisample,
             fragment: Some(wgpu::FragmentState {
