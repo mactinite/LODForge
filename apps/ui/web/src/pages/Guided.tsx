@@ -182,6 +182,7 @@ export function Guided(p: Props) {
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
               <Stack>
                 {control("preset")}
+                {control("childParent")}
                 {control("treeLod")}
                 {control("treeModels")}
                 {control("materials")}

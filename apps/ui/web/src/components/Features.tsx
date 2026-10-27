@@ -82,7 +82,7 @@ export function Features({ info, values, set, setMany, control }: { info: Profil
         badges={runtime ? <Badge size="xs" variant="light" color="gray">optional with the runtime</Badge> : status(info?.dyndolod_dll, "DynDOLOD DLL installed", "DynDOLOD DLL not in this profile")}
         description={
           runtime
-            ? "DynDOLOD.esm/.esp and the DynDOLOD DLL NG data, beside the runtime. Off: the runtime draws dynamic LOD itself from its .dyn.bin files and no DynDOLOD plugins are written (the runtime's dynamic LOD is newer; keep this on until it covers your list)."
+            ? "DynDOLOD.esm/.esp and the DynDOLOD DLL NG data, beside the runtime. Off: the runtime draws dynamic LOD itself from its .dyn.bin files and no DynDOLOD plugins are written (the runtime's dynamic LOD is newer; keep this on until it covers your list). Child copies and glowing windows do not depend on this."
             : "DynDOLOD.esm/.esp and the DynDOLOD DLL NG data: LOD that changes in game (doors, lights, destroyed or quest-enabled objects) and the large reference hand-off. Off: static object LOD only."
         }
         on={dynOn}
@@ -97,10 +97,27 @@ export function Features({ info, values, set, setMany, control }: { info: Profil
           )
         }
       >
-        {control("childParent")}
-        {control("windows")}
         {control("largeRefWorkarounds")}
       </FeatureCard>
+
+      <FeatureCard
+        title="Glowing windows"
+        description={
+          runtime
+            ? "Window glow models in the distant LOD of towns and buildings. The LODForge Runtime lights them itself by the hour of the day, with or without the DynDOLOD plugins."
+            : "Window glow models in the distant LOD of towns and buildings (DynDOLOD's Windows option)."
+        }
+        on={values.windows === true}
+        onToggle={(on) => set("windows", on)}
+        notes={
+          runtime &&
+          values.windows === true && (
+            <Text size="xs" c="dimmed" mt="xs">
+              New with the runtime: its window glow has not been checked in game yet.
+            </Text>
+          )
+        }
+      />
 
       <FeatureCard
         title="Occlusion"

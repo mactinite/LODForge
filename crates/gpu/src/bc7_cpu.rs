@@ -13,12 +13,14 @@ use crate::RgbaImage;
 pub enum Bc7Quality {
     /// GPU, mode 6 only: fastest, blocky on gradients and fine detail.
     Fast,
-    /// CPU, every mode with a quick search (ISPC "very fast" profile: on terrain normal maps as
-    /// good as its "fast" and "basic" profiles; "ultra fast" falls back to mode-6 quality).
-    /// Terrain diffuse keeps the GPU encoder in this mode (no measurable block artefacts there).
+    /// Every mode with a quick search (ISPC "very fast" profile: on terrain normal maps as good
+    /// as its "fast" and "basic" profiles; "ultra fast" falls back to mode-6 quality). Runs on the
+    /// GPU port by default (`--bc7-device gpu`; this CPU encoder with `--bc7-device cpu`).
+    /// Terrain diffuse keeps the mode-6 encoder in this mode (no measurable block artefacts there).
     #[default]
     High,
-    /// CPU, every mode with the thorough search (ISPC "basic" profile), everything on the CPU.
+    /// Every mode with the thorough search (ISPC "basic" profile); GPU port or CPU as for High.
+    /// About 3x slower than High on the GPU (RTX 4080, 2026-10-26), no visible gain measured.
     Best,
 }
 

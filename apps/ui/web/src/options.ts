@@ -103,7 +103,7 @@ export const OPTIONS: Option[] = [
   { key: "keepFarLodModels", flag: "--keep-far-lod-models", kind: "bool", default: false, group: "objects", expert: true, label: "Keep shipped LOD8/16 models", explain: "By default LOD8/16 models whose texture differs from LOD4 are rebuilt from the LOD4 model." },
   { key: "windows", flag: "--windows", kind: "bool", default: false, group: "objects", label: "Glowing windows", explain: "LOD window overlays that glow at night." },
   { key: "staticLod", flag: "--static-lod", kind: "bool", default: false, group: "objects", expert: true, label: "Static LOD only", explain: "Static rules only; no dynamic LOD (no DynDOLOD.esm/.esp)." },
-  { key: "largeRefWorkarounds", flag: "--no-large-ref-workarounds", negate: true, kind: "bool", default: true, group: "objects", expert: true, label: "Large reference workarounds", explain: "Markers, RNAM entries and reverts that hide the engine's large-reference bugs." },
+  { key: "largeRefWorkarounds", flag: "--no-large-ref-workarounds", negate: true, kind: "bool", default: true, group: "objects", expert: true, label: "Large reference workarounds", explain: "Markers, RNAM entries and reverts in DynDOLOD.esm that hide the engine's large-reference bugs.", note: (v) => (isRuntime(v) ? "With the LODForge Runtime the plugin hands large references off itself; these only matter for DynDOLOD's own dynamic LOD." : undefined) },
   // Trees
   { key: "treeLod", flag: "--tree-lod", kind: "choice", default: "classic", group: "trees", when: (v) => !isRuntime(v), label: "Tree LOD", explain: "Where distant trees come from.", choices: [
     { value: "classic", label: "Classic", explain: "Billboards in the game's tree LOD (at most 256 tree types per worldspace)." },
@@ -149,10 +149,10 @@ export const OPTIONS: Option[] = [
     { value: "pbr", label: "PBR (Community Shaders)", explain: "pbr_lod texture twins and PBR texture sets from textures\\pbr\\." },
     { value: "standard", label: "Standard", explain: "Plain textures for non-PBR lists (ENB complex material, parallax or vanilla)." },
   ] },
-  { key: "bc7", flag: "--bc7", kind: "choice", default: "high", group: "textures", label: "Texture compression (BC7)", explain: "BC7 encoder for every texture written.", choices: [
-    { value: "fast", label: "Fast (GPU)", explain: "Seconds per worldspace, but gradients and foliage show 4x4 blocks." },
-    { value: "high", label: "High quality", explain: "All BC7 modes; block edges on billboards all but disappear. Recommended." },
-    { value: "best", label: "Best", explain: "Thorough search; measured no gain over High, several times slower." },
+  { key: "bc7", flag: "--bc7", kind: "choice", default: "high", group: "textures", label: "Texture compression (BC7)", explain: "BC7 encoder for every texture written. All three run on the GPU.", choices: [
+    { value: "fast", label: "Fast", explain: "One BC7 mode only: about 8x faster than High (roughly 2-3 minutes off a full Quality build), but gradients and foliage show 4x4 blocks." },
+    { value: "high", label: "High quality", explain: "Every BC7 mode (Intel's ISPC encoder, ported to the GPU): block edges on billboards all but disappear. Recommended." },
+    { value: "best", label: "Best", explain: "A more thorough search: about 3x slower than High, with no visible gain measured." },
   ] },
   { key: "atlasMaxTile", flag: "--atlas-max-tile", kind: "number", default: 1024, min: 256, max: 2048, step: 0, group: "textures", label: "Object texture detail", explain: "Largest size a LOD texture keeps on the object LOD atlas (full textures get a quarter).", format: (n) => `${n} px (full textures ${Math.max(64, n / 4)} px)` },
   { key: "lodTextureTone", flag: "--lod-texture-tone", kind: "choice", default: "flat", group: "textures", label: "Distant texture tone", explain: "Brightness of stitched LOD8/16 textures.", choices: [
