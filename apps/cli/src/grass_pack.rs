@@ -313,6 +313,8 @@ pub struct Args {
 
 pub fn run(a: &Args) -> Result<()> {
     let mut p = a.profile.open()?;
+    // GrassMeshes.bin takes the output's run token (Build.txt), like the files it links to.
+    println!("run token {}", crate::instances::init_build_token(&a.data));
     p.vfs.add_loose_root_since(&a.data, &lodforge_archive::DirSnapshot::default())?;
     let rep = build(&mut p, &a.data, &Settings { tile_cap: a.tile, ..Default::default() }, WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true })?;
     println!("grass {} ({} cards rendered as billboards)", rep.summary(), rep.rendered_cards);
