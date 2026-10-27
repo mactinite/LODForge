@@ -408,11 +408,24 @@ fn walk(
         }
         Some(Block::TriShape(s)) => {
             let xf = xf.then(&Xform::from_nif(&s.av.transform));
-            let material = material_of(nif, s);
+            let mut material = material_of(nif, s);
             let shape_kind = classify(kind, &material.name, root_child);
+            lod_alpha_test(kind, &mut material);
             out.push(shape_mesh(i, s, &xf, aabb, shape_kind, material));
         }
         _ => {}
+    }
+}
+
+/// The game's object LOD shaders alpha-test every `.bto` shape at 128: LODGen and DynDOLOD write
+/// no `NiAlphaProperty` (docs/re/object-lod-spec.md, "No NiAlphaProperty"), alpha-tested textures
+/// sit on the `_Alpha` atlas pages and opaque ones carry alpha 255. Without this the viewer drew
+/// the billboard trees and grass of object LOD as solid rectangles. Effect-shader passthru shapes
+/// and shapes with their own alpha property keep theirs.
+fn lod_alpha_test(kind: FileKind, m: &mut Material) {
+    if kind == FileKind::Objects && !m.alpha_test && !m.alpha_blend && !m.effect {
+        m.alpha_test = true;
+        m.threshold = 128;
     }
 }
 

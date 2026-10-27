@@ -208,6 +208,9 @@ fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let proj_diffuse = textureSample(t_proj_diffuse, samp_proj, pd.yz).rgb * tw.x
         + textureSample(t_proj_diffuse, samp_proj, pd.xz).rgb * tw.y
         + textureSample(t_proj_diffuse, samp_proj, pd.xy).rgb * tw.z;
+    // The alpha test reads the texture's alpha: in LOD the vertex alpha carries the snow / ash
+    // amount (objSnow*), not opacity.
+    let tex_alpha = base.a;
     if ((m.flags & F_VERTEX_COLORS) != 0u) {
         base = base * in.color;
     }
@@ -217,7 +220,7 @@ fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         test = true;
         threshold = g.params.z;
     }
-    if (test && base.a < threshold) {
+    if (test && tex_alpha < threshold) {
         discard;
     }
     let to_cam = normalize(g.cam_pos.xyz - in.world);
