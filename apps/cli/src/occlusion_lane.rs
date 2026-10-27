@@ -3,7 +3,9 @@
 // Third-party components and their notices: THIRD-PARTY-NOTICES.txt.
 //! Occlusion during the build: a worldspace's TVDT needs only its terrain LOD meshes and the
 //! object LOD height map, both done once its objects stage is. This thread computes each
-//! worldspace as the build hands it over, while the later stages go on; Occlusion.esp is still
+//! worldspace as the build hands it over, while the later stages go on. Only main worldspaces:
+//! a child worldspace's cells and LAND come from CELL records that DynDOLOD.esm adds, so the
+//! children are computed at the end (a few seconds each). Occlusion.esp is still
 //! written at the end, against the final load order ([`crate::occlusion::add_worlds`] selects
 //! the cells again with DynDOLOD.esm/.esp in it, so the plugin matches computing it all there).
 
@@ -57,7 +59,7 @@ impl OcclusionLane {
                     }
                     let t = Instant::now();
                     let heightmap = crate::dyndolod_build::occlusion_heightmap(&out, &w.editor_id);
-                    match crate::occlusion::compute_worlds(&p.load_order, &read, &w.editor_id, heightmap.as_deref(), inputs.params, &|child, is_main| inputs.mode(child, is_main)) {
+                    match crate::occlusion::compute_worlds(&p.load_order, &read, &w.editor_id, heightmap.as_deref(), inputs.params, &|child, is_main| if is_main { inputs.mode(child, is_main) } else { None }) {
                         Ok(c) => {
                             crate::build::timing_log(&format!("{{\"event\":\"lane\",\"world\":\"{}\",\"stage\":\"occlusion-compute\",\"ms\":{}}}", w.editor_id, t.elapsed().as_millis()));
                             done.insert(w.editor_id.to_ascii_lowercase(), c);

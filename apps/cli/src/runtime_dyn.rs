@@ -226,7 +226,13 @@ pub struct OcclusionArgs {
 
 pub fn occlusion(a: &OcclusionArgs) -> Result<()> {
     let t0 = Instant::now();
-    let p = a.profile.open()?;
+    let mut p = a.profile.open()?;
+    // Testing the build's occlusion lane: LODFORGE_OCC_OUT=1 reads `--out` as part of the load
+    // order (as the build does with its own output); LODFORGE_OCC_LANE=1 also computes through
+    // the lane first, as a build does.
+    if std::env::var_os("LODFORGE_OCC_OUT").is_some() {
+        p.vfs.add_loose_root(&a.out)?;
+    }
     let dir = a.profile.instance.join("tools").join("DynDOLOD").join("Edit Scripts").join("DynDOLOD");
     let c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, false)?;
     let worlds: Vec<String> = if a.worlds.is_empty() {
@@ -242,7 +248,15 @@ pub fn occlusion(a: &OcclusionArgs) -> Result<()> {
             println!("warning: {n} is in the load order; Occlusion.esp may get it as a master (--exclude-plugin {n})");
         }
     }
-    let done = crate::dyndolod_build::write_occlusion(&p, &c, &worlds, &a.out)?;
+    let mut pre = std::collections::HashMap::new();
+    if std::env::var_os("LODFORGE_OCC_LANE").is_some() {
+        let lane = crate::occlusion_lane::OcclusionLane::start(a.profile.clone(), a.out.clone(), worlds.clone());
+        for w in &worlds {
+            lane.send(w, crate::dyndolod_build::OcclusionInputs::new(&c, w));
+        }
+        pre = lane.finish();
+    }
+    let done = crate::dyndolod_build::write_occlusion_with(&p, &c, &worlds, &a.out, &mut pre)?;
     let cells: usize = done.iter().map(|d| d.1).sum();
     println!("Occlusion.esp: {cells} cells in {} worldspace(s) in {:.1} s", done.len(), t0.elapsed().as_secs_f64());
     Ok(())

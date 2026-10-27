@@ -940,12 +940,21 @@ pub fn write_occlusion_with(p: &Profile, c: &Config, worlds: &[String], out: &Pa
             continue;
         }
         let inputs = OcclusionInputs::new(c, &w.editor_id);
+        let heightmap = occlusion_heightmap(out, &w.editor_id);
         let computed = match precomputed.remove(&w.editor_id.to_ascii_lowercase()) {
-            Some(cw) => cw,
-            None => {
-                let heightmap = occlusion_heightmap(out, &w.editor_id);
-                crate::occlusion::compute_worlds(&lo, &read, &w.editor_id, heightmap.as_deref(), inputs.params, &|child, is_main| inputs.mode(child, is_main))?
+            Some(mut cw) => {
+                // The worldspaces this load order computes with the main one: DynDOLOD.esm/.esp
+                // give child worldspaces CELL records, so more of them qualify than the build's
+                // input load order showed the lane. Those are computed here, and the list keeps
+                // this load order's order.
+                let want: Vec<String> = lodforge_dyndolod::occlusion::occlusion_worlds(&all, w, true).into_iter().filter(|x| inputs.mode(&x.editor_id, x.form_id == w.form_id).is_some()).map(|x| x.editor_id.clone()).collect();
+                let missing: HashSet<String> = want.iter().filter(|n| !cw.iter().any(|c| c.editor_id.eq_ignore_ascii_case(n))).map(|n| n.to_ascii_lowercase()).collect();
+                if !missing.is_empty() {
+                    cw.extend(crate::occlusion::compute_worlds(&lo, &read, &w.editor_id, heightmap.as_deref(), inputs.params, &|child, is_main| if missing.contains(&child.to_ascii_lowercase()) { inputs.mode(child, is_main) } else { None })?);
+                }
+                want.iter().filter_map(|n| cw.iter().position(|c| c.editor_id.eq_ignore_ascii_case(n)).map(|i| cw.swap_remove(i))).collect()
             }
+            None => crate::occlusion::compute_worlds(&lo, &read, &w.editor_id, heightmap.as_deref(), inputs.params, &|child, is_main| inputs.mode(child, is_main))?,
         };
         done.extend(crate::occlusion::add_worlds(&lo, &read, &computed, inputs.params, &mut pb)?);
     }
