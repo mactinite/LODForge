@@ -14,7 +14,10 @@ pub const EXT: &str = "lfg";
 /// Density levels per cell (`prefix[k]`: records with `hash < 2^(32-k)`).
 pub const LEVELS: usize = 8;
 /// Bytes per record.
-pub const RECORD: usize = 10;
+/// Record size: 10 bytes up to format 1.7, 11 with the shade byte.
+pub const RECORD: usize = 11;
+/// Shade in a record: `round(shade * SHADE_SCALE)` (0..1.275 in steps of 0.005).
+pub const SHADE_SCALE: f32 = 200.0;
 
 pub const FLAG_FITS_TO_SLOPE: u16 = 1;
 pub const FLAG_UNIFORM_SCALING: u16 = 2;
@@ -42,6 +45,9 @@ pub struct Instance {
     pub normal: [f32; 3],
     /// `GTYP` index.
     pub type_: u16,
+    /// The engine's per-instance shade (NGIO cache instance half 3): the grass shader multiplies
+    /// the model's vertex colour by it.
+    pub shade: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +59,8 @@ pub struct GrassRecord {
     pub yaw: u8,
     pub scale: u8,
     pub tilt: u8,
+    /// Shade x [`SHADE_SCALE`]; 200 (1.0) in files without it.
+    pub shade: u8,
 }
 
 impl GrassRecord {
@@ -118,7 +126,8 @@ impl GrassCell {
             let qz = (((i.pos[2] - z_min) / z_step).round()).clamp(0.0, 65535.0) as u16;
             let yaw = ((i.yaw.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU * 256.0).round() as u32 % 256) as u8;
             let scale = (i.scale * 64.0).round().clamp(0.0, 255.0) as u8;
-            keyed.push((grass_hash(x, y, qx, qy), k, GrassRecord { qx, qy, qz, type_: t, yaw, scale, tilt: tilt_of(i.normal) }));
+            let shade = (i.shade * SHADE_SCALE).round().clamp(0.0, 255.0) as u8;
+            keyed.push((grass_hash(x, y, qx, qy), k, GrassRecord { qx, qy, qz, type_: t, yaw, scale, tilt: tilt_of(i.normal), shade }));
         }
         keyed.sort_by_key(|(h, k, _)| (*h, *k));
         let mut prefix = [0u32; LEVELS];
@@ -161,6 +170,7 @@ impl GrassCell {
             b.u8(r.yaw);
             b.u8(r.scale);
             b.u8(r.tilt);
+            b.u8(r.shade);
         }
         b.0
     }
@@ -187,7 +197,7 @@ impl GrassCell {
         let mut records = Vec::with_capacity(record_count);
         for i in 0..record_count {
             let mut c = Cur::new(raw.get(base + i * stride..base + (i + 1) * stride).ok_or(Error::Truncated)?);
-            records.push(GrassRecord { qx: c.u16()?, qy: c.u16()?, qz: c.u16()?, type_: c.u8()?, yaw: c.u8()?, scale: c.u8()?, tilt: c.u8()? });
+            records.push(GrassRecord { qx: c.u16()?, qy: c.u16()?, qz: c.u16()?, type_: c.u8()?, yaw: c.u8()?, scale: c.u8()?, tilt: c.u8()?, shade: if stride > 10 { c.u8()? } else { SHADE_SCALE as u8 } });
         }
         Ok(GrassCell { x, y, z_min, z_step, types, prefix, records })
     }
@@ -303,7 +313,7 @@ pub fn instances_from_cgid(cell: (i32, i32), cache: &lodforge_grass::cgid::CellC
                 let n = [r2, r5, r8];
                 let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
                 let normal = if len > 1e-3 && n[2] > 0.0 { n.map(|v| v / len) } else { [0.0, 0.0, 1.0] };
-                out.push(Instance { pos: [h(i[0]) + bx, h(i[1]) + by, h(i[2])], yaw: r3.atan2(r0), scale: 1.0 + h(i[13]), normal, type_: ti });
+                out.push(Instance { pos: [h(i[0]) + bx, h(i[1]) + by, h(i[2])], yaw: r3.atan2(r0), scale: 1.0 + h(i[13]), normal, type_: ti, shade: h(i[3]) });
             }
         }
     }

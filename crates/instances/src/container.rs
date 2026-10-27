@@ -32,11 +32,19 @@ impl Kind {
         }
     }
 
+    /// Smallest record size a reader accepts (grass records before the shade byte: 10).
+    pub fn min_record_size(self) -> u32 {
+        match self {
+            Kind::Grass => 10,
+            k => k.record_size(),
+        }
+    }
+
     pub fn record_size(self) -> u32 {
         match self {
             Kind::Trees => 24,
             Kind::Statics => 32,
-            Kind::Grass => 10,
+            Kind::Grass => 11,
             Kind::MeshPack => 28,
             Kind::Dyn => 64,
         }
@@ -389,7 +397,7 @@ impl<'a> Container<'a> {
             data_crc32: r.u32()?,
             total_records: r.u64()?,
         };
-        if (header.header_size as usize) < HEADER_SIZE || header.record_size < kind.record_size() {
+        if (header.header_size as usize) < HEADER_SIZE || header.record_size < kind.min_record_size() {
             return Err(Error::Invalid("header or record size too small"));
         }
         let mo = header.meta_offset as usize;

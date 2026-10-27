@@ -111,7 +111,7 @@ fn grass_instances(n: usize) -> Vec<Instance> {
         .map(|_| {
             let tilt = next() * 0.6 - 0.3;
             let n = [tilt, -tilt / 2.0, (1.0 - tilt * tilt * 1.25).sqrt()];
-            Instance { pos: [-3.0 * 4096.0 + next() * 4096.0, 7.0 * 4096.0 + next() * 4096.0, -500.0 + next() * 3000.0], yaw: next() * std::f32::consts::TAU, scale: 0.6 + next(), normal: n, type_: (next() * 5.0) as u16 * 3 }
+            Instance { pos: [-3.0 * 4096.0 + next() * 4096.0, 7.0 * 4096.0 + next() * 4096.0, -500.0 + next() * 3000.0], yaw: next() * std::f32::consts::TAU, scale: 0.6 + next(), normal: n, type_: (next() * 5.0) as u16 * 3, shade: 0.35 + next() * 0.7 }
         })
         .collect()
 }
@@ -171,13 +171,13 @@ fn grass_file_round_trip() {
         let c = Container::parse(&bytes, Kind::Grass).unwrap();
         assert_eq!(c.header.total_records, 3010);
         let e = c.find(0, -3, 7).unwrap();
-        assert_eq!(e.raw_size as usize, f.cells[&(-3, 7)].header_size() + 3000 * 10);
+        assert_eq!(e.raw_size as usize, f.cells[&(-3, 7)].header_size() + 3000 * crate::grass::RECORD);
     }
 }
 
 #[test]
 fn tilt_and_yaw_encoding() {
-    let inst = [Instance { pos: [10.0, 10.0, 0.0], yaw: std::f32::consts::FRAC_PI_2, scale: 1.25, normal: [0.0, 0.0, 1.0], type_: 0 }, Instance { pos: [20.0, 10.0, 0.0], yaw: -0.1, scale: 5.0, normal: [-1.0, 0.0, 0.0], type_: 0 }];
+    let inst = [Instance { pos: [10.0, 10.0, 0.0], yaw: std::f32::consts::FRAC_PI_2, scale: 1.25, normal: [0.0, 0.0, 1.0], type_: 0, shade: 1.0 }, Instance { pos: [20.0, 10.0, 0.0], yaw: -0.1, scale: 5.0, normal: [-1.0, 0.0, 0.0], type_: 0, shade: 0.5 }];
     let c = GrassCell::build(0, 0, &inst).unwrap();
     let up = c.records.iter().find(|r| r.qx == 160).unwrap();
     assert_eq!(up.tilt, 0);
