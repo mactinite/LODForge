@@ -23,7 +23,21 @@ background occlusion. The UI keeps no log, so this is the record of a slow build
 
 | Run | Code | Total |
 | --- | --- | --- |
-| baseline | runtime-ui-viewer ed0ccf9 (main + runtime-integration) | 881 s |
+| baseline | runtime-ui-viewer ed0ccf9 (main + runtime-integration), fresh folder | 881 s |
+| 2 | + the changes below, fresh folder | 613 s |
+| 3 | final code, rebuild into the run-2 folder | 638 s |
+
+Impostors: 197 s, 75 s, 14 s (run 3 kept every page). Occlusion at the end: 161 s, 5 s, 23 s
+(run 3 computes the child worldspaces there; see below). The baseline overlapped a parallel
+`cargo build`, so part of the texgen/tree-models gain (78/79 s to 57/66 s) is contention.
+
+Output check: run 2 against the baseline, file by file: all 138,452 files identical except
+those holding the random run token (`.bin`, `Build.txt`, `DynDOLOD_NG_*.txt`, DynDOLOD.esm/.esp:
+31-34 bytes each), the impostor reports (timing column), the new `pages.keys`, and
+Occlusion.esp. Occlusion.esp from run 2 was short of 232 cells: DynDOLOD.esm gives child
+worldspaces CELL records that change the LAND they borrow from the parent, so the lane now
+computes main worldspaces only and the children are done at the end. Run 3's Occlusion.esp is
+byte-identical to the baseline's.
 
 Baseline, stage totals over all worldspaces (terrain runs on its own thread beside the rest):
 terrain 363 s, impostors 197 s, occlusion 161 s (serial, at the end), objects-atlas 106 s,
