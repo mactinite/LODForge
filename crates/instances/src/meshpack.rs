@@ -24,6 +24,11 @@ pub const CLASS_SNOW: u8 = 1;
 pub const CLASS_SNOW_HD: u8 = 2;
 pub const CLASS_ASH: u8 = 3;
 pub const CLASS_ASH_HD: u8 = 4;
+/// Far grass: Community Shaders "complex grass" page, twice the atlas height: colour tiles in the
+/// top half, the same tiles' normal (RGB) and specular (A) in the bottom half, so CS's complex
+/// grass sampling (colour at v * 0.5, normal at 0.5 + v * 0.5) works on the page. Mesh UVs are in
+/// the top half's space (v = 1 is its bottom).
+pub const CLASS_GRASS_COMPLEX: u8 = 5;
 
 /// One vertex as stored (28 bytes).
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -28,11 +28,14 @@ pub struct Settings {
     pub tile_cap: u32,
     /// Page size.
     pub page: u32,
+    /// Community Shaders complex grass diffuses (lower-case resolved paths): their parts go onto
+    /// `CLASS_GRASS_COMPLEX` pages.
+    pub complex: std::collections::HashSet<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { tile_cap: 512, page: 4096 }
+        Settings { tile_cap: 512, page: 4096, complex: Default::default() }
     }
 }
 
@@ -241,9 +244,16 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                 }
             }
             let class_flags = classes.get(i).copied().unwrap_or(0);
-            let (class, whiten) = (class_flags & 0x7F, class_flags & 0x80 != 0);
+            let (mut class, whiten) = (class_flags & 0x7F, class_flags & 0x80 != 0);
+            // Complex grass: the tile holds the texture's top half (colour); the page's bottom half
+            // gets the bottom half (normal, specular) at the same place.
+            let complex = s.complex.contains(&shape.diffuse.to_ascii_lowercase());
+            if complex {
+                class = lodforge_instances::meshpack::CLASS_GRASS_COMPLEX;
+                key.push_str(crate::object_atlas::HALF_TOP);
+            }
             if !sizes.contains_key(&(class, key.clone())) {
-                let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, i.height, s.tile_cap));
+                let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, if complex { (i.height / 2).max(1) } else { i.height }, s.tile_cap));
                 let Some(size) = size else {
                     rep.dropped_parts += 1;
                     continue;
@@ -287,15 +297,19 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
             lodforge_instances::meshpack::CLASS_SNOW_HD => "_SnowHD",
             lodforge_instances::meshpack::CLASS_ASH => "_Ash",
             lodforge_instances::meshpack::CLASS_ASH_HD => "_AshHD",
+            lodforge_instances::meshpack::CLASS_GRASS_COMPLEX => "_Complex",
             _ => "",
         };
         let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, &format!("{page_base}{tag}_Alpha"));
-        let pages = crate::object_atlas::render(&p.vfs, &layout, &gpu, &formats)?;
+        // Complex grass: pages twice as high, every tile repeated in the bottom half with the
+        // texture's bottom half (normal, specular).
+        let render_layout = if class == lodforge_instances::meshpack::CLASS_GRASS_COMPLEX { crate::object_atlas::complex_layout(&layout) } else { layout.clone() };
+        let pages = crate::object_atlas::render(&p.vfs, &render_layout, &gpu, &formats)?;
         crate::object_atlas::write(out, &pages)?;
         rep.pages += pages.len();
         rep.page_bytes += pages.iter().map(|pg| (pg.diffuse.len() + pg.normal.len()) as u64).sum::<u64>();
         let first = pack.pages.len() as u16;
-        pack.pages.extend(layout.pages.iter().map(|pg| Page { width: pg.width, height: pg.height, mips: pg.width.max(pg.height).ilog2() + 1, alpha_threshold: 128, class, albedo: pg.name.to_ascii_lowercase(), normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase() }));
+        pack.pages.extend(render_layout.pages.iter().map(|pg| Page { width: pg.width, height: pg.height, mips: pg.width.max(pg.height).ilog2() + 1, alpha_threshold: 128, class, albedo: pg.name.to_ascii_lowercase(), normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase() }));
         for e in layout.entries.into_iter().filter(|e| e.page != usize::MAX) {
             entry.insert((class, e.texture.clone()), (first + e.page as u16, e));
         }
@@ -309,6 +323,8 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                 continue;
             };
             let pg = &pack.pages[usize::from(*page)];
+            // Complex grass pages: UVs in the top half's space (CS samples colour at v * 0.5).
+            let page_h = if *class == lodforge_instances::meshpack::CLASS_GRASS_COMPLEX { pg.height / 2 } else { pg.height };
             let base = input.vertices.len() as u32;
             // Half-texel inset so bilinear filtering stays inside the tile.
             let map = |uv: f32, origin: u32, size: u32, page: u32| ((f64::from(origin) + 0.5 + f64::from(uv.clamp(0.0, 1.0)) * f64::from(size.saturating_sub(1))) / f64::from(page) * 65535.0).round().clamp(0.0, 65535.0) as u16;
@@ -323,7 +339,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                     pos: *pos,
                     normal: pack_unit(n, 0),
                     tangent: pack_unit(t, w),
-                    uv: [map(uv[0], e.x, e.width, pg.width), map(uv[1], e.y, e.height, pg.height)],
+                    uv: [map(uv[0], e.x, e.width, pg.width), map(uv[1], e.y, e.height, page_h)],
                     color: part.colors.as_ref().and_then(|c| c.get(i).copied()).map(|c| if *whiten { [255, 255, 255, c[3]] } else { c }).unwrap_or([255; 4]),
                 });
             }

@@ -60,7 +60,27 @@ pub struct CardView {
 /// Renders every grass model in `models` into two billboard views with the TexGen-style
 /// renderer (unlit albedo, the model's vertex colours, alpha-tested coverage, normal map), written
 /// as DDS under `work` and added to the VFS so the page renderer can place them.
-pub fn render_cards(p: &mut Profile, models: &[String], work: &Path) -> Result<HashMap<String, RenderedCard>> {
+/// Resolved diffuse paths (lower case) of the grass models' parts that are complex grass textures.
+pub fn complex_diffuses(p: &Profile, models: &[String]) -> std::collections::HashSet<String> {
+    let mut tx = crate::instances::TextureIndex::default();
+    let mut seen: HashMap<String, bool> = HashMap::new();
+    for m in models {
+        let Some(lm) = vfs_mesh(p, m) else { continue };
+        for part in &lm.parts {
+            if part.textures[0].trim().is_empty() {
+                continue;
+            }
+            let t = tx.resolve(p, &part.textures[0]).to_ascii_lowercase();
+            if !seen.contains_key(&t) {
+                let c = p.vfs.read(&t).ok().flatten().is_some_and(|b| is_complex_texture(&b));
+                seen.insert(t, c);
+            }
+        }
+    }
+    seen.into_iter().filter(|(_, c)| *c).map(|(t, _)| t).collect()
+}
+
+pub fn render_cards(p: &mut Profile, models: &[String], work: &Path, complex: &std::collections::HashSet<String>) -> Result<HashMap<String, RenderedCard>> {
     use lodforge_texgen::{Light, Renderer, Scene, Settings};
     let gpu = lodforge_gpu::Gpu::new()?;
     let renderer = Renderer::new(&gpu);
@@ -74,6 +94,15 @@ pub fn render_cards(p: &mut Profile, models: &[String], work: &Path) -> Result<H
         let Ok(nif) = lodforge_nif::parse_all_geometry(&bytes) else { continue };
         let mut scene = Scene::from_nif(&nif);
         lodforge_texgen::resolve_textures(&mut scene, |t| p.vfs.exists(t));
+        // Complex grass: the model's UVs span the whole texture, the colour is its top half (CS
+        // samples v * 0.5).
+        for m in &mut scene.meshes {
+            if complex.contains(&m.diffuse.to_ascii_lowercase()) {
+                for uv in &mut m.uvs {
+                    uv[1] *= 0.5;
+                }
+            }
+        }
         // Grass vertex alpha drives wind sway, not opacity.
         for m in &mut scene.meshes {
             for c in &mut m.colors {
@@ -225,6 +254,23 @@ fn albedo_stats(p: &Profile, full: &LodMesh, textures: &mut crate::instances::Te
     [(sum[0] / n).round() as u8, (sum[1] / n).round() as u8, (sum[2] / n).round() as u8, (n / total.max(1.0) * 255.0).round() as u8]
 }
 
+/// Whether a grass diffuse is a Community Shaders "complex grass" texture: colour in the top half,
+/// normal (RGB) and specular (A) in the bottom half. CS decides it the same way: the texel at
+/// (0, height - 1) of the top mip, read as a normal (rgb * 2 - 1), has length 1 within
+/// `ComplexGrassThreshold` (0.03).
+pub fn is_complex_texture(bytes: &[u8]) -> bool {
+    let Ok(info) = lodforge_dds::parse(bytes) else { return false };
+    let Ok(img) = lodforge_dds::decode(bytes, &info, 0) else { return false };
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w == 0 || h < 2 {
+        return false;
+    }
+    let o = (h - 1) * w * 4;
+    let Some(px) = img.rgba.get(o..o + 3) else { return false };
+    let n = px.iter().map(|&c| f32::from(c) / 255.0 * 2.0 - 1.0);
+    ((n.map(|v| v * v).sum::<f32>()).sqrt() - 1.0).abs() < 0.03
+}
+
 /// Builds `GrassMeshes.bin` from the `.lfg` files in `out` and links them (`GMPK`).
 pub fn build(p: &mut Profile, out: &Path, s: &Settings, write: WriteOptions) -> Result<Report> {
     let t0 = Instant::now();
@@ -247,7 +293,25 @@ pub fn build(p: &mut Profile, out: &Path, s: &Settings, write: WriteOptions) -> 
     // output, read through the VFS while the pages are made).
     let work = out.parent().unwrap_or(out).join(format!(".lodforge-grass-cards-{}", std::process::id()));
     let grass_models: Vec<String> = models.keys().filter(|k| !k.contains('#')).cloned().collect();
-    let cards = render_cards(p, &grass_models, &work)?;
+    // Community Shaders complex grass (colour over normal/specular in one texture).
+    {
+        let mut tx = crate::instances::TextureIndex::default();
+        let complex: Vec<&String> = grass_models
+            .iter()
+            .filter(|m| {
+                vfs_mesh(p, m).and_then(|lm| lm.parts.iter().find(|q| !q.textures[0].trim().is_empty()).map(|q| tx.resolve(p, &q.textures[0]))).and_then(|t| p.vfs.read(&t).ok().flatten()).is_some_and(|b| is_complex_texture(&b))
+            })
+            .collect();
+        println!("grass: {} of {} grass models use complex grass textures", complex.len(), grass_models.len());
+        if std::env::var_os("LODFORGE_GRASS_COMPLEX_LIST").is_some() {
+            for m in &complex {
+                println!("  complex: {m}");
+            }
+        }
+    }
+    let complex_textures = complex_diffuses(p, &grass_models);
+    let s = &Settings { tile_cap: s.tile_cap, page: s.page, complex: complex_textures.clone() };
+    let cards = render_cards(p, &grass_models, &work, &complex_textures)?;
     let p: &Profile = p;
     let load = |key: &str| -> Option<LodMesh> {
         if let Some(m) = key.strip_suffix("#decimated") {

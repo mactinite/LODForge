@@ -471,6 +471,42 @@ fn repeat_rgba(px: &[u8], w: u32, h: u32, ru: u32, rv: u32) -> Vec<u8> {
 
 const FLAT_NORMAL: [u8; 4] = [128, 128, 255, 255];
 
+/// Key suffixes of complex grass tiles: the source texture's top half (colour) or bottom half
+/// (normal RGB, specular A).
+pub const HALF_TOP: &str = "~ct";
+pub const HALF_BOTTOM: &str = "~cb";
+
+/// The render layout of a complex grass page family: each page twice as high, every entry
+/// repeated in the bottom half for the texture's bottom half.
+pub fn complex_layout(layout: &AtlasLayout) -> AtlasLayout {
+    let mut l = layout.clone();
+    let heights: Vec<u32> = l.pages.iter().map(|p| p.height).collect();
+    for p in &mut l.pages {
+        p.height *= 2;
+    }
+    let bottom: Vec<_> = layout
+        .entries
+        .iter()
+        .filter(|e| e.page != usize::MAX)
+        .map(|e| {
+            let mut b = e.clone();
+            b.y += heights[e.page];
+            b.texture = format!("{}{HALF_BOTTOM}", e.texture.strip_suffix(HALF_TOP).unwrap_or(&e.texture));
+            b
+        })
+        .collect();
+    l.entries.extend(bottom);
+    l
+}
+
+/// A half of a source texture at `w x h` (the full texture loaded at `w x 2h`).
+fn load_half(vfs: &Vfs, path: &str, w: u32, h: u32, kind: MipKind, top: bool) -> Option<Vec<u8>> {
+    let full = load_tile(vfs, path, w, h * 2, kind)?;
+    let row = (w * 4) as usize;
+    let start = if top { 0 } else { h as usize * row };
+    full.get(start..start + h as usize * row).map(<[u8]>::to_vec)
+}
+
 /// Renders every page of `layout` in `formats`. Entry keys are `diffuse[,normal[,glow]][=alpha]`
 /// (a plain diffuse takes its normal from [normal_for]); tiles smaller than their source use the
 /// source's mip of that size or a resize. Every tile gets its own mip chain (colour in linear
@@ -506,10 +542,20 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                         let g = load_tile(vfs, parts[2], e.width, e.height, MipKind::Color).map(|px| chain(&opaque(px), MipKind::Color));
                         return (d, chain(&n, MipKind::Normal), g);
                     }
+                    // Complex grass halves: colour (top) like any tile but cropped; normal and
+                    // specular (bottom) kept as they are, mipped as a normal map.
+                    if let Some(t) = e.texture.strip_suffix(HALF_BOTTOM) {
+                        let d = t.split('=').next().unwrap_or("").split(',').next().unwrap_or("");
+                        let px = load_half(vfs, d, e.width, e.height, MipKind::Normal, false).unwrap_or_else(flat);
+                        return (Some(chain(&px, MipKind::Normal)), chain(&flat(), MipKind::Normal), None);
+                    }
+                    let half_top = e.texture.ends_with(HALF_TOP);
+                    let texture = e.texture.strip_suffix(HALF_TOP).unwrap_or(&e.texture);
                     // A repeat tile (`key*<ru>x<rv>`) holds its texture ru x rv times.
-                    let (key, repeats) = lodforge_objlod::tiling::split_key(&e.texture);
+                    let (key, repeats) = lodforge_objlod::tiling::split_key(texture);
                     let load = |path: &str, kind: MipKind| match repeats {
                         Some(r) => load_repeated(vfs, path, e.width, e.height, r, kind),
+                        None if half_top => load_half(vfs, path, e.width, e.height, kind, true),
                         None => load_tile(vfs, path, e.width, e.height, kind),
                     };
                     let sources = key.split('=').next().unwrap_or("");
@@ -520,12 +566,12 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
                     };
                     // `=o` (mesh packs): the shape has no alpha test; its alpha (often specular or
                     // a mask) must not cut holes on an alpha-tested page.
-                    if e.texture.split_once('=').is_some_and(|(_, o)| o == "o") {
+                    if texture.split_once('=').is_some_and(|(_, o)| o == "o") {
                         rgba.chunks_exact_mut(4).for_each(|px| px[3] = 255);
                     }
                     // `=tNNN` (tree mesh pack): the shape alpha-tests at NNN; remap alpha so that
                     // NNN lands on the page's 128 (piecewise linear, 0 and 255 kept).
-                    if let Some(t) = e.texture.split_once("=t").and_then(|(_, t)| t.parse::<u8>().ok()).filter(|&t| t != 128 && t > 0 && t < 255) {
+                    if let Some(t) = texture.split_once("=t").and_then(|(_, t)| t.parse::<u8>().ok()).filter(|&t| t != 128 && t > 0 && t < 255) {
                         let t = f32::from(t);
                         for px in rgba.chunks_exact_mut(4) {
                             let a = f32::from(px[3]);
