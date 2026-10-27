@@ -200,6 +200,8 @@ pub struct WorldFiles {
     /// `meshes\lod\grass\*_lod1.nif` (Community Shaders Grass Optimizations meshes).
     pub grass_models: Vec<String>,
     pub lodsettings: Option<LodSettings>,
+    /// LODForge Runtime files (trees, repeated statics); empty for a classic output.
+    pub runtime: crate::runtime::RuntimeFiles,
 }
 
 impl WorldFiles {
@@ -404,6 +406,7 @@ pub fn discover(
     let lodsettings = files
         .read(&format!("lodsettings\\{wl}.lod"))
         .and_then(|b| LodSettings::parse(&b));
+    let runtime = crate::runtime::discover(files, lister, world, season.as_deref());
     WorldFiles {
         world: world.to_string(),
         season,
@@ -416,6 +419,7 @@ pub fn discover(
         tree_atlas_normal,
         grass_models,
         lodsettings,
+        runtime,
     }
 }
 

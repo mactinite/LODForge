@@ -23,6 +23,10 @@ struct Globals {
     atmo: array<vec4<f32>, 11>,
     // x = weather looks on.
     atmo_on: vec4<f32>,
+    // LODForge Runtime tree rules: 0 (mesh tier end, 0 = off; hand-over band; frame dither;
+    // alpha ref), 1 (fade-out start, end; thin start, end), 2 (thin keep; blend frames; rules on;
+    // apply type tint).
+    rt: array<vec4<f32>, 3>,
 };
 
 // With weather looks on, lighting, fog and the sky are computed the way the game does without
@@ -144,6 +148,41 @@ fn vs_mesh(in: VsIn) -> VsOut {
     out.bitangent = in.bitangent.xyz;
     out.color = in.color;
     out.inst = in.inst;
+    return out;
+}
+
+// Runtime mesh packs (near-tier tree meshes, repeated statics): model-space vertices moved by
+// the instance's rows; the vertex's page picks its material (fs_mesh).
+struct PackIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) normal: vec4<f32>,
+    @location(3) tangent: vec4<f32>,
+    @location(4) bitangent: vec4<f32>,
+    @location(5) color: vec4<f32>,
+    @location(6) page: u32,
+    @location(7) r0: vec4<f32>,
+    @location(8) r1: vec4<f32>,
+    @location(9) r2: vec4<f32>,
+};
+
+fn pack_dir(in: PackIn, d: vec3<f32>) -> vec3<f32> {
+    return normalize(vec3<f32>(dot(in.r0.xyz, d), dot(in.r1.xyz, d), dot(in.r2.xyz, d)) + vec3<f32>(0.0, 0.0, 1e-6));
+}
+
+@vertex
+fn vs_pack(in: PackIn) -> VsOut {
+    var out: VsOut;
+    let p = vec4<f32>(in.pos, 1.0);
+    let w = vec3<f32>(dot(in.r0, p), dot(in.r1, p), dot(in.r2, p));
+    out.clip = g.view_proj * vec4<f32>(w, 1.0);
+    out.world = w;
+    out.uv = in.uv;
+    out.normal = pack_dir(in, in.normal.xyz);
+    out.tangent = pack_dir(in, in.tangent.xyz);
+    out.bitangent = pack_dir(in, in.bitangent.xyz);
+    out.color = in.color;
+    out.inst = in.page;
     return out;
 }
 
@@ -401,6 +440,8 @@ struct ImpIn {
     @location(3) misc: vec4<f32>,
     // rgb: brightness * tint; w: 1 when the albedo is pre-lit.
     @location(4) tint: vec4<f32>,
+    // x: reference hash, y: flags (bit 0: the tree has a mesh-tier model).
+    @location(5) ids: vec4<u32>,
     @builtin(vertex_index) vi: u32,
 };
 
@@ -416,7 +457,48 @@ struct ImpOut {
     // x grid, y frame px, z yaw.
     @location(6) @interpolate(flat) info: vec3<f32>,
     @location(7) @interpolate(flat) tint: vec4<f32>,
+    // Distance fade (1 = fully shown), dithered per pixel as the game's depth pass does.
+    @location(8) @interpolate(flat) fade: f32,
 };
+
+// The runtime's hash ranks (InstanceCull.hlsl): ((hash * k) >> 8) / 2^24.
+fn rt_rank(hash: u32, k: u32) -> f32 {
+    return f32((hash * k) >> 8u) / 16777216.0;
+}
+
+// Fade of a runtime tree impostor at `dist` (0: not drawn): fade-out band, hash-ranked thinning
+// and the hand-over to the mesh tier (a tree with a mesh is drawn by vs_pack on the near side
+// of its own point in the band).
+fn rt_tree_fade(dist: f32, hash: u32, has_mesh: bool) -> f32 {
+    if (g.rt[2].z < 0.5) {
+        return 1.0;
+    }
+    var fade = 1.0;
+    let f = g.rt[1];
+    if (f.y > f.x) {
+        fade = clamp((f.y - dist) / (f.y - f.x), 0.0, 1.0);
+    }
+    let t = clamp((dist - f.z) / max(f.w - f.z, 1.0), 0.0, 1.0);
+    if (rt_rank(hash, 1u) >= mix(1.0, g.rt[2].x, t)) {
+        return 0.0;
+    }
+    let end = g.rt[0].x;
+    if (has_mesh && end > 0.0) {
+        let mesh_t = clamp((dist - (end - g.rt[0].y)) / max(g.rt[0].y, 1.0), 0.0, 1.0);
+        if (rt_rank(hash, 2654435761u) >= mesh_t) {
+            return 0.0;
+        }
+    }
+    return fade;
+}
+
+// 4x4 Bayer threshold of a pixel, in (0, 1).
+fn bayer4(p: vec2<f32>) -> f32 {
+    let x = u32(p.x) & 3u;
+    let y = u32(p.y) & 3u;
+    var m = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    return (m[y * 4u + x] + 0.5) / 16.0;
+}
 
 fn hemi_oct_encode(d: vec3<f32>) -> vec2<f32> {
     let n = abs(d.x) + abs(d.y) + d.z;
@@ -486,34 +568,64 @@ fn vs_impostor(in: ImpIn) -> ImpOut {
         }
     }
     dir = normalize(vec3<f32>(dir.xy, max(dir.z, 0.02)));
-    // The enclosing triangle of grid-vertex frames and its barycentric weights.
     let max_idx = grid - 1.0;
     let gp = clamp(hemi_oct_encode(dir), vec2<f32>(0.0), vec2<f32>(1.0)) * max_idx;
-    let b = min(floor(gp), vec2<f32>(max_idx - 1.0));
-    let f = gp - b;
-    var i0: vec2<f32>;
-    var i1 = b + vec2<f32>(1.0, 0.0);
-    var i2 = b + vec2<f32>(0.0, 1.0);
-    var w: vec3<f32>;
-    if (f.x + f.y <= 1.0) {
-        i0 = b;
-        w = vec3<f32>(1.0 - f.x - f.y, f.x, f.y);
-    } else {
-        i0 = b + vec2<f32>(1.0, 1.0);
-        w = vec3<f32>(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
-    }
-    // Quad facing the camera in the view direction's own basis.
-    let right = imp_right(dir);
-    let up = imp_up(dir, right);
     let cx = select(-0.5, 0.5, (in.vi & 1u) == 1u);
     let cy = select(-0.5, 0.5, in.vi >= 2u);
-    let p = (right * cx + up * cy) * quad;
-    let world = pos + rot_z((center + p) * scale, -yaw);
+    let hash = in.ids.x;
+    var p: vec3<f32>;
+    if (g.rt[2].y > 0.5) {
+        // Shader contract: the enclosing triangle of grid-vertex frames, blended by barycentric
+        // weight, on a quad facing the camera in the view direction's own basis.
+        let b = min(floor(gp), vec2<f32>(max_idx - 1.0));
+        let f = gp - b;
+        var i0: vec2<f32>;
+        let i1 = b + vec2<f32>(1.0, 0.0);
+        let i2 = b + vec2<f32>(0.0, 1.0);
+        var w: vec3<f32>;
+        if (f.x + f.y <= 1.0) {
+            i0 = b;
+            w = vec3<f32>(1.0 - f.x - f.y, f.x, f.y);
+        } else {
+            i0 = b + vec2<f32>(1.0, 1.0);
+            w = vec3<f32>(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
+        }
+        let right = imp_right(dir);
+        let up = imp_up(dir, right);
+        p = (right * cx + up * cy) * quad;
+        out.f0 = vec4<f32>(i0, frame_uv(p, i0, grid, quad));
+        out.f1 = vec4<f32>(i1, frame_uv(p, i1, grid, quad));
+        out.f2 = vec4<f32>(i2, frame_uv(p, i2, grid, quad));
+        out.w = w;
+    } else {
+        // The runtime (ImpostorVS.hlsl): the nearest frame, switching at a per-tree jittered
+        // angle, on a quad in that frame's own capture plane.
+        let jitter = (vec2<f32>(f32(hash & 0xFFFFu), f32(hash >> 16u)) / 65535.0 - 0.5) * g.rt[0].z;
+        let idx = clamp(floor(gp + 0.5 + jitter), vec2<f32>(0.0), vec2<f32>(max_idx));
+        let fd = frame_dir(idx, grid);
+        let right = imp_right(fd);
+        let up = imp_up(fd, right);
+        p = (right * cx + up * cy) * quad;
+        let inset = 1.0 - 1.0 / max(in.misc.z, 2.0);
+        let local = vec2<f32>(0.5 + cx * inset, 0.5 - cy * inset);
+        out.f0 = vec4<f32>(idx, local);
+        out.f1 = out.f0;
+        out.f2 = out.f0;
+        out.w = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    var world = pos + rot_z((center + p) * scale, -yaw);
+    // Distance rules, measured from the camera to the impostor centre's height above the base.
+    let dist = distance(g.cam_pos.xyz, pos + vec3<f32>(0.0, 0.0, center.z * scale));
+    var fade = 1.0;
+    if (g.cam_pos.w < 0.5) {
+        fade = rt_tree_fade(dist, hash, (in.ids.y & 1u) != 0u);
+    }
+    out.fade = fade;
     out.clip = g.view_proj * vec4<f32>(world, 1.0);
-    out.f0 = vec4<f32>(i0, frame_uv(p, i0, grid, quad));
-    out.f1 = vec4<f32>(i1, frame_uv(p, i1, grid, quad));
-    out.f2 = vec4<f32>(i2, frame_uv(p, i2, grid, quad));
-    out.w = w;
+    if (fade <= 0.0) {
+        // Not drawn: every corner outside the clip volume.
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    }
     out.world = world;
     out.rect = in.rect;
     out.info = vec3<f32>(grid, in.misc.z, yaw);
@@ -557,19 +669,23 @@ fn fs_impostor(in: ImpOut) -> @location(0) vec4<f32> {
         select(0.0, 1.0, all(in.f2.zw >= vec2<f32>(0.0)) && all(in.f2.zw <= vec2<f32>(1.0))));
     let w = in.w;
     let alpha = w.x * a0.a * inside.x + w.y * a1.a * inside.y + w.z * a2.a * inside.z;
-    // The game's alpha-test reference (the baker keeps each frame's coverage at it in every mip).
-    var threshold = 0.5;
+    // The runtime's alpha-test reference (fAlphaRef 0.5; the baker keeps each frame's coverage at
+    // it in every mip).
+    var threshold = g.rt[0].w;
     if (g.params.z >= 0.0) {
         threshold = g.params.z;
     }
-    if (alpha < threshold) {
+    if (alpha < threshold || bayer4(in.clip.xy) > in.fade) {
         discard;
     }
     // Colour: weights renormalised over the covering frames (an uncovered frame's dilated colour
     // would bleed in).
     let cw = w * vec3<f32>(a0.a, a1.a, a2.a) * inside;
-    // Calibration (brightness * tint) applies to the encoded (gamma-space) albedo.
-    let base = to_linear(to_gamma((cw.x * a0.rgb + cw.y * a1.rgb + cw.z * a2.rgb) / max(cw.x + cw.y + cw.z, 1e-4)) * in.tint.rgb);
+    // Calibration (brightness * tint) applies to the encoded (gamma-space) albedo; the runtime
+    // cannot apply it yet (CS's DistantTree pixel shader has no colour input), so it is off by
+    // default.
+    let tint = select(vec3<f32>(1.0), in.tint.rgb, g.rt[2].w > 0.5);
+    let base = to_linear(to_gamma((cw.x * a0.rgb + cw.y * a1.rgb + cw.z * a2.rgb) / max(cw.x + cw.y + cw.z, 1e-4)) * tint);
     let prelit = in.tint.w > 0.5;
     // Normal: baked model-space normals, eased toward the canopy shell for stable far shading.
     let baked = normalize(cw.x * (n0.rgb * 2.0 - 1.0) + cw.y * (n1.rgb * 2.0 - 1.0) + cw.z * (n2.rgb * 2.0 - 1.0) + vec3<f32>(0.0, 0.0, 1e-4));

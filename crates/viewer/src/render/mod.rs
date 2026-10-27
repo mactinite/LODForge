@@ -69,7 +69,34 @@ impl Vertex {
     };
 }
 
-fn snorm(v: [f32; 3]) -> [i8; 4] {
+/// Vertex of a runtime mesh pack (40 bytes): model-space [`Vertex`] plus its atlas page (the
+/// index of the page's material).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PackVertex {
+    pub pos: [f32; 3],
+    pub uv: [f32; 2],
+    pub normal: [i8; 4],
+    pub tangent: [i8; 4],
+    pub bitangent: [i8; 4],
+    pub color: [u8; 4],
+    pub page: u32,
+}
+
+const PACK_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: 40,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Snorm8x4, 3 => Snorm8x4, 4 => Snorm8x4, 5 => Unorm8x4, 6 => Uint32],
+};
+
+/// [`crate::runtime::PackInstance`]: three rows of the model -> world transform.
+const PACK_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: 48,
+    step_mode: wgpu::VertexStepMode::Instance,
+    attributes: &wgpu::vertex_attr_array![7 => Float32x4, 8 => Float32x4, 9 => Float32x4],
+};
+
+pub fn snorm(v: [f32; 3]) -> [i8; 4] {
     let q = |x: f32| (x.clamp(-1.0, 1.0) * 127.0).round() as i8;
     [q(v[0]), q(v[1]), q(v[2]), 0]
 }
@@ -194,6 +221,8 @@ pub struct GlobalsGpu {
     /// Weather and water, see `atmosphere::Atmosphere::gpu`; `atmo_on.x` = 1 when used.
     pub atmo: [[f32; 4]; 11],
     pub atmo_on: [f32; 4],
+    /// LODForge Runtime tree rules, see `runtime::RuntimeParams::gpu`.
+    pub rt: [[f32; 4]; 3],
 }
 
 /// Shading modes (`params.x`).
@@ -293,7 +322,7 @@ impl LineVertex {
 const IMPOSTOR_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: std::mem::size_of::<crate::impostors::ImpostorInstance>() as u64,
     step_mode: wgpu::VertexStepMode::Instance,
-    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4],
+    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Uint32x4],
 };
 
 const TREE_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -559,10 +588,12 @@ pub struct DrawShape<'a> {
 #[derive(Default)]
 pub struct Frame<'a> {
     pub shapes: Vec<DrawShape<'a>>,
-    /// Tree billboard instances, their count and the atlas bind group.
-    pub trees: Option<(&'a wgpu::Buffer, u32, &'a wgpu::BindGroup)>,
+    /// Tree billboard instances, the instance ranges drawn and the atlas bind group.
+    pub trees: Option<(&'a wgpu::Buffer, Vec<Range<u32>>, &'a wgpu::BindGroup)>,
     /// Impostor instances (one buffer) and per atlas page its instance range and bind group.
     pub impostors: Option<(&'a wgpu::Buffer, Vec<(Range<u32>, &'a wgpu::BindGroup)>)>,
+    /// Runtime mesh packs (near-tier trees, repeated statics) with this frame's instances.
+    pub packs: Vec<PackDraw<'a>>,
     /// Lines tested against depth.
     pub lines: Vec<LineVertex>,
     /// Lines drawn over everything.
@@ -572,6 +603,16 @@ pub struct Frame<'a> {
     pub clear: [f64; 4],
     /// Draw the weather's sky gradient behind everything (instead of the clear colour alone).
     pub sky: bool,
+}
+
+/// One runtime mesh pack in a frame: its buffers, per-page materials and textures, and the
+/// frame's instances and draws (see [`crate::runtime::PackFrame`]).
+pub struct PackDraw<'a> {
+    pub vbuf: &'a wgpu::Buffer,
+    pub ibuf: &'a wgpu::Buffer,
+    pub materials: &'a wgpu::BindGroup,
+    pub pages: Vec<&'a wgpu::BindGroup>,
+    pub frame: crate::runtime::PackFrame,
 }
 
 struct Targets {
@@ -589,6 +630,7 @@ pub struct Renderer {
     mesh_cull: wgpu::RenderPipeline,
     mesh_nocull: wgpu::RenderPipeline,
     mesh_blend: wgpu::RenderPipeline,
+    pack: wgpu::RenderPipeline,
     tree: wgpu::RenderPipeline,
     impostor: wgpu::RenderPipeline,
     sky: wgpu::RenderPipeline,
@@ -708,6 +750,29 @@ impl Renderer {
             "fs_mesh",
         );
         let mesh_blend = mesh("mesh blend", None, true, wgpu::PolygonMode::Fill, "fs_mesh");
+        // Runtime mesh packs: instanced model-space vertices, shaded by fs_mesh with the page's
+        // material; two-sided like the LOD material the runtime gives them.
+        let pack = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pack"),
+            layout: Some(&mesh_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_pack"),
+                buffers: &[PACK_VERTEX_LAYOUT, PACK_INSTANCE_LAYOUT],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: depth(true, wgpu::CompareFunction::GreaterEqual),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_mesh"),
+                targets: &[target(None)],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
         let wire = wireframe_supported
             .then(|| mesh("wire", None, false, wgpu::PolygonMode::Line, "fs_solid"));
         let tree = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -834,6 +899,7 @@ impl Renderer {
             mesh_cull,
             mesh_nocull,
             mesh_blend,
+            pack,
             tree,
             impostor,
             sky,
@@ -927,6 +993,19 @@ impl Renderer {
             })
         };
         let (lines, overlay) = (line_buf(&frame.lines), line_buf(&frame.overlay));
+        let pack_bufs: Vec<Option<wgpu::Buffer>> = frame
+            .packs
+            .iter()
+            .map(|p| {
+                (!p.frame.instances.is_empty()).then(|| {
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("pack instances"),
+                        contents: bytemuck::cast_slice(&p.frame.instances),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+                })
+            })
+            .collect();
         let t = self.targets(device, width.max(1), height.max(1));
         let (view, resolve) = match &t.msaa {
             Some(m) => (m, Some(target)),
@@ -998,13 +1077,34 @@ impl Renderer {
                 pass.draw_indexed(s.indices.clone(), 0, s.material_index..s.material_index + 1);
             }
             if pick == 1 {
-                if let Some((inst, count, atlas)) = frame.trees {
-                    if count > 0 {
+                if !frame.packs.is_empty() {
+                    pass.set_pipeline(&self.pack);
+                    for (p, buf) in frame.packs.iter().zip(&pack_bufs) {
+                        let Some(buf) = buf else { continue };
+                        pass.set_bind_group(1, p.materials, &[]);
+                        pass.set_vertex_buffer(0, p.vbuf.slice(..));
+                        pass.set_vertex_buffer(1, buf.slice(..));
+                        pass.set_index_buffer(p.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        let mut last = u16::MAX;
+                        for (page, idx, inst) in &p.frame.draws {
+                            let Some(bg) = p.pages.get(usize::from(*page)) else { continue };
+                            if *page != last {
+                                pass.set_bind_group(2, *bg, &[]);
+                                last = *page;
+                            }
+                            pass.draw_indexed(idx.clone(), 0, inst.clone());
+                        }
+                    }
+                }
+                if let Some((inst, ranges, atlas)) = &frame.trees {
+                    if !ranges.is_empty() {
                         pass.set_pipeline(&self.tree);
-                        pass.set_bind_group(1, atlas, &[]);
+                        pass.set_bind_group(1, *atlas, &[]);
                         pass.set_vertex_buffer(0, inst.slice(..));
                         pass.set_index_buffer(self.tree_quad.slice(..), wgpu::IndexFormat::Uint16);
-                        pass.draw_indexed(0..6, 0, 0..count);
+                        for r in ranges {
+                            pass.draw_indexed(0..6, 0, r.clone());
+                        }
                     }
                 }
                 if let Some((inst, pages)) = &frame.impostors {

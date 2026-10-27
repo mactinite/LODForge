@@ -28,9 +28,15 @@ pub struct Layers {
     pub grass: bool,
     /// Classic tree LOD (`.btt`).
     pub trees: bool,
-    /// LODForge runtime impostors (preview; not part of `all`, it would double the trees).
-    #[serde(default)]
+    /// LODForge Runtime tree impostors (runtime mode).
+    #[serde(default = "yes")]
     pub impostors: bool,
+    /// LODForge Runtime near-tier tree meshes (runtime mode).
+    #[serde(default = "yes")]
+    pub tree_meshes: bool,
+    /// LODForge Runtime repeated statics (instanced object LOD, runtime mode).
+    #[serde(default = "yes")]
+    pub statics: bool,
     /// Only shapes flagged as large references.
     pub large_refs_only: bool,
 }
@@ -44,7 +50,9 @@ impl Default for Layers {
             tree_billboards: true,
             grass: true,
             trees: true,
-            impostors: false,
+            impostors: true,
+            tree_meshes: true,
+            statics: true,
             large_refs_only: false,
         }
     }
@@ -74,6 +82,8 @@ impl Layers {
             grass: false,
             trees: false,
             impostors: false,
+            tree_meshes: false,
+            statics: false,
             large_refs_only: false,
         };
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
@@ -86,6 +96,13 @@ impl Layers {
                 "grass" => l.grass = true,
                 "trees" => l.trees = true,
                 "impostors" => l.impostors = true,
+                "tree_meshes" | "tree-meshes" => l.tree_meshes = true,
+                "statics" => l.statics = true,
+                "runtime" => {
+                    l.impostors = true;
+                    l.tree_meshes = true;
+                    l.statics = true;
+                }
                 "large_refs" | "large-refs" | "largerefs" => l.large_refs_only = true,
                 _ => {}
             }
@@ -120,6 +137,12 @@ pub struct ViewSettings {
     /// Sky, distance fog, sun / ambient light and water colours of a weather (free camera).
     pub atmosphere: bool,
     pub atmosphere_data: crate::atmosphere::Atmosphere,
+    /// Runtime or classic tree / repeated-static LOD (auto: runtime when the output has it).
+    #[serde(default)]
+    pub lod_source: crate::runtime::LodSource,
+    /// The runtime's distance rules (its INI defaults).
+    #[serde(default)]
+    pub runtime: crate::runtime::RuntimeParams,
 }
 
 impl Default for ViewSettings {
@@ -141,8 +164,18 @@ impl Default for ViewSettings {
             snow_materials: crate::snow::SnowMaterials::default(),
             atmosphere: true,
             atmosphere_data: crate::atmosphere::Atmosphere::default(),
+            lod_source: crate::runtime::LodSource::Auto,
+            runtime: crate::runtime::RuntimeParams::default(),
         }
     }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn pack_draw(p: &crate::scene::GpuPack, frame: crate::runtime::PackFrame) -> crate::render::PackDraw<'_> {
+    crate::render::PackDraw { vbuf: &p.vbuf, ibuf: &p.ibuf, materials: &p.materials_bg, pages: p.pages.iter().map(|t| &t.bind_group).collect(), frame }
 }
 
 /// Scene quad indices to draw for the camera's (x, y): terrain and object blocks of the levels
@@ -181,6 +214,9 @@ pub struct FrameStats {
     pub shapes: usize,
     pub triangles: usize,
     pub trees: u32,
+    /// Runtime: mesh-tier trees and repeated statics drawn this frame.
+    pub tree_meshes: u32,
+    pub statics: u32,
 }
 
 fn level_color(level: i32) -> [u8; 4] {
@@ -274,20 +310,46 @@ pub fn build_frame<'a>(
             d.vbuf as *const _ as usize,
         )
     });
-    if s.layers.trees {
+    if s.layers.trees && !s.layers.large_refs_only {
         if let Some(t) = &scene.trees {
-            if !t.instances.is_empty() && !s.layers.large_refs_only {
-                frame.trees = Some((&t.buffer, t.instances.len() as u32, &t.atlas.bind_group));
-                stats.trees = t.instances.len() as u32;
+            // The game draws tree LOD (`.btt`) only with the LOD4 blocks: where a block shows
+            // LOD8 or coarser, its trees are gone (they live in object LOD there, if anywhere).
+            let lod4: HashSet<QuadId> = visible.iter().map(|&i| scene.quads[i].data.quad).filter(|q| q.level == 4).collect();
+            let ranges: Vec<std::ops::Range<u32>> = t.blocks.iter().filter(|(q, r)| !r.is_empty() && lod4.contains(q)).map(|(_, r)| r.clone()).collect();
+            if !ranges.is_empty() {
+                stats.trees = ranges.iter().map(|r| r.end - r.start).sum();
+                frame.trees = Some((&t.buffer, ranges, &t.atlas.bind_group));
             }
         }
     }
-    if s.layers.impostors && !s.layers.large_refs_only {
-        if let Some(t) = &scene.impostors {
-            if t.count > 0 {
-                frame.impostors = Some((&t.buffer, t.pages.iter().map(|(r, bg)| (r.clone(), &bg.bind_group)).collect()));
-                stats.trees += t.count;
+    let runtime_on = s.lod_source.runtime(scene.runtime.is_some());
+    if let (true, Some(rt)) = (runtime_on, &scene.runtime) {
+        let cam = view.eye;
+        let mult = match s.mode {
+            LodMode::Game { distance_mult } => distance_mult,
+            LodMode::Single(_) => 1.0,
+        };
+        let mesh_tier = s.layers.tree_meshes && rt.tree_pack.is_some() && !view.ortho;
+        if s.layers.impostors && !s.layers.large_refs_only {
+            if let Some(t) = &rt.impostors {
+                if t.count > 0 {
+                    frame.impostors = Some((&t.buffer, t.pages.iter().map(|(r, bg)| (r.clone(), &bg.bind_group)).collect()));
+                    stats.trees += t.count;
+                }
             }
+        }
+        if let (true, Some(p)) = (mesh_tier, &rt.tree_pack) {
+            let end = s.runtime.mesh_end(&s.lod_distances, mult);
+            let f = crate::runtime::select_tree_meshes(&rt.trees, &p.meshes, &p.bounds, cam, &planes, end, s.runtime.mesh_tier_band);
+            stats.tree_meshes = f.instances.len() as u32;
+            stats.triangles += f.triangles as usize;
+            frame.packs.push(pack_draw(p, f));
+        }
+        if let (true, false, Some(p)) = (s.layers.statics && s.layers.objects, s.layers.large_refs_only, &rt.static_pack) {
+            let f = crate::runtime::select_statics(&rt.statics, &p.meshes, cam, &planes, s.mode, &s.lod_distances, s.runtime.static_band);
+            stats.statics = f.instances.len() as u32;
+            stats.triangles += f.triangles as usize;
+            frame.packs.push(pack_draw(p, f));
         }
     }
     if let Some(h) = selection {
@@ -340,6 +402,15 @@ pub fn build_frame<'a>(
         inv_view_proj: view.view_proj().inverse().to_cols_array_2d(),
         atmo: s.atmosphere_data.gpu(),
         atmo_on: [if s.atmosphere && !view.ortho { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        rt: s.runtime.gpu(
+            &s.lod_distances,
+            match s.mode {
+                LodMode::Game { distance_mult } => distance_mult,
+                LodMode::Single(_) => 1.0,
+            },
+            scene.runtime.as_ref().is_some_and(|r| r.tree_pack.is_some()),
+            !view.ortho,
+        ),
     };
     (frame, globals, stats)
 }

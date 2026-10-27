@@ -2810,6 +2810,7 @@ dependencies = [
  "lodforge-dds",
  "lodforge-gpu",
  "lodforge-impostor",
+ "lodforge-instances",
  "lodforge-nif",
  "png 0.17.16",
  "pollster",
