@@ -32,8 +32,8 @@ pub struct LoadOptions {
     pub terrain: bool,
     pub objects: bool,
     pub trees: bool,
-    /// The LODForge runtime impostor preview (`impostors` layer).
-    pub impostors: bool,
+    /// LODForge Runtime trees and repeated statics, when the output has them.
+    pub runtime: bool,
     /// Files nearest this point (x, y) load first.
     pub start: [f32; 2],
 }
@@ -47,7 +47,7 @@ impl Default for LoadOptions {
             terrain: true,
             objects: true,
             trees: true,
-            impostors: false,
+            runtime: true,
             start: [0.0, 0.0],
         }
     }
@@ -107,7 +107,7 @@ pub struct GpuTrees {
     pub unknown_types: usize,
 }
 
-/// The impostor preview: instances grouped by atlas page, one texture bind group per page.
+/// Runtime tree impostors: instances grouped by atlas page, one texture bind group per page.
 pub struct GpuImpostors {
     pub buffer: wgpu::Buffer,
     pub pages: Vec<(Range<u32>, Arc<TextureBindGroup>)>,
@@ -115,10 +115,31 @@ pub struct GpuImpostors {
     pub types: usize,
 }
 
+/// A runtime mesh pack on the GPU (`TreeMeshes.bin` / `StaticMeshes.bin`).
+pub struct GpuPack {
+    pub vbuf: wgpu::Buffer,
+    pub ibuf: wgpu::Buffer,
+    pub materials_bg: wgpu::BindGroup,
+    pub pages: Vec<Arc<TextureBindGroup>>,
+    pub meshes: Vec<crate::runtime::PackMesh>,
+    /// Model-space AABB per mesh.
+    pub bounds: Vec<[f32; 6]>,
+}
+
+/// The LODForge Runtime part of a world (see [`crate::runtime`]).
+#[derive(Default)]
+pub struct GpuRuntime {
+    pub trees: Vec<crate::runtime::Tree>,
+    pub impostors: Option<GpuImpostors>,
+    pub tree_pack: Option<GpuPack>,
+    pub statics: Vec<crate::runtime::Static>,
+    pub static_pack: Option<GpuPack>,
+}
+
 pub enum LoadEvent {
     Quad(Box<GpuQuad>),
     Trees(Box<GpuTrees>),
-    Impostors(Box<GpuImpostors>),
+    Runtime(Box<GpuRuntime>),
     Message(String),
     Done,
 }
@@ -129,7 +150,7 @@ pub struct Scene {
     pub quads: Vec<GpuQuad>,
     pub by_id: HashMap<(QuadId, FileKind), usize>,
     pub trees: Option<GpuTrees>,
-    pub impostors: Option<GpuImpostors>,
+    pub runtime: Option<GpuRuntime>,
     pub present_terrain: HashSet<QuadId>,
     pub present_objects: HashSet<QuadId>,
     pub bounds: Aabb,
@@ -149,7 +170,7 @@ impl Scene {
     }
 
     pub fn loaded(&self) -> usize {
-        self.quads.len() + usize::from(self.trees.is_some()) + usize::from(self.impostors.is_some())
+        self.quads.len() + usize::from(self.trees.is_some()) + usize::from(self.runtime.is_some())
     }
 
     pub fn apply(&mut self, ev: LoadEvent) {
@@ -168,7 +189,7 @@ impl Scene {
                 self.quads.push(*q);
             }
             LoadEvent::Trees(t) => self.trees = Some(*t),
-            LoadEvent::Impostors(t) => self.impostors = Some(*t),
+            LoadEvent::Runtime(t) => self.runtime = Some(*t),
             LoadEvent::Message(m) => self.messages.push(m),
             LoadEvent::Done => self.done = true,
         }
@@ -321,7 +342,7 @@ fn plan(world: &WorldFiles, o: &LoadOptions) -> Vec<(QuadFile, FileKind)> {
 
 /// Number of files the loader will stream (quads plus one for the trees).
 pub fn total_items(world: &WorldFiles, o: &LoadOptions) -> usize {
-    plan(world, o).len() + usize::from(o.trees && !world.trees.is_empty()) + usize::from(o.impostors)
+    plan(world, o).len() + usize::from(o.trees && !world.trees.is_empty()) + usize::from(o.runtime && world.runtime.present())
 }
 
 /// Drops top mips of the terrain textures per level until they fit the budget.
@@ -383,8 +404,8 @@ pub fn start(loader: Loader) -> Receiver<LoadEvent> {
             if loader.options.trees {
                 load_trees(&loader, &tx);
             }
-            if loader.options.impostors {
-                load_impostors(&loader, &tx);
+            if loader.options.runtime && loader.world.runtime.present() {
+                load_runtime(&loader, &tx);
             }
             items.par_iter().for_each_with(tx.clone(), |tx, (f, kind)| {
                 if loader.cancel.load(Ordering::Relaxed) {
@@ -584,38 +605,151 @@ fn load_trees(l: &Loader, tx: &Sender<LoadEvent>) {
     })));
 }
 
-/// Loads the worldspace's impostor set and preview instances (see [`crate::impostors`]).
-fn load_impostors(l: &Loader, tx: &Sender<LoadEvent>) {
-    let w = &l.world.world;
+
+/// Loads the worldspace's LODForge Runtime data (see [`crate::runtime`]): the trees with their
+/// impostor set and mesh-tier pack, and the repeated statics with their pack.
+fn load_runtime(l: &Loader, tx: &Sender<LoadEvent>) {
+    use lodforge_instances::meshpack::MeshPack;
     let msg = |m: String| {
         let _ = tx.send(LoadEvent::Message(m));
     };
-    let Some(index) = l.files.read(&crate::impostors::index_path(w)).and_then(|b| crate::impostors::parse_index(&b)) else {
-        msg(format!("impostors: no readable {}", crate::impostors::index_path(w)));
-        return;
-    };
-    let Some(inst) = l.files.read(&crate::impostors::preview_path(w)).and_then(|b| crate::impostors::parse_preview(&b)) else {
-        msg(format!("impostors: no readable {}", crate::impostors::preview_path(w)));
-        return;
-    };
-    let (gpu, ranges, unknown) = crate::impostors::instances(&inst, &index);
-    if unknown > 0 {
-        msg(format!("impostors: {unknown} instances of unknown types"));
+    let rf = &l.world.runtime;
+    let w = &l.world.world;
+    // The runtime drops the top mip of its impostor and static atlas pages by default
+    // (`iSkipMips`, `iStaticSkipMips` 1).
+    l.cache.set_drop("textures\\lodforge\\impostors\\", 1);
+    l.cache.set_drop("textures\\lodforge\\staticatlas\\", 1);
+    let mut rt = GpuRuntime::default();
+    if let Some(path) = &rf.trees {
+        match l.files.read(path).map(|b| lodforge_instances::trees::TreeFile::from_bytes(&b)) {
+            Some(Ok(tf)) => {
+                let index = rf.impostor_index.as_deref().and_then(|p| l.files.read(p)).and_then(|b| crate::impostors::parse_index(&b));
+                if index.is_none() {
+                    msg(format!("runtime: no readable impostor set {}", crate::impostors::index_path(w)));
+                }
+                if let Some(ix) = &index {
+                    let bad = tf.types.iter().zip(&ix.types).filter(|(a, b)| !a.name.eq_ignore_ascii_case(&b.name)).count();
+                    if bad > 0 || tf.types.len() != ix.types.len() {
+                        msg(format!("runtime: {path}: {bad} of {} tree types do not match the impostor set ({} types)", tf.types.len(), ix.types.len()));
+                    }
+                }
+                let center_z: Vec<f32> = index.as_ref().map(|ix| ix.types.iter().map(|t| t.bounds_center_offset[2]).collect()).unwrap_or_default();
+                rt.trees = crate::runtime::trees_of(&tf, &center_z);
+                if !tf.pack_meshes.is_empty() {
+                    match rf.tree_pack.as_deref().and_then(|p| l.files.read(p)).map(|b| MeshPack::from_bytes(&b)) {
+                        Some(Ok(p)) => rt.tree_pack = Some(upload_pack(l, &p, crate::render::kind_index(crate::mesh::ShapeKind::TreeBillboard), "tree meshes", &msg)),
+                        Some(Err(e)) => msg(format!("runtime: TreeMeshes.bin: {e}")),
+                        None => msg("runtime: TreeMeshes.bin missing (no mesh tier)".into()),
+                    }
+                }
+                if rt.tree_pack.is_none() {
+                    // Without the pack the impostors draw near too.
+                    for t in &mut rt.trees {
+                        t.mesh = lodforge_instances::meshpack::NO_MESH;
+                    }
+                }
+                if let Some(ix) = &index {
+                    rt.impostors = Some(upload_impostors(l, &rt.trees, ix, &msg));
+                }
+            }
+            Some(Err(e)) => msg(format!("runtime: {path}: {e}")),
+            None => msg(format!("runtime: {path} not readable")),
+        }
     }
-    let pages = index
+    if let Some(path) = &rf.statics {
+        match l.files.read(path).map(|b| lodforge_instances::statics::StaticsFile::from_bytes(&b)) {
+            Some(Ok(sf)) => match rf.static_pack.as_deref().and_then(|p| l.files.read(p)).map(|b| MeshPack::from_bytes(&b)) {
+                Some(Ok(p)) => {
+                    let pack = upload_pack(l, &p, crate::render::kind_index(crate::mesh::ShapeKind::Object), "static meshes", &msg);
+                    rt.statics = crate::runtime::statics_of(&sf, &pack.bounds);
+                    let missing = sf.records() - rt.statics.len();
+                    if missing > 0 {
+                        msg(format!("runtime: {missing} statics records have no pack mesh"));
+                    }
+                    rt.static_pack = Some(pack);
+                }
+                Some(Err(e)) => msg(format!("runtime: StaticMeshes.bin: {e}")),
+                None => msg("runtime: StaticMeshes.bin missing (repeated statics not drawn)".into()),
+            },
+            Some(Err(e)) => msg(format!("runtime: {path}: {e}")),
+            None => msg(format!("runtime: {path} not readable")),
+        }
+    }
+    let _ = tx.send(LoadEvent::Runtime(Box::new(rt)));
+}
+
+fn upload_impostors(l: &Loader, trees: &[crate::runtime::Tree], index: &lodforge_impostor::manifest::Index, msg: &(dyn Fn(String) + Sync)) -> GpuImpostors {
+    let (gpu, ranges, unknown) = crate::impostors::instances(trees, index);
+    if unknown > 0 {
+        msg(format!("runtime: {unknown} trees of unknown impostor types"));
+    }
+    // Pre-lit albedo (baker v2) is lit like a billboard, without the normal pages (as in game).
+    let normals = index.types.iter().any(|t| !t.prelit);
+    let pages: Vec<(Range<u32>, Arc<TextureBindGroup>)> = index
         .pages
-        .iter()
+        .par_iter()
         .zip(ranges)
         .map(|(p, r)| {
-            let albedo = l.cache.get(l.files.as_ref(), &p.albedo, true);
-            let nd = l.cache.get(l.files.as_ref(), &p.normal_depth, false);
-            if albedo.is_none() || nd.is_none() {
-                msg(format!("impostors: page {} textures missing ({}, {})", p.index, p.albedo, p.normal_depth));
+            let used = !r.is_empty();
+            let albedo = used.then(|| l.cache.get(l.files.as_ref(), &p.albedo, true)).flatten();
+            let nd = (used && normals).then(|| l.cache.get(l.files.as_ref(), &p.normal_depth, false)).flatten();
+            if used && albedo.is_none() {
+                msg(format!("runtime: impostor page {} missing ({})", p.index, p.albedo));
             }
             (r, Arc::new(l.layouts.texture_bind_group(&l.device, albedo, nd, false)))
         })
         .collect();
     let contents: Vec<crate::impostors::ImpostorInstance> = if gpu.is_empty() { vec![bytemuck::Zeroable::zeroed()] } else { gpu.clone() };
     let buffer = l.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("impostors"), contents: bytemuck::cast_slice(&contents), usage: wgpu::BufferUsages::VERTEX });
-    let _ = tx.send(LoadEvent::Impostors(Box::new(GpuImpostors { buffer, pages, count: gpu.len() as u32, types: index.types.len() })));
+    GpuImpostors { buffer, pages, count: gpu.len() as u32, types: index.types.len() }
+}
+
+/// Uploads a mesh pack: model-space vertices, indices, one material per atlas page (alpha test
+/// at the page's threshold, vertex colours, the page's snow / ash class) and the page textures.
+fn upload_pack(l: &Loader, p: &lodforge_instances::meshpack::MeshPack, kind: u32, label: &str, msg: &(dyn Fn(String) + Sync)) -> GpuPack {
+    use crate::render::{F_ALPHA_TEST, F_DOUBLE_SIDED, F_HAS_NORMALS, F_HAS_TANGENTS, F_NORMAL_MAP, F_VERTEX_COLORS, MaterialGpu};
+    let pages: Vec<(Arc<TextureBindGroup>, bool)> = p
+        .pages
+        .par_iter()
+        .map(|pg| {
+            let d = l.cache.get(l.files.as_ref(), &pg.albedo, true);
+            let n = if l.options.normal_maps { l.cache.get(l.files.as_ref(), &pg.normal, false) } else { None };
+            if d.is_none() {
+                msg(format!("runtime: {label} page {} missing", pg.albedo));
+            }
+            let has_n = n.is_some();
+            (Arc::new(l.layouts.texture_bind_group(&l.device, d, n, false)), has_n)
+        })
+        .collect();
+    let mut materials: Vec<MaterialGpu> = p
+        .pages
+        .iter()
+        .zip(&pages)
+        .map(|(pg, (_, has_n))| MaterialGpu {
+            flags: F_ALPHA_TEST | F_DOUBLE_SIDED | F_VERTEX_COLORS | F_HAS_NORMALS | F_HAS_TANGENTS | if *has_n { F_NORMAL_MAP } else { 0 },
+            threshold: f32::from(pg.alpha_threshold) / 255.0,
+            kind_level: kind | (u32::from(pg.class.min(4)) << 16),
+            ..Default::default()
+        })
+        .collect();
+    if materials.is_empty() {
+        materials.push(MaterialGpu::default());
+    }
+    let mut vertices = crate::runtime::pack_vertices(p);
+    if vertices.is_empty() {
+        vertices.push(bytemuck::Zeroable::zeroed());
+    }
+    let indices: Vec<u32> = if p.indices.is_empty() { vec![0, 0, 0] } else { p.indices.clone() };
+    let init = |label: &str, contents: &[u8], usage| l.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
+    let vbuf = init(label, bytemuck::cast_slice(&vertices), wgpu::BufferUsages::VERTEX);
+    let ibuf = init(label, bytemuck::cast_slice(&indices), wgpu::BufferUsages::INDEX);
+    let materials_buf = init("pack materials", bytemuck::cast_slice(&materials), wgpu::BufferUsages::STORAGE);
+    GpuPack {
+        vbuf,
+        ibuf,
+        materials_bg: l.layouts.materials_bind_group(&l.device, &materials_buf),
+        pages: pages.into_iter().map(|(t, _)| t).collect(),
+        meshes: crate::runtime::pack_meshes(p),
+        bounds: p.meshes.iter().map(|m| m.bounds).collect(),
+    }
 }

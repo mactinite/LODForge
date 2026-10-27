@@ -72,7 +72,7 @@ pub struct Args {
     #[arg(long, default_value_t = 1.0)]
     pub lod_distance: f32,
     /// Layers: `all` or a comma list of terrain, water, objects, tree_billboards, grass, trees,
-    /// large_refs.
+    /// impostors, tree_meshes, statics (`runtime` = the last three), large_refs.
     #[arg(long, default_value = "all")]
     pub layers: String,
     /// Shading: textured, unlit, normals, flat, level, kind.
@@ -97,10 +97,17 @@ pub struct Args {
     /// Load only these levels (comma list), e.g. `4` to save time and memory.
     #[arg(long, value_delimiter = ',')]
     pub load_levels: Vec<i32>,
-    /// A Data folder holding a LODForge impostor set (`textures\LODForge\Impostors\<World>\`,
-    /// from `lodforge impostors --preview-instances`), shown with the `impostors` layer.
+    /// An extra Data folder searched after the output (e.g. a LODForge impostor set,
+    /// `textures\LODForge\Impostors\<World>\`, built apart from the runtime files).
     #[arg(long)]
     pub impostors: Option<PathBuf>,
+    /// Tree and repeated-static LOD: `auto` (the LODForge Runtime's when the output has its files),
+    /// `runtime` or `classic` (`.bto` / `.btt` only, as the game without the plugin).
+    #[arg(long, default_value = "auto")]
+    pub lod_source: String,
+    /// Blend three impostor frames (the shader contract) instead of the runtime's nearest frame.
+    #[arg(long)]
+    pub impostor_blend: bool,
     /// MSAA samples for --screenshot.
     #[arg(long, default_value_t = 4)]
     pub samples: u32,
@@ -132,7 +139,7 @@ fn settings(a: &Args) -> Result<ViewSettings> {
         "game" => LodMode::Game { distance_mult: a.lod_distance },
         l => LodMode::Single(l.trim_start_matches("lod").parse().with_context(|| format!("--levels {l}: expected game, 4, 8, 16 or 32"))?),
     };
-    Ok(ViewSettings { mode, lod_distances: lod_distances(a), layers: Layers::parse(&a.layers), shading: Shading::parse(&a.shading).ok_or_else(|| anyhow!("--shading {}: expected textured, unlit, normals, flat, level or kind", a.shading))?, normal_maps: !a.no_normals, ..ViewSettings::default() })
+    Ok(ViewSettings { mode, lod_distances: lod_distances(a), layers: Layers::parse(&a.layers), shading: Shading::parse(&a.shading).ok_or_else(|| anyhow!("--shading {}: expected textured, unlit, normals, flat, level or kind", a.shading))?, normal_maps: !a.no_normals, lod_source: lodforge_viewer::runtime::LodSource::parse(&a.lod_source).ok_or_else(|| anyhow!("--lod-source {}: expected auto, runtime or classic", a.lod_source))?, runtime: lodforge_viewer::runtime::RuntimeParams { blend_frames: a.impostor_blend, ..Default::default() }, ..ViewSettings::default() })
 }
 
 /// The game arrangement's switch distances: the profile's SkyrimPrefs.ini (profile-local INIs
@@ -287,7 +294,7 @@ pub fn run(a: &Args) -> Result<()> {
     };
     let load = LoadOptions { texture_budget: a.texture_budget_mb << 20, normal_maps: !a.no_normals, levels: a.load_levels.clone(), ..LoadOptions::default() };
     let mut settings = settings(a)?;
-    let load = LoadOptions { impostors: settings.layers.impostors, ..load };
+    let load = LoadOptions { runtime: settings.lod_source != lodforge_viewer::runtime::LodSource::Classic, ..load };
     settings.snow_materials = snow;
     settings.snow = !a.no_snow;
     settings.atmosphere = !a.no_atmosphere;

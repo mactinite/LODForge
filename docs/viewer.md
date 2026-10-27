@@ -65,7 +65,54 @@ visible with "block outlines" on. A single level shows every block of that level
 to look at LOD16 up close.
 
 **Layers** switch terrain, water, object LOD, the tree and grass billboards inside object LOD,
-classic tree LOD and a "large references only" filter.
+classic tree LOD, the LODForge Runtime's impostors, near-tier tree meshes and repeated statics,
+and a "large references only" filter. Classic tree LOD (`.btt`) is drawn only with the LOD4
+blocks the arrangement shows, as the game attaches it to them; where a block shows LOD8 or
+coarser its trees are gone (DynDOLOD-style output puts them into object LOD there).
+
+**Alpha.** Object LOD (`.bto`) carries no `NiAlphaProperty`; the game's LOD shaders alpha-test
+every shape at 128 (docs/re/object-lod-spec.md), on the texture's alpha (the vertex alpha of
+`objSnow…` shapes is the snow amount). The viewer does the same. Before 2026-10-26 it only tested
+shapes with an alpha property, so the billboard trees and grass of object LOD drew as solid
+rectangles (left: before, right: after; tundra east of Whiterun, `--camera
+"14197,-19369,3000,90,-4" --fov 50`). Tree billboards are dithered on/off alpha in every mip
+(`--billboard-soft` off), so they read as a fine pattern at their real coverage, as in game.
+
+![alpha before](img/viewer-alpha-before.png) ![alpha after](img/viewer-alpha-after.png)
+
+**LODForge Runtime output.** When the output has `SKSE\Plugins\LODForgeRuntime\<World>[.<SEASON>].trees.bin`
+or `.statics.bin` (`build --runtime lodforge`), the viewer draws what the runtime plugin draws
+(LOD source "auto"; "runtime" / "classic" force it, `--lod-source` headless). Classic shows the
+`.bto` / `.btt` alone, i.e. the game without the plugin: a runtime build leaves the trees and the
+repeated statics out of those files. The rules come from the plugin's source and INI defaults
+(`InstanceCull.hlsl`, `StaticCull.hlsl`, `ImpostorVS.hlsl`, `Settings.h`), distances measured
+from the camera:
+
+- **Near-tier trees**: a tree whose type has a mesh in `TreeMeshes.bin` (`TMPK`) draws that LOD4
+  3D model up to `fBlockLevel0Distance` (`fMeshTierEnd` 0). Inside the last 4096 units
+  (`fMeshTierBand`) each tree switches to its impostor at its own point, from the hash rank
+  `((hash * 2654435761) >> 8) / 2^24`; the impostor shader drops exactly the trees the mesh side
+  keeps. Types without a mesh draw their impostor near too.
+- **Impostors** (`textures\LODForge\Impostors\<World>\impostors.json` + pages): the nearest
+  hemi-octahedral frame on a quad in that frame's capture plane, with the frame switch jittered
+  per tree by 0.35 frames (`fFrameDither`); alpha test 0.5 (`fAlphaRef`); thinned by hash rank
+  from 60000 to 200000 units down to 35 % kept; faded out from 200000 to 240000 (dithered). The
+  albedo is pre-lit and lit like a billboard, as CS's DistantTree pixel shader does in game; the
+  per-type brightness / tint and the normal pages are not used (the runtime cannot apply them
+  yet; "impostor type tint" shows them). "Blend 3 impostor frames" (`--impostor-blend`) draws the
+  shader contract's 3-frame blend instead. The top mip of the impostor and static atlas pages is
+  dropped, as the runtime does by default (`iSkipMips`, `iStaticSkipMips`).
+- **Repeated statics** (`.statics.bin` + `StaticMeshes.bin`): each record is drawn inside its
+  level's band (LOD4 up to `fBlockLevel0Distance`, LOD8 to `fBlockLevel1Distance`, LOD16 to
+  `fBlockMaximumDistance`, LOD32 beyond, times the distance slider), the switch to the next level
+  placed inside the last 2048 units (`fBand`) by the reference's hash rank. A single-level view
+  shows that level's records. Pages carry the engine's LOD material class (snow / ash projected
+  as on `objSnow` shapes), alpha test at the page threshold (128) and the vertex colours.
+
+The Rift from above (`--camera 100000,-112000,40000,45,-28 --fov 50`) on a runtime build, as
+the game draws it with the plugin:
+
+![runtime](img/viewer-rift-runtime.png)
 
 **Shading.** Textured (sun and ambient, normal maps), unlit (the textures as stored), normals
 (world-space, as lit), flat (geometry only), by level (LOD4 green, LOD8 yellow, LOD16 orange,
@@ -115,8 +162,10 @@ lodforge view --out '...' --world Tamriel --screenshot map.png --levels 32 --sha
 lodforge view --out '...' --world Tamriel --check --json issues.json
 ```
 
-`--levels game|4|8|16|32`, `--lod-distance`, `--layers terrain,objects,trees,...`, `--shading`
-and `--load-levels` apply to screenshots as in the window. `--lod-center x,y` picks the levels
+`--levels game|4|8|16|32`, `--lod-distance`, `--layers terrain,objects,trees,...` (runtime:
+`impostors`, `tree_meshes`, `statics`, or `runtime` for all three), `--lod-source
+auto|runtime|classic`, `--impostor-blend`, `--shading` and `--load-levels` apply to screenshots
+as in the window. `--lod-center x,y` picks the levels
 around another point than the camera (the game picks them around the player).
 
 A screenshot from the same camera as an in-game capture is the quickest way to compare generated
@@ -159,5 +208,11 @@ has the same fields. Tolerances are in `lodforge_viewer::checks::Tolerances`.
   landscape shader does.
 - Grass Optimizations meshes (`meshes\lod\grass\*_lod1.nif`) are listed but not placed: their
   positions come from the grass cache at run time.
-- Dynamic LOD placed by DynDOLOD.esp at run time is not shown.
-- Picking covers terrain and object LOD shapes, not classic tree billboards.
+- Dynamic LOD placed by DynDOLOD.esp at run time is not shown, nor the runtime's dynamic LOD
+  (`.dyn.bin`) or far grass (`.lfg`).
+- The viewer has no loaded cells: the game draws full 3D (and no LOD) in the cells around the
+  player (`uGridsToLoad`), the runtime fades its trees and statics out there and hides large
+  references inside the large-reference grid. The viewer shows LOD everywhere.
+- Runtime culling is frustum only (no Hi-Z occlusion; that changes performance, not the picture).
+- Picking covers terrain and object LOD shapes, not classic tree billboards or runtime instances.
+- The checks read `.btr` / `.bto` / `.btt`; runtime files are drawn, not checked.

@@ -543,6 +543,9 @@ impl App {
                     "{} blocks, {} shapes, {} tris, {} trees",
                     self.stats.quads, self.stats.shapes, self.stats.triangles, self.stats.trees
                 ));
+                if self.stats.tree_meshes + self.stats.statics > 0 {
+                    ui.label(format!("runtime: {} tree meshes, {} statics", self.stats.tree_meshes, self.stats.statics));
+                }
                 ui.separator();
                 if !self.scene.done {
                     ui.add(
@@ -622,6 +625,40 @@ impl App {
                     ui.checkbox(&mut l.trees, "classic trees");
                     ui.checkbox(&mut l.large_refs_only, "large refs only");
                 });
+                ui.separator();
+                ui.heading("LODForge Runtime");
+                let available = self.scene.runtime.is_some();
+                ui.horizontal(|ui| {
+                    for src in [crate::runtime::LodSource::Auto, crate::runtime::LodSource::Runtime, crate::runtime::LodSource::Classic] {
+                        ui.selectable_value(&mut self.settings.lod_source, src, src.label());
+                    }
+                })
+                .response
+                .on_hover_text("Trees and repeated statics as the game draws them with the LODForge Runtime plugin (runtime) or without it (classic: .bto / .btt only). Auto: runtime when the output has its files.");
+                let rf = &self.world.runtime;
+                if rf.present() {
+                    ui.label(format!(
+                        "{}: {} trees, {} repeated statics",
+                        if self.settings.lod_source.runtime(available) { "drawing runtime LOD" } else { "runtime LOD off" },
+                        self.scene.runtime.as_ref().map_or(0, |r| r.trees.len()),
+                        self.scene.runtime.as_ref().map_or(0, |r| r.statics.len())
+                    ));
+                    if rf.dynamic.is_some() || rf.grass.is_some() {
+                        ui.label("dynamic LOD (.dyn.bin) and far grass (.lfg) are not drawn");
+                    }
+                } else {
+                    ui.label("classic output (no runtime files)");
+                }
+                let l = &mut self.settings.layers;
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut l.impostors, "impostors");
+                    ui.checkbox(&mut l.tree_meshes, "near tree meshes");
+                    ui.checkbox(&mut l.statics, "repeated statics");
+                });
+                let r = &mut self.settings.runtime;
+                ui.checkbox(&mut r.blend_frames, "blend 3 impostor frames").on_hover_text("The shader contract's 3-frame blend instead of the runtime's nearest frame");
+                ui.checkbox(&mut r.impostor_tint, "impostor type tint").on_hover_text("Per-type brightness / tint (the runtime cannot apply it yet)");
+                ui.add(egui::Slider::new(&mut r.mesh_tier_end, 0.0..=200_000.0).text("mesh tier end (0 = LOD4 distance)"));
                 ui.separator();
                 ui.heading("Shading");
                 egui::ComboBox::from_id_salt("shading").selected_text(self.settings.shading.label()).show_ui(ui, |ui| {

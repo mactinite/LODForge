@@ -19,6 +19,7 @@ pub mod lodselect;
 pub mod mesh;
 pub mod pick;
 pub mod render;
+pub mod runtime;
 pub mod scene;
 pub mod snow;
 pub mod trees;
@@ -167,3 +168,4 @@ pub fn check(
         messages,
     )
 }
+
