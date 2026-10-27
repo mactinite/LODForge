@@ -1,44 +1,16 @@
-import { useMemo } from "react";
-import { Alert, Badge, Button, Card, Code, Group, Loader, Progress, ScrollArea, Stack, Table, Tabs, Text, Title } from "@mantine/core";
+import { useMemo, useState } from "react";
+import { Alert, Badge, Box, Button, Card, Group, Loader, Progress, ScrollArea, SegmentedControl, Stack, Table, Tabs, Text, Title } from "@mantine/core";
 import { BarChart } from "@mantine/charts";
 import { IconAlertTriangle, IconCheck, IconPlayerStop } from "@tabler/icons-react";
 
 import { BuildState } from "../state";
-
-/** Plain names for the CLI's stage ids; runtime stages are marked so a runtime build's extra work is visible. */
-export const STAGE_LABELS: Record<string, { label: string; runtime?: boolean }> = {
-  texgen: { label: "Billboards (TexGen)" },
-  "texgen-stitched": { label: "Stitched LOD textures" },
-  "dyndolod-config": { label: "Rules and LOD models" },
-  "lod-models": { label: "Generate missing LOD models" },
-  "tree-models": { label: "Generate 3D tree models" },
-  "terrain-meshes": { label: "Terrain meshes" },
-  "terrain-textures": { label: "Terrain textures" },
-  "dyndolod-export": { label: "Object export" },
-  "far-lod-models": { label: "Far LOD models" },
-  impostors: { label: "Octahedral impostors", runtime: true },
-  "runtime-trees": { label: "Runtime trees (impostors + 3D near tier)", runtime: true },
-  "runtime-grass": { label: "Far grass", runtime: true },
-  "runtime-dyn": { label: "Dynamic LOD data", runtime: true },
-  "tree-pack": { label: "Instanced mesh packs", runtime: true },
-  "dyndolod-atlas": { label: "Object LOD atlas" },
-  "objects-atlas": { label: "Object LOD atlas" },
-  "pbr-linear": { label: "PBR linear textures" },
-  objects: { label: "Object LOD meshes" },
-  trees: { label: "Tree LOD" },
-  grass: { label: "Grass LOD" },
-  "grass-lod1": { label: "Grass LOD" },
-  underside: { label: "Terrain underside" },
-  plugins: { label: "DynDOLOD plugins" },
-  occlusion: { label: "Occlusion" },
-};
-
-export const stageLabel = (stage: string) => STAGE_LABELS[stage]?.label ?? stage;
+import { LogLine, STAGE_LABELS, stageLabel } from "../stages";
 
 const fmt = (ms: number) => (ms >= 90000 ? `${(ms / 60000).toFixed(1)} min` : `${(ms / 1000).toFixed(1)} s`);
 
 /** Progress, stage table, a per-stage timing chart and the log of a running or finished build. */
 export function BuildPanel({ state, expected, onCancel }: { state: BuildState; expected: number; onCancel: () => void }) {
+  const [logFilter, setLogFilter] = useState<"all" | "problems">("all");
   const done = state.stages.filter((s) => s.state === "done").length;
   const failed = state.stages.filter((s) => s.state === "failed");
   const elapsed = (state.finishedAt ?? Date.now()) - state.startedAt;
@@ -97,7 +69,17 @@ export function BuildPanel({ state, expected, onCancel }: { state: BuildState; e
           <Tabs.Tab value="stages">Stages</Tabs.Tab>
           <Tabs.Tab value="timing">Timing</Tabs.Tab>
           <Tabs.Tab value="log">
-            Log {state.errors.length > 0 && <Badge size="xs" color="red" ml={4}>{state.errors.length}</Badge>}
+            Log
+            {state.errors > 0 && (
+              <Badge size="xs" color="red" ml={4} title="errors">
+                {state.errors}
+              </Badge>
+            )}
+            {state.warnings > 0 && (
+              <Badge size="xs" color="yellow" ml={4} title="warnings">
+                {state.warnings}
+              </Badge>
+            )}
           </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="stages" pt="sm">
@@ -140,11 +122,52 @@ export function BuildPanel({ state, expected, onCancel }: { state: BuildState; e
           </Card>
         </Tabs.Panel>
         <Tabs.Panel value="log" pt="sm">
-          <ScrollArea h={320}>
-            <Code block>{state.log.join("\n")}</Code>
-          </ScrollArea>
+          <Group justify="space-between" mb="xs">
+            <SegmentedControl
+              size="xs"
+              value={logFilter}
+              onChange={(v) => setLogFilter(v as "all" | "problems")}
+              data={[
+                { value: "all", label: "Everything" },
+                { value: "problems", label: `Errors & warnings (${state.errors + state.warnings})` },
+              ]}
+            />
+            <Text size="xs" c="dimmed">
+              Notes are plain text; only red lines mean a stage failed.
+            </Text>
+          </Group>
+          <LogView lines={state.log} problemsOnly={logFilter === "problems"} />
         </Tabs.Panel>
       </Tabs>
     </Stack>
+  );
+}
+
+const LEVEL_STYLE: Record<string, { color: string; bg: string; mark: string }> = {
+  error: { color: "var(--mantine-color-red-text)", bg: "rgba(250, 82, 82, 0.14)", mark: "var(--mantine-color-red-6)" },
+  warning: { color: "var(--mantine-color-yellow-text)", bg: "rgba(250, 176, 5, 0.10)", mark: "var(--mantine-color-yellow-6)" },
+};
+
+/** The build log: JSON stage events left out, errors red and warnings yellow (the last 3000 lines unless filtered). */
+function LogView({ lines, problemsOnly }: { lines: LogLine[]; problemsOnly: boolean }) {
+  const shown = useMemo(() => {
+    const text = lines.filter((l) => !l.text.startsWith('{"event"'));
+    const pick = problemsOnly ? text.filter((l) => l.level !== "info") : text;
+    return pick.length > 3000 ? pick.slice(pick.length - 3000) : pick;
+  }, [lines, problemsOnly]);
+  return (
+    <ScrollArea h={320} type="auto" style={{ background: "var(--mantine-color-default-hover)", borderRadius: 4 }}>
+      <Box p={6} ff="monospace" fz={12} style={{ whiteSpace: "pre" }}>
+        {shown.length === 0 && <Text size="xs" c="dimmed">{problemsOnly ? "No errors or warnings." : "No output yet."}</Text>}
+        {shown.map((l, i) => {
+          const st = LEVEL_STYLE[l.level];
+          return (
+            <div key={i} style={st ? { color: st.color, background: st.bg, borderLeft: `3px solid ${st.mark}`, paddingLeft: 6 } : { paddingLeft: 9 }}>
+              {l.text}
+            </div>
+          );
+        })}
+      </Box>
+    </ScrollArea>
   );
 }

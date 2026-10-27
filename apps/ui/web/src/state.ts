@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BuildEvent, invoke, listen } from "./backend";
 import { Values, toArgs } from "./options";
+import { LogLine, classify } from "./stages";
 
 /** A value kept in localStorage under `lodforge.<key>` (ignored when storage is unavailable). */
 export function useStored<T>(key: string, initial: T): [T, (v: T | ((p: T) => T)) => void] {
@@ -51,14 +52,16 @@ export interface StageRow {
 export interface BuildState {
   running: boolean;
   stages: StageRow[];
-  log: string[];
-  errors: string[];
+  log: LogLine[];
+  /** Lines that report a failed stage or a crash. */
+  errors: number;
+  warnings: number;
   exitCode: number | null;
   startedAt: number;
   finishedAt: number | null;
 }
 
-const empty: BuildState = { running: false, stages: [], log: [], errors: [], exitCode: null, startedAt: 0, finishedAt: null };
+const empty: BuildState = { running: false, stages: [], log: [], errors: 0, warnings: 0, exitCode: null, startedAt: 0, finishedAt: null };
 
 /** The command line a build runs (shown in the UI and sent to the backend). */
 export function buildArgs(t: Target, v: Values, o: Output): string[] {
@@ -92,8 +95,10 @@ export function useBuild() {
           }
         }
         setState((s) => {
-          const log = [...s.log, line];
-          if (!ev || !ev.stage) return { ...s, log };
+          const entry = classify(line, false);
+          const log = [...s.log, entry];
+          const counted = { errors: s.errors + (entry.level === "error" ? 1 : 0), warnings: s.warnings + (entry.level === "warning" ? 1 : 0) };
+          if (!ev || !ev.stage) return { ...s, ...counted, log };
           const key = `${ev.world}|${ev.stage}|${ev.season ?? ""}`;
           const stages = [...s.stages];
           const i = stages.findIndex((r) => r.key === key && r.state === "running");
@@ -103,10 +108,18 @@ export function useBuild() {
             if (i >= 0) stages[i] = { ...stages[i], ms: ev.ms ?? 0, state: "done" };
             else stages.push({ key, world: ev.world ?? "", stage: ev.stage, season: ev.season ?? "", ms: ev.ms ?? 0, state: "done", startedAt: Date.now() - started.current - (ev.ms ?? 0) });
           }
-          return { ...s, log, stages };
+          return { ...s, ...counted, log, stages };
         });
       }),
-      listen("build-error", (p) => setState((s) => ({ ...s, log: [...s.log, String(p)], errors: [...s.errors, String(p)] }))),
+      listen("build-error", (p) =>
+        setState((s) => {
+          const entry = classify(String(p), true);
+          // A stage failure marks that stage's running row (the CLI sends no event for it).
+          const f = entry.failed;
+          const stages = f ? s.stages.map((r) => (r.state === "running" && r.stage === f.stage && (r.world === f.world || f.world === "all") ? { ...r, state: "failed" as const } : r)) : s.stages;
+          return { ...s, stages, log: [...s.log, entry], errors: s.errors + (entry.level === "error" ? 1 : 0), warnings: s.warnings + (entry.level === "warning" ? 1 : 0) };
+        }),
+      ),
     ];
     return () => {
       subs.forEach((u) => u.then((f) => f()));

@@ -109,6 +109,15 @@ const mock = (() => {
             setTimeout(() => fire("build-line", JSON.stringify({ event: "begin", world, stage, season })), 600 * i + 50);
             setTimeout(() => fire("build-line", JSON.stringify({ event: "stage", world, stage, season, ms })), 600 * (i + 1));
           });
+          // One of each kind of log line the UI grades (stages.ts classify).
+          const lines: [string, string][] = [
+            ["build-error", "note: ignoring generated LOD plugins in the load order: DynDOLOD.esm (output of an earlier LOD run, never an input)"],
+            ["build-line", "Tamriel: 543 impostor types (543 from cache), 95 pages, 2467.9 MiB"],
+            ["build-error", "occlusion: MarkarthWorld: no cell lies in a Border Region, +Border dropped"],
+            ["build-error", "warning: Tamriel: 120 of 5697 cells have no NGIO grass cache file"],
+            ["build-error", "Tamriel objects: reading meshes\\terrain\\Tamriel\\Tamriel.4.0.0.btr: file not found"],
+          ];
+          lines.forEach(([ev, text], i) => setTimeout(() => fire(ev, text), 700 + 600 * i));
           return r(null);
         }
         case "build_status":
