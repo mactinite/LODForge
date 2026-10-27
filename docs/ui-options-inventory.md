@@ -22,6 +22,15 @@ Sources: `apps/cli/src/main.rs`, `build.rs`, `dyndolod_build.rs`, `profile.rs`; 
   global `--billboard-scale`, `--billboard-supersample 1..8`, `--installed-billboards
   render|keep`, `--billboard-density 0.1..1`, `--billboard-soft`.
 - **Grass:** `--grass off|bto|go`, `--grass-source auto|cache`, `--grass-density` (%).
+- **LODForge Runtime (UI group "LODForge Runtime", 2026-10-26):** `--runtime none|lodforge`,
+  `--impostor-units-per-px`, `--impostor-max-frame`, `--impostor-large-frame`,
+  `--impostor-alpha coverage|binary`, `--runtime-no-grass`, `--runtime-grass-cache`,
+  `--runtime-no-large-refs`, `--runtime-min-copies`, `--runtime-no-dyndolod-plugins`. In runtime
+  mode the UI hides `--tree-lod` (the runtime keeps every tree) and `--grass` (`bto` is refused;
+  far grass comes from `.lfg`). Not exposed: `--runtime-model-masks`, `--runtime-tree-statics`,
+  `--runtime-no-static-snow`, `--runtime-zstd`, the impostor grid/frame/page/cache/snow-grade
+  and calibration options. `lodforge info --json` reports `runtime_plugin` (LODForgeRuntime.dll
+  in the profile) and `grass_cache` (Grass\*.cgid count) for the Guided view.
 - **Textures / output:** global `--bc7 fast|high|best`, `--out` | `--mo2-mod` [`--enable`].
 
 ## Files read at build time

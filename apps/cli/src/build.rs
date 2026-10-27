@@ -332,7 +332,7 @@ pub fn run(a: &Args) -> Result<()> {
             begin(a.json, "all", "texgen-stitched", None);
             let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
             let reuv = work.join("DynDOLOD_SSE_re-uv-miniatlas.txt");
-            match lodforge_gpu::Gpu::new().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, &gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr(), a.lod_texture_tone == LodTextureTone::Dyndolod)) {
+            match lodforge_gpu::Gpu::shared().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr(), a.lod_texture_tone == LodTextureTone::Dyndolod)) {
                 Ok(m) => {
                     if !a.json {
                         println!("texgen-stitched: {} atlases, {} PBR twins, {} full textures, {} temporaries, {} rendered; {} skipped", m.atlases, m.pbr, m.full, m.temps, m.rendered, m.skipped.len());
@@ -468,6 +468,9 @@ pub fn run(a: &Args) -> Result<()> {
     let mut child_variants: std::collections::HashMap<String, std::collections::HashMap<u32, crate::dyn_export::Variant>> = std::collections::HashMap::new();
     let mut tree_mesh_cache: std::collections::HashMap<String, lodforge_instances::trees::TreeMesh> = std::collections::HashMap::new();
     let mut tex_index = crate::instances::TextureIndex::default();
+    // Occlusion of each worldspace as soon as its terrain and object LOD are done (Occlusion.esp
+    // itself is written at the end).
+    let occ_lane = (dyn_mode && !a.no_objects && !a.dyn_opts.no_occlusion && dyn_cfg.is_some()).then(|| crate::occlusion_lane::OcclusionLane::start(prof.clone(), out.clone(), worlds.clone()));
     for world in &worlds {
         let mut step = |stage: &str, season: Option<&str>, f: &mut dyn FnMut() -> Result<()>| {
             let t = Instant::now();
@@ -562,7 +565,7 @@ pub fn run(a: &Args) -> Result<()> {
                         }
                     }
                     if !all.is_empty() {
-                        let gpu = lodforge_gpu::Gpu::new()?;
+                        let gpu = lodforge_gpu::Gpu::shared()?;
                         let (written, skipped) = crate::texgen_stitched::stitch_atlases(&p, &gpu, &all, &out, a.materials.pbr())?;
                         let made: Vec<lodforge_texgen::stitch::Rule> = all.iter().filter(|x| written.contains(&x.dest)).flat_map(|x| x.rules.iter().cloned()).collect();
                         world_mini.extend(lodforge_texgen::stitch::atlas_map_rows(&made, lodforge_texgen::stitch::StitchParams::default().base, |_| false, |_| None));
@@ -706,7 +709,7 @@ pub fn run(a: &Args) -> Result<()> {
             linear.retain(|n| !linear_done.contains(n));
             if a.materials.pbr() && !linear.is_empty() {
                 step("pbr-linear", None, &mut || {
-                    let gpu = lodforge_gpu::Gpu::new()?;
+                    let gpu = lodforge_gpu::Gpu::shared()?;
                     let n = crate::pbr_linear::write(&p.vfs, &gpu, &linear, &out)?;
                     if !a.json {
                         println!("  {n} of {} PBR linear textures written", linear.len());
@@ -719,7 +722,7 @@ pub fn run(a: &Args) -> Result<()> {
                 && !atlas.pages.is_empty()
             {
                 step("objects-atlas", None, &mut || {
-                    let gpu = lodforge_gpu::Gpu::new()?;
+                    let gpu = lodforge_gpu::Gpu::shared()?;
                     let pages = crate::object_atlas::render(&p.vfs, atlas, &gpu, &crate::dyndolod_build::AtlasSettings::from_config(c).formats())?;
                     crate::object_atlas::write(&out, &pages)?;
                     // The new pages invalidate season BTOs an earlier run left for seasons this
@@ -746,6 +749,9 @@ pub fn run(a: &Args) -> Result<()> {
                 args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
+            if let Some(l) = &occ_lane {
+                l.send(world, crate::dyndolod_build::OcclusionInputs::new(c, world));
+            }
             if a.rt.on() && !a.rt.runtime_no_grass {
                 step("runtime-grass", None, &mut || {
                     for r in crate::grass_far::build(&p, world, &a.seasons, a.rt.runtime_grass_cache.as_deref(), &out, a.rt.write_options())? {
@@ -934,7 +940,7 @@ pub fn run(a: &Args) -> Result<()> {
                     used.retain(|n| !linear_done.contains(n));
                     if a.materials.pbr() && !used.is_empty() {
                         let written = (|| -> Result<usize> {
-                            let gpu = lodforge_gpu::Gpu::new()?;
+                            let gpu = lodforge_gpu::Gpu::shared()?;
                             crate::pbr_linear::write(&p.vfs, &gpu, &used, &out)
                         })();
                         match written {
@@ -961,7 +967,8 @@ pub fn run(a: &Args) -> Result<()> {
         if !a.dyn_opts.no_occlusion {
             let t = Instant::now();
             begin(a.json, "all", "occlusion", None);
-            match crate::dyndolod_build::write_occlusion(&p, c, &worlds, &out) {
+            let mut pre = occ_lane.map(|l| l.finish()).unwrap_or_default();
+            match crate::dyndolod_build::write_occlusion_with(&p, c, &worlds, &out, &mut pre) {
                 Ok(done) => {
                     if !a.json {
                         let cells: usize = done.iter().map(|d| d.1).sum();
@@ -1012,7 +1019,7 @@ fn own_output(p: &mut Profile, out: &std::path::Path, before: &lodforge_archive:
 /// `out` (`textures\terrain\lodgen\...`, `textures\DynDOLOD\LOD\trees\...`).
 fn texgen_stage(a: &Args, p: &Profile, out: &std::path::Path) -> Result<()> {
     use crate::texgen_billboards as tg;
-    let gpu = lodforge_gpu::Gpu::new()?;
+    let gpu = lodforge_gpu::Gpu::shared()?;
     let renderer = lodforge_texgen::Renderer::new(&gpu);
     let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
     let lo = &p.load_order;

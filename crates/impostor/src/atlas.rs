@@ -196,38 +196,50 @@ pub fn type_mips(b: &Baked, levels: u32, alpha_ref: f32, binary: bool) -> (Vec<V
 /// Composes the pages of `slots` (`bakes[k]` goes to `slots[k]`) with their mip chains. Unused
 /// texels are transparent black (albedo) and up-normal / far (normal-depth).
 pub fn compose(bakes: &[&Baked], slots: &[Slot], alpha_ref: f32, binary: bool) -> Vec<Page> {
-    let n = slots.iter().map(|s| s.page + 1).max().unwrap_or(0) as usize;
-    (0..n)
-        .map(|pi| {
-            let on: Vec<usize> = (0..slots.len()).filter(|&k| slots[k].page as usize == pi).collect();
-            let w = on.iter().map(|&k| slots[k].x + slots[k].size).max().unwrap_or(4).div_ceil(4) * 4;
-            let h = on.iter().map(|&k| slots[k].y + slots[k].size).max().unwrap_or(4).div_ceil(4) * 4;
-            let min_frame = on.iter().map(|&k| bakes[k].frame_px).min().unwrap_or(4);
-            let levels = levels_for(min_frame);
-            let mut albedo_mips = Vec::new();
-            let mut nd_mips = Vec::new();
-            for l in 0..levels {
-                let (lw, lh) = ((w >> l).max(1), (h >> l).max(1));
-                albedo_mips.push(vec![0u8; (lw * lh * 4) as usize]);
-                nd_mips.push(std::iter::repeat_n([128u8, 128, 255, 255], (lw * lh) as usize).flatten().collect::<Vec<u8>>());
+    (0..page_count(slots)).map(|pi| compose_page(bakes, slots, pi, alpha_ref, binary)).collect()
+}
+
+/// Pages the slots use.
+pub fn page_count(slots: &[Slot]) -> usize {
+    slots.iter().map(|s| s.page + 1).max().unwrap_or(0) as usize
+}
+
+/// Slot indices on page `pi`, and the page's width, height and smallest frame (what
+/// [`compose_page`] makes, without composing it).
+pub fn page_layout(bakes: &[&Baked], slots: &[Slot], pi: usize) -> (Vec<usize>, u32, u32, u32) {
+    let on: Vec<usize> = (0..slots.len()).filter(|&k| slots[k].page as usize == pi).collect();
+    let w = on.iter().map(|&k| slots[k].x + slots[k].size).max().unwrap_or(4).div_ceil(4) * 4;
+    let h = on.iter().map(|&k| slots[k].y + slots[k].size).max().unwrap_or(4).div_ceil(4) * 4;
+    let min_frame = on.iter().map(|&k| bakes[k].frame_px).min().unwrap_or(4);
+    (on, w, h, min_frame)
+}
+
+/// One page of [`compose`].
+pub fn compose_page(bakes: &[&Baked], slots: &[Slot], pi: usize, alpha_ref: f32, binary: bool) -> Page {
+    let (on, w, h, min_frame) = page_layout(bakes, slots, pi);
+    let levels = levels_for(min_frame);
+    let mut albedo_mips = Vec::new();
+    let mut nd_mips = Vec::new();
+    for l in 0..levels {
+        let (lw, lh) = ((w >> l).max(1), (h >> l).max(1));
+        albedo_mips.push(vec![0u8; (lw * lh * 4) as usize]);
+        nd_mips.push(std::iter::repeat_n([128u8, 128, 255, 255], (lw * lh) as usize).flatten().collect::<Vec<u8>>());
+    }
+    for &k in &on {
+        let (s, b) = (slots[k], bakes[k]);
+        let (am, nm) = type_mips(b, levels, alpha_ref, binary);
+        for l in 0..levels as usize {
+            let size = (b.size() >> l).max(1) as usize;
+            let lw = (w >> l).max(1) as usize;
+            let (x0, y0) = ((s.x >> l) as usize, (s.y >> l) as usize);
+            for y in 0..size {
+                let d = ((y0 + y) * lw + x0) * 4;
+                albedo_mips[l][d..d + size * 4].copy_from_slice(&am[l][y * size * 4..(y + 1) * size * 4]);
+                nd_mips[l][d..d + size * 4].copy_from_slice(&nm[l][y * size * 4..(y + 1) * size * 4]);
             }
-            for &k in &on {
-                let (s, b) = (slots[k], bakes[k]);
-                let (am, nm) = type_mips(b, levels, alpha_ref, binary);
-                for l in 0..levels as usize {
-                    let size = (b.size() >> l).max(1) as usize;
-                    let lw = (w >> l).max(1) as usize;
-                    let (x0, y0) = ((s.x >> l) as usize, (s.y >> l) as usize);
-                    for y in 0..size {
-                        let d = ((y0 + y) * lw + x0) * 4;
-                        albedo_mips[l][d..d + size * 4].copy_from_slice(&am[l][y * size * 4..(y + 1) * size * 4]);
-                        nd_mips[l][d..d + size * 4].copy_from_slice(&nm[l][y * size * 4..(y + 1) * size * 4]);
-                    }
-                }
-            }
-            Page { width: w, height: h, albedo: albedo_mips[0].clone(), normal_depth: nd_mips[0].clone(), min_frame, albedo_mips, normal_depth_mips: nd_mips }
-        })
-        .collect()
+        }
+    }
+    Page { width: w, height: h, albedo: albedo_mips[0].clone(), normal_depth: nd_mips[0].clone(), min_frame, albedo_mips, normal_depth_mips: nd_mips }
 }
 
 impl Page {

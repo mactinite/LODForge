@@ -273,7 +273,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
     rep.textures = sizes.len();
     // Atlas: the object LOD planner and renderer, largest tiles first; one page family per LOD
     // material class (`<stem>[_Snow|_SnowHD|_Ash|_AshHD]_Alpha[NN].dds`).
-    let gpu = lodforge_gpu::Gpu::new()?;
+    let gpu = lodforge_gpu::Gpu::shared()?;
     let formats = crate::object_atlas::Formats { diffuse: crate::object_atlas::Encoding::Bc7, alpha_diffuse: crate::object_atlas::Encoding::Bc7, normal: crate::object_atlas::Encoding::Bc7, mips: u32::MAX, alpha_fill: true };
     let mut pack = MeshPack { common: Common { world: String::new(), season: String::new(), generator: crate::instances::generator(), plugins: Vec::new(), params: format!("tile_cap={}\npage={}\nalpha_threshold=128", s.tile_cap, s.page), token: crate::instances::build_token() }, ..Default::default() };
     // (class, texture key) -> (pack page, tile).

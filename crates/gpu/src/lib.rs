@@ -74,6 +74,24 @@ impl Gpu {
         Self::with_instance(&instance, None, wgpu::Features::empty())
     }
 
+    /// One device for the whole process, made on first use. A new [`Gpu`] costs 0.3-1 s (9 s
+    /// when the driver's shader cache is cold) for its pipelines; build stages that run per
+    /// worldspace share this one instead. Its BC7 settings are shared too: callers that change
+    /// them should make their own [`Gpu::new`].
+    pub fn shared() -> Result<&'static Gpu> {
+        static SHARED: std::sync::OnceLock<Gpu> = std::sync::OnceLock::new();
+        static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        if let Some(g) = SHARED.get() {
+            return Ok(g);
+        }
+        let _guard = INIT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(g) = SHARED.get() {
+            return Ok(g);
+        }
+        let g = Gpu::new()?;
+        Ok(SHARED.get_or_init(|| g))
+    }
+
     /// A device on `instance`, able to present to `compatible_surface` when one is given, with
     /// `extra` features requested on top of the compute ones (those the adapter lacks are left
     /// out; check `device.features()`).

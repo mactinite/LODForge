@@ -430,7 +430,7 @@ pub fn generate(p: &Profile, c: &crate::dyndolod_build::Config, r: &Resolver<'_>
                 (model.clone(), *crc, prep)
             })
             .collect();
-        let gpu = lodforge_gpu::Gpu::new()?;
+        let gpu = lodforge_gpu::Gpu::shared()?;
         let renderer = lodforge_texgen::Renderer::new(&gpu);
         let read = |t: &str| p.vfs.read(t).ok().flatten();
         for (model, crc, prep) in preps {
@@ -519,7 +519,7 @@ fn inspect(p: &Profile, models: &[String], render: Option<&Path>, params: &[Leve
             let mut extra: HashMap<String, Vec<u8>> = HashMap::new();
             if crown == CrownMode::Cloud {
                 let prep = cloud_prep(&bytes, &|t| textures.get(t), params, cp).map_err(anyhow::Error::msg)?;
-                let gpu = lodforge_gpu::Gpu::new()?;
+                let gpu = lodforge_gpu::Gpu::shared()?;
                 let renderer = lodforge_texgen::Renderer::new(&gpu);
                 let (files, tris) = cloud_finish(&gpu, &renderer, &|t| p.vfs.read(t).ok().flatten(), &prep, stem, 0, cp).map_err(anyhow::Error::msg)?;
                 println!("  cloud: {} planes; per level (crown, trunk) triangles {tris:?}", prep.tiles.len());
@@ -626,7 +626,7 @@ fn fit(src: (u32, u32, &[u8]), cw: u32, ch: u32) -> Vec<u8> {
 
 /// Contact sheets of generated models: per page `cols` x `rows` cells of (full model | LOD4).
 fn contact_sheets(p: &Profile, out: &Path, made: &[(String, usize, String)], dir: &Path) -> Result<usize> {
-    let gpu = lodforge_gpu::Gpu::new()?;
+    let gpu = lodforge_gpu::Gpu::shared()?;
     let renderer = lodforge_texgen::Renderer::new(&gpu);
     let read = |t: &str| -> Option<Vec<u8>> { std::fs::read(out.join(t)).ok().or_else(|| p.vfs.read(t).ok().flatten()) };
     let (cols, rows, cw, ch) = (6u32, 4u32, 420u32, 300u32);
@@ -657,7 +657,7 @@ fn contact_sheets(p: &Profile, out: &Path, made: &[(String, usize, String)], dir
 }
 
 fn render_sheet(p: &Profile, nifs: &[lodforge_nif::Nif], png: &Path, extra: &HashMap<String, Vec<u8>>) -> Result<()> {
-    let gpu = lodforge_gpu::Gpu::new()?;
+    let gpu = lodforge_gpu::Gpu::shared()?;
     let renderer = lodforge_texgen::Renderer::new(&gpu);
     let read = |t: &str| extra.get(t).cloned().or_else(|| p.vfs.read(t).ok().flatten());
     let (w, h, out) = sheet_image(&gpu, &renderer, &read, nifs, 500.0);

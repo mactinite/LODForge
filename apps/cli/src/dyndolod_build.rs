@@ -877,32 +877,77 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
 /// The VFS must already see the build's terrain LOD; object height maps are read from `out`.
 /// Returns (worldspace, cells) per worldspace with occlusion data.
 pub fn write_occlusion(p: &Profile, c: &Config, worlds: &[String], out: &Path) -> Result<Vec<(String, usize)>> {
+    write_occlusion_with(p, c, worlds, out, &mut HashMap::new())
+}
+
+/// The occlusion settings of a main worldspace: params, and `mode(world, is_main)`.
+pub struct OcclusionInputs {
+    pub params: lodforge_dyndolod::occlusion::Params,
+    main_mode: String,
+    off: HashSet<String>,
+}
+
+impl OcclusionInputs {
+    pub fn new(c: &Config, main: &str) -> OcclusionInputs {
+        let params = lodforge_dyndolod::occlusion::Params { quality: c.num("OcclusionQuality", 2), radius: c.num("OcclusionRadius", 100), height: c.num("OcclusionHeight", 0.0) };
+        let base_mode = c.ini.get("DynDOLOD", "OcclusionMode").map(str::to_string).unwrap_or_else(|| "-Flat +Border".into());
+        // The main worldspace's `OcclusionMode_<World>` (else `OcclusionMode`); its child
+        // worldspaces are computed in the same pass with the same mode minus `+Border`.
+        let main_mode = c.ini.get("DynDOLOD", &format!("OcclusionMode_{main}")).map(str::to_string).unwrap_or(base_mode);
+        // `Occlusion_<World>=0` turns a worldspace off.
+        let off = c
+            .ini
+            .sections_named("DynDOLOD")
+            .flat_map(|s| s.entries.iter())
+            .filter(|(k, _)| k.len() > 10 && k[..10].eq_ignore_ascii_case("Occlusion_"))
+            .filter(|(k, _)| c.ini.get("DynDOLOD", k).is_some_and(|v| v.trim() == "0"))
+            .map(|(k, _)| k[10..].to_ascii_lowercase())
+            .collect();
+        OcclusionInputs { params, main_mode, off }
+    }
+
+    pub fn mode(&self, child: &str, is_main: bool) -> Option<String> {
+        if self.off.contains(&child.to_ascii_lowercase()) {
+            return None;
+        }
+        Some(if is_main { self.main_mode.clone() } else { lodforge_dyndolod::occlusion::Mode::parse(&self.main_mode).without_border().text })
+    }
+}
+
+/// Whether `w` is a child worldspace done with its parent's occlusion (it shares the parent's LOD
+/// and the parent is built).
+pub fn occlusion_with_parent(w: &lodforge_esp::Worldspace, all: &[lodforge_esp::Worldspace], worlds: &[String]) -> bool {
+    w.parent_flags & 0x02 != 0 && w.parent.is_some_and(|pid| all.iter().any(|x| x.form_id == pid && worlds.iter().any(|n| n.eq_ignore_ascii_case(&x.editor_id))))
+}
+
+/// The object LOD height map the objects stage left for a worldspace.
+pub fn occlusion_heightmap(out: &Path, world: &str) -> Option<Vec<u8>> {
+    std::fs::read(out.join("meshes").join("terrain").join(world).join("Objects").join(format!("{world}.objects.heightmap.dat"))).ok()
+}
+
+/// [`write_occlusion`], taking worldspaces already computed during the build out of
+/// `precomputed` (by main worldspace, lower case) instead of computing them again.
+pub fn write_occlusion_with(p: &Profile, c: &Config, worlds: &[String], out: &Path, precomputed: &mut HashMap<String, Vec<crate::occlusion::ComputedWorld>>) -> Result<Vec<(String, usize)>> {
     let extra: Vec<PathBuf> = ["DynDOLOD.esm", "DynDOLOD.esp"].iter().map(|n| out.join(n)).filter(|q| q.is_file()).collect();
     let lo = crate::occlusion::extend_load_order(p, &extra)?;
     let all = lodforge_esp::scan_worldspaces(&lo)?;
     let read = |path: &str| p.vfs.read(path).ok().flatten();
-    let params = lodforge_dyndolod::occlusion::Params { quality: c.num("OcclusionQuality", 2), radius: c.num("OcclusionRadius", 100), height: c.num("OcclusionHeight", 0.0) };
-    let base_mode = c.ini.get("DynDOLOD", "OcclusionMode").map(str::to_string).unwrap_or_else(|| "-Flat +Border".into());
     let mut pb = lodforge_dyndolod::occlusion::plugin_builder();
     let mut done = Vec::new();
     for name in worlds {
         let Some(w) = all.iter().find(|w| w.editor_id.eq_ignore_ascii_case(name)) else { continue };
-        // Child worldspaces that share their parent's LOD are done with the parent.
-        if w.parent_flags & 0x02 != 0 && w.parent.is_some_and(|pid| all.iter().any(|x| x.form_id == pid && worlds.iter().any(|n| n.eq_ignore_ascii_case(&x.editor_id)))) {
+        if occlusion_with_parent(w, &all, worlds) {
             continue;
         }
-        let hm_path = out.join("meshes").join("terrain").join(&w.editor_id).join("Objects").join(format!("{}.objects.heightmap.dat", w.editor_id));
-        let heightmap = std::fs::read(&hm_path).ok();
-        // The main worldspace's `OcclusionMode_<World>` (else `OcclusionMode`); its child
-        // worldspaces are computed in the same pass with the same mode minus `+Border`.
-        let main_mode = c.ini.get("DynDOLOD", &format!("OcclusionMode_{}", w.editor_id)).map(str::to_string).unwrap_or_else(|| base_mode.clone());
-        let mode = |child: &str, is_main: bool| -> Option<String> {
-            if c.ini.get("DynDOLOD", &format!("Occlusion_{child}")).is_some_and(|v| v.trim() == "0") {
-                return None;
+        let inputs = OcclusionInputs::new(c, &w.editor_id);
+        let computed = match precomputed.remove(&w.editor_id.to_ascii_lowercase()) {
+            Some(cw) => cw,
+            None => {
+                let heightmap = occlusion_heightmap(out, &w.editor_id);
+                crate::occlusion::compute_worlds(&lo, &read, &w.editor_id, heightmap.as_deref(), inputs.params, &|child, is_main| inputs.mode(child, is_main))?
             }
-            Some(if is_main { main_mode.clone() } else { lodforge_dyndolod::occlusion::Mode::parse(&main_mode).without_border().text })
         };
-        done.extend(crate::occlusion::build_worlds(&lo, &read, &w.editor_id, heightmap.as_deref(), params, &mode, &mut pb)?);
+        done.extend(crate::occlusion::add_worlds(&lo, &read, &computed, inputs.params, &mut pb)?);
     }
     if !pb.worlds.is_empty() {
         std::fs::write(out.join("Occlusion.esp"), pb.write(&lo))?;

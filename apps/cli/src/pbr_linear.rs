@@ -186,7 +186,7 @@ mod tests {
         }
         anyhow::ensure!(!names.is_empty(), "no reference linear textures");
         let vfs = Vfs::from_roots(roots)?;
-        let gpu = Gpu::new()?;
+        let gpu = Gpu::shared()?;
         assert_eq!(write(&vfs, &gpu, &names, &out)?, names.len());
         for name in names {
             let bytes = std::fs::read(out.join(&name))?;

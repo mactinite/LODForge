@@ -287,7 +287,7 @@ pub fn write_tree_billboard(gpu: &lodforge_gpu::Gpu, out: &std::path::Path, t: &
 pub fn run(a: &Args) -> Result<()> {
     let p = a.profile.open()?;
     let lo = &p.load_order;
-    let gpu = lodforge_gpu::Gpu::new()?;
+    let gpu = lodforge_gpu::Gpu::shared()?;
     let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
     let renderer = Renderer::new(&gpu);
     if a.trunks {
@@ -500,7 +500,7 @@ pub fn run_grass(a: &GrassArgs) -> Result<()> {
     }
     println!("grass cache: {files} cells, {} grass types, {placements} placements read in {} ms", types.len(), t.elapsed().as_millis());
     let grasses = read_grasses(lo)?;
-    let gpu = lodforge_gpu::Gpu::new()?;
+    let gpu = lodforge_gpu::Gpu::shared()?;
     let renderer = Renderer::new(&gpu);
     let settings = Settings { light: lodforge_texgen::Light { direct: 1.5, ambient: 0.25, dir: [0.0, 0.0, 1.0], pbr_scale: 0.7, normal_pull: 1.0 }, coverage_threshold: 112, ..Settings::default() };
     // TexGen's `GrassHDBillboards*` lighting (as `--hd-grass`).

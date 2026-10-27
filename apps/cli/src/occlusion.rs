@@ -242,37 +242,93 @@ fn model_for(params: Params) -> Model {
     m
 }
 
-/// Computes the TVDT of a main worldspace and its child worldspaces and adds them to `pb` (the
-/// content of Occlusion.esp). `mode(world, is_main)` gives the `OcclusionMode` of a worldspace,
-/// `None` to skip it; `+Border` is dropped when no cell of a worldspace lies in a border region.
-/// Returns (worldspace, cells) per worldspace done.
-pub fn build_worlds(lo: &LoadOrder, read: &dyn Fn(&str) -> Option<Vec<u8>>, main_world: &str, heightmap: Option<&[u8]>, params: Params, mode: &dyn Fn(&str, bool) -> Option<String>, pb: &mut PluginBuilder) -> Result<Vec<(String, usize)>> {
+/// The occlusion of one worldspace before it goes into the plugin: its setup (height map,
+/// lands), the cells selected and their TVDT.
+pub struct ComputedWorld {
+    pub editor_id: String,
+    pub mode: String,
+    pub grid: Grid,
+    pub setup: occlusion::WorldSetup,
+    pub tv: Vec<((i32, i32), Vec<u8>)>,
+}
+
+/// Computes the TVDT of a main worldspace and its child worldspaces (height maps and every
+/// cell's TVDT), without the plugin records. `mode(world, is_main)` gives the `OcclusionMode` of
+/// a worldspace, `None` to skip it. The build runs it per worldspace while later stages go on,
+/// and adds the records with the final load order (DynDOLOD.esm/.esp included) through
+/// [`add_worlds`].
+pub fn compute_worlds(lo: &LoadOrder, read: &dyn Fn(&str) -> Option<Vec<u8>>, main_world: &str, heightmap: Option<&[u8]>, params: Params, mode: &dyn Fn(&str, bool) -> Option<String>) -> Result<Vec<ComputedWorld>> {
+    // LODFORGE_OCC_TIMING=1: per-phase times on stderr.
+    let timing = std::env::var_os("LODFORGE_OCC_TIMING").is_some();
+    let lap = |what: &str, t: &mut std::time::Instant| {
+        if timing {
+            eprintln!("occlusion timing {main_world}: {what} {} ms", t.elapsed().as_millis());
+        }
+        *t = std::time::Instant::now();
+    };
+    let mut t = std::time::Instant::now();
     let worlds = lodforge_esp::scan_worldspaces(lo)?;
     let main = worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(main_world)).with_context(|| format!("worldspace {main_world} not found"))?;
     let border = occlusion::border_regions(lo)?;
     let objects = heightmap.map(occlusion::object_heightmap).unwrap_or_default();
     let main_grid = occlusion::lod_settings(read, &main.editor_id).unwrap_or(Grid::TAMRIEL);
-    let strings = Strings::new(read);
-    let text = |p: &str, id: u32| strings.lookup(p, id);
     let model = model_for(params);
     let main_lands: Vec<LandCell> = occlusion::land_cells(lo, main, occlusion::world_heights(main, None).1)?;
-    let mut done = Vec::new();
+    lap("setup", &mut t);
+    let mut out = Vec::new();
     for world in occlusion::occlusion_worlds(&worlds, main, true) {
         let is_main = world.form_id == main.form_id;
         let Some(mode_text) = mode(&world.editor_id, is_main) else { continue };
         let grid = occlusion::lod_settings(read, &world.editor_id).unwrap_or(main_grid);
         let setup = occlusion::prepare_world(lo, read, main, world, grid, None, (!is_main).then_some(main_lands.as_slice()), &objects)?;
-        let mode = Mode::parse(&mode_text);
-        let mut cells = occlusion::select_cells(lo, world, &setup.lands, &grid, &mode, &border)?;
-        if cells.is_empty() && mode.border {
-            eprintln!("occlusion: {}: no cell lies in a Border Region, +Border dropped", world.editor_id);
-            cells = occlusion::select_cells(lo, world, &setup.lands, &grid, &mode.without_border(), &border)?;
-        }
+        let cells = select(lo, world, &setup, &grid, &mode_text, &border, false)?;
         let calc = Calculator::new(&setup.map, grid.origin, grid.stride, model).with_context(|| format!("{}: lodsettings stride {} is not a power of two times four", world.editor_id, grid.stride))?;
         let tv = occlusion::compute_cells(&calc, &cells);
-        done.push((world.editor_id.clone(), tv.len()));
+        lap(&format!("{} ({} cells)", world.editor_id, cells.len()), &mut t);
+        out.push(ComputedWorld { editor_id: world.editor_id.clone(), mode: mode_text, grid, setup, tv });
+    }
+    Ok(out)
+}
+
+/// Cells of a worldspace to compute (`+Border` dropped when no cell lies in a border region).
+fn select(lo: &LoadOrder, world: &lodforge_esp::Worldspace, setup: &occlusion::WorldSetup, grid: &Grid, mode_text: &str, border: &HashSet<u32>, quiet: bool) -> Result<Vec<(i32, i32)>> {
+    let mode = Mode::parse(mode_text);
+    let mut cells = occlusion::select_cells(lo, world, &setup.lands, grid, &mode, border)?;
+    if cells.is_empty() && mode.border {
+        if !quiet {
+            eprintln!("occlusion: {}: no cell lies in a Border Region, +Border dropped", world.editor_id);
+        }
+        cells = occlusion::select_cells(lo, world, &setup.lands, grid, &mode.without_border(), border)?;
+    }
+    Ok(cells)
+}
+
+/// Adds computed worldspaces to `pb` with the load order the plugin is written against: the
+/// cells are selected again from its winning records (a cell the computed set lacks is computed
+/// here, one it no longer selects is left out), so the result is the same as computing with `lo`.
+pub fn add_worlds(lo: &LoadOrder, read: &dyn Fn(&str) -> Option<Vec<u8>>, computed: &[ComputedWorld], params: Params, pb: &mut PluginBuilder) -> Result<Vec<(String, usize)>> {
+    let worlds = lodforge_esp::scan_worldspaces(lo)?;
+    let border = occlusion::border_regions(lo)?;
+    let strings = Strings::new(read);
+    let text = |p: &str, id: u32| strings.lookup(p, id);
+    let model = model_for(params);
+    let mut done = Vec::new();
+    for c in computed {
+        let world = worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(&c.editor_id)).with_context(|| format!("worldspace {} not found", c.editor_id))?;
+        let cells = select(lo, world, &c.setup, &c.grid, &c.mode, &border, true)?;
+        let have: HashMap<(i32, i32), &Vec<u8>> = c.tv.iter().map(|(cell, b)| (*cell, b)).collect();
+        let missing: Vec<(i32, i32)> = cells.iter().copied().filter(|cell| !have.contains_key(cell)).collect();
+        let extra: HashMap<(i32, i32), Vec<u8>> = if missing.is_empty() {
+            HashMap::new()
+        } else {
+            let calc = Calculator::new(&c.setup.map, c.grid.origin, c.grid.stride, model).with_context(|| format!("{}: lodsettings stride {} is not a power of two times four", c.editor_id, c.grid.stride))?;
+            occlusion::compute_cells(&calc, &missing).into_iter().collect()
+        };
+        // Same order as compute_cells over `cells` (cells without a TVDT are left out there too).
+        let tv: Vec<((i32, i32), Vec<u8>)> = cells.iter().filter_map(|cell| have.get(cell).map(|b| (*b).clone()).or_else(|| extra.get(cell).cloned()).map(|b| (*cell, b))).collect();
+        done.push((c.editor_id.clone(), tv.len()));
         if !tv.is_empty() {
-            pb.worlds.extend(occlusion::world_content(lo, world, &tv, &text, &|c| setup.map.mhdt(c.0, c.1)));
+            pb.worlds.extend(occlusion::world_content(lo, world, &tv, &text, &|cell| c.setup.map.mhdt(cell.0, cell.1)));
         }
     }
     Ok(done)

@@ -476,40 +476,58 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
     let mut baked: Vec<(TypeJob, bake::Baked, String, u128, bool)> = Vec::new();
     let mut failed = Vec::new();
     let total = jobs.len();
-    for (k, mut j) in jobs.into_iter().enumerate() {
+    // Loading a type (model, texture bytes, cache key) and reading its cache entry are CPU and
+    // disk work: done for every type in parallel, in job order. Only cache misses touch the GPU,
+    // one at a time below.
+    enum Prepared {
+        Hit(bake::Baked),
+        Miss(Box<Loaded>, u32, u32),
+    }
+    let prepared: Vec<(TypeJob, Result<(Prepared, String)>, u128)> = {
+        use rayon::prelude::*;
+        jobs.into_par_iter()
+            .map(|mut j| {
+                let t = Instant::now();
+                let r = (|| -> Result<(Prepared, String)> {
+                    let l = load(p, &j)?;
+                    let fit = bake::fit(&l.scene).ok_or_else(|| anyhow::anyhow!("no geometry"))?;
+                    let (grid, frame) = settings.layout((fit.max.z - fit.min.z) * j.scale);
+                    j.crc = l.model_crc;
+                    let crcs: Vec<(String, u32)> = l.tex_bytes.iter().map(|(n, b)| (n.clone(), lodforge_impostor::manifest::crc32(b))).collect();
+                    let key_hex = format!("{:016x}", bake::cache_key(l.model_crc, &crcs, grid, frame, &settings));
+                    let hit = if opts.no_cache { None } else { std::fs::read(cache.join(format!("{key_hex}.lfic"))).ok().and_then(|d| bake::decode_cache(&d)) };
+                    Ok(match hit {
+                        Some(b) => (Prepared::Hit(b), key_hex),
+                        None => (Prepared::Miss(Box::new(l), grid, frame), key_hex),
+                    })
+                })();
+                (j, r, t.elapsed().as_millis())
+            })
+            .collect()
+    };
+    for (k, (j, r, prep_ms)) in prepared.into_iter().enumerate() {
         let t = Instant::now();
-        let l = match load(p, &j) {
-            Ok(l) => l,
+        let (prep, key_hex) = match r {
+            Ok(x) => x,
             Err(e) => {
                 failed.push(format!("{}: {e:#}", j.model));
                 continue;
             }
         };
-        let Some(fit) = bake::fit(&l.scene) else {
-            failed.push(format!("{}: no geometry", j.model));
-            continue;
-        };
-        let (grid, frame) = settings.layout((fit.max.z - fit.min.z) * j.scale);
-        j.crc = l.model_crc;
-        let crcs: Vec<(String, u32)> = l.tex_bytes.iter().map(|(n, b)| (n.clone(), lodforge_impostor::manifest::crc32(b))).collect();
-        let key = bake::cache_key(l.model_crc, &crcs, grid, frame, &settings);
-        let key_hex = format!("{key:016x}");
-        let file = cache.join(format!("{key_hex}.lfic"));
-        let hit = if opts.no_cache { None } else { std::fs::read(&file).ok().and_then(|d| bake::decode_cache(&d)) };
-        let (b, cached) = match hit {
-            Some(b) => (b, true),
-            None => {
+        let (b, cached) = match prep {
+            Prepared::Hit(b) => (b, true),
+            Prepared::Miss(l, grid, frame) => {
                 let textures: HashMap<String, TexData> = l.tex_bytes.iter().filter_map(|(n, b)| TexData::for_gpu(gpu, b).map(|t| (n.clone(), t))).collect();
                 let s = bake::Settings { grid, frame_px: frame, ..settings };
                 let Some(b) = bake::bake(gpu, renderer, &l.scene, &textures, &s) else {
                     failed.push(format!("{}: nothing rendered (missing textures?)", j.model));
                     continue;
                 };
-                let _ = std::fs::write(&file, bake::encode_cache(&b));
+                let _ = std::fs::write(cache.join(format!("{key_hex}.lfic")), bake::encode_cache(&b));
                 (b, false)
             }
         };
-        let ms = t.elapsed().as_millis();
+        let ms = prep_ms + t.elapsed().as_millis();
         if (k + 1) % 25 == 0 || k + 1 == total {
             println!("  {}/{total} types ({} ms for {}{})", k + 1, ms, j.name, if cached { ", cached" } else { "" });
         }
@@ -531,12 +549,6 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
         for sub in ["types"] {
             let _ = std::fs::remove_dir_all(dir.join(sub));
         }
-        for e in std::fs::read_dir(&dir)?.flatten() {
-            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
-            if n.starts_with("page") && n.ends_with(".dds") {
-                std::fs::remove_file(e.path())?;
-            }
-        }
     }
     std::fs::create_dir_all(dir.join("types"))?;
     // Types with the same cache key (identical model and texture bytes under another path)
@@ -556,22 +568,85 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
     let sizes: Vec<u32> = unique.iter().map(|&k| baked[k].1.size()).collect();
     let unique_slots = atlas::pack(&sizes, opts.page);
     let refs: Vec<&bake::Baked> = unique.iter().map(|&k| &baked[k].1).collect();
-    let pages = atlas::compose(&refs, &unique_slots, settings.alpha_ref, opts.alpha == AlphaMode::Binary);
     let slots: Vec<atlas::Slot> = slot_of.iter().map(|&u| unique_slots[u]).collect();
+    let binary = opts.alpha == AlphaMode::Binary;
     if let Some(png_dir) = &opts.png {
-        dump_pngs(png_dir, set, &pages)?;
+        dump_pngs(png_dir, set, &atlas::compose(&refs, &unique_slots, settings.alpha_ref, binary))?;
     }
+    // Every page is keyed by what goes into it (its types' cache keys and rectangles, the alpha
+    // and snow settings, the BC7 encoder). A page whose key matches the one an earlier build left
+    // in this folder (`pages.keys`) is kept as it is: rebuilding into the same output re-encodes
+    // only the pages that changed.
+    let npages = atlas::page_count(&unique_slots);
+    let layouts: Vec<(Vec<usize>, u32, u32, u32)> = (0..npages).map(|pi| atlas::page_layout(&refs, &unique_slots, pi)).collect();
+    let keys: Vec<String> = layouts
+        .iter()
+        .enumerate()
+        .map(|(pi, (on, w, h, min_frame))| {
+            let mut text = format!("v1 {pi} {w}x{h} {min_frame} a{} b{binary} g{}/{}/{} bc7 {:?} {}", settings.alpha_ref, grade.enabled, grade.knee, grade.slope, gpu.bc7_quality(), gpu.bc7_on_gpu());
+            for &k in on {
+                let s = unique_slots[k];
+                text.push_str(&format!(" {}@{},{},{}", baked[unique[k]].2, s.x, s.y, s.size));
+            }
+            format!("{:016x}", fnv64(text.as_bytes()))
+        })
+        .collect();
+    let keys_file = dir.join("pages.keys");
+    let prev: Vec<String> = std::fs::read_to_string(&keys_file).unwrap_or_default().lines().map(str::to_string).collect();
+    let names = |i: usize| (format!("page{i:02}.dds"), format!("page{i:02}_nd.dds"));
+    let keep: Vec<bool> = (0..npages).map(|i| prev.get(i) == Some(&keys[i]) && dir.join(names(i).0).is_file() && dir.join(names(i).1).is_file()).collect();
+    // Page files of an earlier run that are not kept.
+    for e in std::fs::read_dir(&dir)?.flatten() {
+        let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+        if n.starts_with("page") && n.ends_with(".dds") {
+            let idx = n[4..].split(|c: char| !c.is_ascii_digit()).next().and_then(|d| d.parse::<usize>().ok());
+            if !idx.is_some_and(|i| i < npages && keep[i]) {
+                std::fs::remove_file(e.path())?;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&keys_file);
+    // Pages to make: composed on a few worker threads (CPU: the types' mip chains) while this
+    // thread encodes the previous ones on the GPU; a bounded channel caps the pages held in memory.
+    let todo: Vec<usize> = (0..npages).filter(|&i| !keep[i]).collect();
+    let mut sizes_written: HashMap<usize, u64> = HashMap::new();
+    std::thread::scope(|scope| -> Result<()> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, atlas::Page)>(2);
+        let (refs, unique_slots, todo) = (&refs, &unique_slots, &todo);
+        scope.spawn(move || {
+            use rayon::prelude::*;
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().expect("impostor page pool");
+            pool.install(|| {
+                todo.par_iter().for_each_with(tx, |tx, &pi| {
+                    let _ = tx.send((pi, atlas::compose_page(refs, unique_slots, pi, settings.alpha_ref, binary)));
+                });
+            });
+        });
+        for (pi, pg) in rx {
+            let (an, nn) = names(pi);
+            let a = atlas::page_dds(gpu, &pg, atlas::Map::Albedo)?;
+            let n = atlas::page_dds(gpu, &pg, atlas::Map::NormalDepth)?;
+            std::fs::write(dir.join(&an), &a)?;
+            std::fs::write(dir.join(&nn), &n)?;
+            sizes_written.insert(pi, (a.len() + n.len()) as u64);
+        }
+        Ok(())
+    })?;
+    if sizes_written.len() != todo.len() {
+        bail!("{set}: {} of {} impostor pages were made", sizes_written.len(), todo.len());
+    }
+    std::fs::write(&keys_file, keys.iter().map(|k| format!("{k}\n")).collect::<String>())?;
     let rel = |name: &str| format!(r"textures\LODForge\Impostors\{set}\{name}");
     let mut page_infos = Vec::new();
     let mut page_bytes = 0u64;
-    for (i, pg) in pages.iter().enumerate() {
-        let (an, nn) = (format!("page{i:02}.dds"), format!("page{i:02}_nd.dds"));
-        let a = atlas::page_dds(gpu, pg, atlas::Map::Albedo)?;
-        let n = atlas::page_dds(gpu, pg, atlas::Map::NormalDepth)?;
-        page_bytes += (a.len() + n.len()) as u64;
-        std::fs::write(dir.join(&an), &a)?;
-        std::fs::write(dir.join(&nn), &n)?;
-        page_infos.push(PageInfo { index: i as u32, albedo: rel(&an), normal_depth: rel(&nn), width: pg.width, height: pg.height, mips: pg.mip_levels() });
+    for (i, (_, w, h, min_frame)) in layouts.iter().enumerate() {
+        let (an, nn) = names(i);
+        page_bytes += sizes_written.get(&i).copied().unwrap_or_else(|| [&an, &nn].iter().map(|f| std::fs::metadata(dir.join(f)).map(|m| m.len()).unwrap_or(0)).sum());
+        page_infos.push(PageInfo { index: i as u32, albedo: rel(&an), normal_depth: rel(&nn), width: *w, height: *h, mips: atlas::levels_for(*min_frame) });
+    }
+    let reused = keep.iter().filter(|&&k| k).count();
+    if reused > 0 {
+        println!("  {set}: {reused} of {npages} impostor pages unchanged from the earlier build, kept");
     }
     let encode_ms = t_enc.elapsed().as_millis();
 
@@ -616,14 +691,19 @@ fn bake_set(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, out: &Pat
     }
     let index = Index { version: lodforge_impostor::manifest::MANIFEST_VERSION, baker_version: bake::BAKER_VERSION, layout: "hemi-oct-z-up".into(), worlds: worlds.to_vec(), pages: page_infos, types, snow_grade: grade.enabled.then_some([grade.knee, grade.slope]), alpha: (opts.alpha == AlphaMode::Binary).then(|| "binary".to_string()) };
     std::fs::write(dir.join("impostors.json"), serde_json::to_string_pretty(&index)?)?;
-    Ok(SetReport { types: reports, pages: pages.len(), page_bytes, bake_ms, encode_ms, failed, base_index: HashMap::new() })
+    Ok(SetReport { types: reports, pages: npages, page_bytes, bake_ms, encode_ms, failed, base_index: HashMap::new() })
+}
+
+/// FNV-1a, 64 bit (the page keys of `pages.keys`; stable across builds and Rust versions).
+fn fnv64(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ u64::from(x)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// `build --impostors`: the worldspace's set into the build output.
 pub fn build_stage(p: &Profile, dyndolod: &Path, out: &Path, world: &str, seasons: &[String], opts: &Opts, extra: &std::collections::HashSet<u32>) -> Result<SetReport> {
-    let gpu = lodforge_gpu::Gpu::new()?;
-    let renderer = Renderer::new(&gpu);
-    let r = bake_world(p, &gpu, &renderer, dyndolod, out, world, seasons, None, false, opts, extra)?;
+    let gpu = lodforge_gpu::Gpu::shared()?;
+    let renderer = Renderer::new(gpu);
+    let r = bake_world(p, gpu, &renderer, dyndolod, out, world, seasons, None, false, opts, extra)?;
     std::fs::write(report_path(out, world), report_csv(&r))?;
     print_summary(world, &r);
     Ok(r)

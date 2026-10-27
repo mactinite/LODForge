@@ -17,6 +17,7 @@ mod child_copies;
 mod dyndolod_export;
 mod grass_types;
 mod occlusion;
+mod occlusion_lane;
 mod build;
 mod info;
 mod instances;
