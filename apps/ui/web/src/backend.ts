@@ -23,6 +23,8 @@ export interface ProfileInfo {
   runtime_plugin?: boolean;
   /** NGIO grass cache files (Grass\*.cgid) in the load order. */
   grass_cache?: number;
+  /** SKSE\Plugins\DynDOLOD.DLL (DynDOLOD DLL NG) is in the load order. */
+  dyndolod_dll?: boolean;
   ms: number;
 }
 
@@ -79,7 +81,7 @@ const mock = (() => {
         case "list_profiles":
           return r(["Default", "Testing"]);
         case "profile_info":
-          return r({ plugins: 236, worlds: ["Tamriel", "MarkarthWorld", "Blackreach", "DLC2SolstheimWorld"], seasons: ["SPR", "SUM", "AUT", "WIN"], missing_archives: 0, runtime_plugin: true, grass_cache: 0, ms: 212 });
+          return r({ plugins: 236, worlds: ["Tamriel", "MarkarthWorld", "Blackreach", "DLC2SolstheimWorld"], seasons: ["SPR", "SUM", "AUT", "WIN"], missing_archives: 0, runtime_plugin: true, grass_cache: 0, dyndolod_dll: false, ms: 212 });
         case "mo2_running":
           return r(false);
         case "config_files":

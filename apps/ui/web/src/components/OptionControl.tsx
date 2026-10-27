@@ -5,7 +5,20 @@ import { Option, Values } from "../options";
 const ATLAS_TILES = [256, 512, 1024, 2048];
 
 /** One option as a control with its explanation (and the chosen value's explanation). */
-export function OptionControl({ option: o, values, onChange }: { option: Option; values: Values; onChange: (key: string, v: string | number | boolean) => void }) {
+export function OptionControl(props: { option: Option; values: Values; onChange: (key: string, v: string | number | boolean) => void }) {
+  const note = props.option.note?.(props.values);
+  if (!note) return <Control {...props} />;
+  return (
+    <Stack gap={4}>
+      <Control {...props} />
+      <Text size="xs" c="orange.5">
+        {note}
+      </Text>
+    </Stack>
+  );
+}
+
+function Control({ option: o, values, onChange }: { option: Option; values: Values; onChange: (key: string, v: string | number | boolean) => void }) {
   const v = values[o.key] ?? o.default;
   const flag = (
     <Tooltip label={o.kind === "bool" && o.negate ? `${o.flag} when off` : o.flag} withArrow>
@@ -36,7 +49,7 @@ export function OptionControl({ option: o, values, onChange }: { option: Option;
         </Stack>
       );
     case "choice": {
-      const current = o.choices.find((c) => c.value === v);
+      const current = o.choices.find((c) => c.value === String(v));
       return (
         <Stack gap={6}>
           {header}

@@ -6,28 +6,32 @@ import { Values } from "../options";
  * A rough guide to what the chosen options cost: distant detail, build time, disk and VRAM, each
  * 0..100 relative to the heaviest setting. Weights come from cs-base measurements (2026-10-23):
  * Ultra trees with generated models roughly triple Tamriel's LOD4 object meshes, High rules and
- * 2048 px tiles add atlas pages, occlusion and tree models dominate build time.
+ * 2048 px tiles add atlas pages, tree models dominate build time; impostor detail sets the
+ * runtime's VRAM.
  */
 export function impact(v: Values) {
   const preset = { Low: 0, Medium: 1, High: 2 }[String(v.preset)] ?? 1;
-  const ultra = v.treeLod === "ultra";
+  const runtime = v.runtime === "lodforge";
+  // The runtime keeps every tree in the export, as Ultra does; its impostor pages cost VRAM by detail.
+  const ultra = v.treeLod === "ultra" || runtime;
+  const imp = runtime ? ({ "24": 2, "16": 6, "12": 10, "8": 18 }[String(v.impostorUnitsPerPx ?? "12")] ?? 10) : 0;
   const models = ultra && v.treeModels !== "off";
   const tile = { 256: 0, 512: 1, 1024: 2, 2048: 3 }[Number(v.atlasMaxTile)] ?? 2;
   const bb = Number(v.billboardScale ?? 1);
   const clamp = (n: number) => Math.max(5, Math.min(100, Math.round(n)));
   return {
-    detail: clamp(25 + preset * 15 + (ultra ? 10 : 0) + (models ? 15 : 0) + tile * 5 + (bb - 1) * 10),
-    time: clamp(30 + preset * 8 + (models ? 20 : 0) + (v.bc7 === "best" ? 25 : v.bc7 === "fast" ? -15 : 0) + (v.occlusion ? 15 : 0) + (v.texgen ? 8 : 0)),
+    detail: clamp(25 + preset * 15 + (ultra ? 10 : 0) + (models ? 15 : 0) + tile * 5 + (runtime ? imp / 2 + 5 : (bb - 1) * 10)),
+    time: clamp(30 + preset * 8 + (models ? 20 : 0) + (v.bc7 === "best" ? 25 : v.bc7 === "fast" ? -15 : 0) + (v.occlusion !== false ? 8 : 0) + (v.texgen ? 8 : 0) + (runtime ? 8 : 0)),
     disk: clamp(20 + preset * 10 + (ultra ? 10 : 0) + (models ? 25 : 0) + tile * 8 + (bb - 1) * 10),
-    vram: clamp(20 + preset * 12 + (models ? 20 : 0) + tile * 10 + (bb - 1) * 12),
+    vram: clamp(20 + preset * 12 + (models ? 20 : 0) + tile * 10 + (runtime ? imp : (bb - 1) * 12)),
   };
 }
 
 const ROWS: { key: keyof ReturnType<typeof impact>; label: string; color: string; help: string }[] = [
   { key: "detail", label: "Distant detail", color: "teal", help: "How much of the world shows at distance, and how close to the full models it looks." },
-  { key: "time", label: "Build time", color: "blue", help: "Tamriel takes 5 to 40 minutes depending on these settings." },
+  { key: "time", label: "Build time", color: "blue", help: "Every worldspace and season at Quality with the runtime: about 10 minutes (skyrim-cs-base, RTX 4080, 20 threads). Rebuilding into the same output reuses unchanged impostor pages." },
   { key: "disk", label: "Disk", color: "grape", help: "Size of the output mod (a few GB up to ~15 GB with every season)." },
-  { key: "vram", label: "VRAM / load", color: "orange", help: "Object LOD meshes and atlas pages the game keeps loaded." },
+  { key: "vram", label: "VRAM / load", color: "orange", help: "Object LOD meshes, atlas pages and (runtime) impostor pages the game keeps loaded." },
 ];
 
 export function ImpactCard({ values }: { values: Values }) {

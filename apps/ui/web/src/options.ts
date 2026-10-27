@@ -21,6 +21,8 @@ interface Base {
   when?: (v: Values) => boolean;
   /** Expert options start collapsed in the Advanced view. */
   expert?: boolean;
+  /** A line under the explanation that depends on the other values (e.g. what changes in runtime mode). */
+  note?: (v: Values) => string | undefined;
 }
 
 export type Option =
@@ -45,7 +47,7 @@ export const GROUPS: { id: Group; label: string; description: string }[] = [
   { id: "input", label: "Input", description: "Which mods and plugins the build reads." },
 ];
 
-const isRuntime = (v: Values) => v.runtime === "lodforge";
+export const isRuntime = (v: Values) => v.runtime === "lodforge";
 const isUltra = (v: Values) => v.treeLod === "ultra" || isRuntime(v);
 const hasModels = (v: Values) => isUltra(v) && v.treeModels !== "off";
 
@@ -60,7 +62,12 @@ export const OPTIONS: Option[] = [
     { value: "none", label: "Game + DynDOLOD DLL", explain: "Classic output: everything merged into the game's .bto/.btt files." },
     { value: "lodforge", label: "LODForge Runtime", explain: "Trees become octahedral impostors (3D LOD4 models up close), repeated objects and large references are instanced, far grass from the grass cache. Needs the LODForge Runtime SKSE plugin." },
   ] },
-  { key: "impostorUnitsPerPx", flag: "--impostor-units-per-px", kind: "number", default: 12, min: 6, max: 24, step: 2, group: "runtime", when: isRuntime, label: "Impostor resolution", explain: "Game units per impostor pixel; frames are sized by tree height (smaller = sharper, more VRAM).", format: (n) => `${n} units/px` },
+  { key: "impostorUnitsPerPx", flag: "--impostor-units-per-px", kind: "choice", default: "12", group: "runtime", when: isRuntime, label: "Impostor detail", explain: "How sharp distant trees are: the impostor frames are sized by tree height.", choices: [
+    { value: "24", label: "Low", explain: "24 units per pixel: frames half the size of High, roughly a quarter of the VRAM; trees soften from mid distance." },
+    { value: "16", label: "Medium", explain: "16 units per pixel: a little softer than High, roughly half the VRAM." },
+    { value: "12", label: "High", explain: "12 units per pixel (default). On skyrim-cs-base Tamriel's impostor pages are about 2.5 GB." },
+    { value: "8", label: "Ultra", explain: "8 units per pixel: sharpest, up to about twice the VRAM of High (frames stay capped at the largest frame size)." },
+  ] },
   { key: "impostorMaxFrame", flag: "--impostor-max-frame", kind: "choice", default: "128", group: "runtime", when: isRuntime, expert: true, label: "Largest impostor frame", explain: "Upper limit of the per-view frame size (large trees use the large-tree frame).", choices: [
     { value: "64", label: "64 px", explain: "Least VRAM." },
     { value: "128", label: "128 px", explain: "Default." },
@@ -84,7 +91,7 @@ export const OPTIONS: Option[] = [
   { key: "preset", flag: "--preset", kind: "choice", default: "Medium", group: "objects", label: "Object LOD detail", explain: "DynDOLOD's rule preset.", choices: [
     { value: "Low", label: "Low", explain: "Only larger objects get LOD; small rocks, trims, roads, fences and clutter are left out." },
     { value: "Medium", label: "Medium", explain: "Most objects get LOD; hay, road chunks, snow drifts and small rocks are left out." },
-    { value: "High", label: "High", explain: "Every object with a LOD model gets LOD. Ultra: 3D trees at LOD4. Most draw calls and VRAM." },
+    { value: "High", label: "High", explain: "Every object with a LOD model gets LOD. Most draw calls and VRAM." },
   ] },
   { key: "childParent", flag: "--child-parent", kind: "choice", default: "Low", group: "objects", label: "Child > parent copies", explain: "Which IgnoreChildEDID list filters what walled cities copy into Tamriel's LOD (DynDOLOD's own setting, separate from the preset).", choices: [
     { value: "Low", label: "Low", explain: "DynDOLOD's default: the longest ignore list, fewest copies." },
@@ -102,9 +109,9 @@ export const OPTIONS: Option[] = [
     { value: "classic", label: "Classic", explain: "Billboards in the game's tree LOD (at most 256 tree types per worldspace)." },
     { value: "ultra", label: "Ultra", explain: "Every tree in object LOD: 3D models where the preset asks for them (High: LOD4), billboards elsewhere." },
   ] },
-  { key: "treeModels", flag: "--tree-models", kind: "choice", default: "off", group: "trees", when: isUltra, label: "Generated 3D tree models", explain: "Make 3D LOD models for trees big enough for them (billboard-cloud crown over a reduced 3D trunk).", choices: [
-    { value: "off", label: "Off", explain: "Installed 3D tree LOD models only; the rest stay billboards." },
-    { value: "generate", label: "Generate", explain: "Generate models for trees without an installed CRC-matching 3D model." },
+  { key: "treeModels", flag: "--tree-models", kind: "choice", default: "off", group: "trees", when: isUltra, label: "Generated 3D tree models", explain: "Make 3D LOD models for trees big enough for them (billboard-cloud crown over a reduced 3D trunk).", note: (v) => (isRuntime(v) ? "LODForge Runtime: these are the 3D trees drawn near you (out to the first LOD distance); impostors take over beyond." : v.preset === "High" ? "Ultra trees: 3D models at LOD4, billboards further out." : undefined), choices: [
+    { value: "off", label: "Off", explain: "Installed 3D tree LOD models only; other trees stay flat (billboards, or impostors with the LODForge Runtime)." },
+    { value: "generate", label: "Generate", explain: "Generate models for trees without an installed 3D LOD model that matches the tree's mesh." },
     { value: "all", label: "Generate all", explain: "Generate for every tree, replacing installed 3D models too." },
   ] },
   { key: "treeModelCrown", flag: "--tree-model-crown", kind: "choice", default: "cloud", group: "trees", when: hasModels, label: "Crown method", explain: "How the leaves of a generated model are made.", choices: [
@@ -112,7 +119,7 @@ export const OPTIONS: Option[] = [
     { value: "prune", label: "Pruned cards", explain: "TreeLODGen's method: fewer of the original leaf cards. Heavy (thousands of triangles per tree)." },
   ] },
   { key: "treeModelLevels", flag: "--tree-model-levels", kind: "text", default: "", group: "trees", when: hasModels, expert: true, label: "Model level budgets", placeholder: "0.4:0.8:400:2500,0.15:0.7:150:1000,0.06:0.6:60:400", explain: "keep:area:bark:floor[:max_scale] for LOD4, LOD8, LOD16. Bark is the 3D trunk's triangle budget." },
-  { key: "billboardScale", flag: "--billboard-scale", kind: "number", default: 1, min: 0.5, max: 2, step: 0.25, group: "trees", label: "Billboard resolution", explain: "Pixels per tree billboard; the tree atlas grows with its square.", format: (n) => `${Math.round(n * 100)}% (${(11 / n).toFixed(1)} units/px)` },
+  { key: "billboardScale", flag: "--billboard-scale", kind: "number", default: 1, min: 0.5, max: 2, step: 0.25, group: "trees", label: "Billboard resolution", explain: "Pixels per tree billboard; the tree atlas grows with its square.", note: (v) => (isRuntime(v) ? "LODForge Runtime draws impostors instead of billboards for the trees it owns; billboards remain for trees kept in object LOD." : undefined), format: (n) => `${Math.round(n * 100)}% (${(11 / n).toFixed(1)} units/px)` },
   { key: "billboardSupersample", flag: "--billboard-supersample", kind: "number", default: 4, min: 1, max: 8, step: 1, group: "trees", expert: true, label: "Billboard supersampling", explain: "Each billboard is rendered this many times larger per axis and averaged down (1 = TexGen's hard alpha cut).", format: (n) => `${n}x` },
   { key: "billboardDensity", flag: "--billboard-density", kind: "number", default: 1, min: 0.1, max: 1, step: 0.05, group: "trees", expert: true, label: "Billboard density", explain: "Opaque share of tree billboards relative to their rendered coverage.", format: (n) => `${Math.round(n * 100)}%` },
   { key: "billboardSoft", flag: "--billboard-soft", kind: "bool", default: false, group: "trees", expert: true, label: "Soft billboard alpha", explain: "Keep the rescaled soft alpha instead of dithering it (dithering keeps thin foliage through the game's alpha test)." },
@@ -161,7 +168,7 @@ export const OPTIONS: Option[] = [
   ] },
   { key: "grassDensity", flag: "--grass-density", kind: "number", default: 50, min: 5, max: 100, step: 5, group: "grass", when: (v) => !isRuntime(v) && v.grass === "bto", label: "Grass density", explain: "Share of the cached grass placements kept in LOD.", format: (n) => `${n}%` },
   // Plugins
-  { key: "plugins", flag: "--no-plugins", negate: true, kind: "bool", default: true, group: "plugins", label: "Dynamic LOD plugins", explain: "DynDOLOD.esm, DynDOLOD.esp and the DynDOLOD DLL NG data files." },
+  { key: "plugins", flag: "--no-plugins", negate: true, kind: "bool", default: true, group: "plugins", label: "Dynamic LOD plugins", explain: "DynDOLOD.esm, DynDOLOD.esp and the DynDOLOD DLL NG data files: LOD that changes in game (doors, lights, destroyed or quest-enabled objects, large reference hand-off)." },
   { key: "occlusion", flag: "--no-occlusion", negate: true, kind: "bool", default: true, group: "plugins", label: "Occlusion", explain: "Occlusion.esp from the new terrain and object LOD." },
   { key: "newToken", flag: "--new-token", kind: "bool", default: false, group: "plugins", expert: true, label: "New run token", explain: "Start a new run token even when updating an earlier build in place." },
   { key: "renumber", flag: "--renumber", kind: "bool", default: false, group: "plugins", expert: true, label: "Renumber plugins", explain: "Number DynDOLOD.esm/.esp from scratch. Breaks saves made with the earlier output." },
@@ -173,11 +180,11 @@ export const OPTIONS: Option[] = [
 
 export const DEFAULTS: Values = Object.fromEntries(OPTIONS.map((o) => [o.key, o.default]));
 
-/** Quality levels for the Guided view: each sets these keys. */
-export const LEVELS: Record<string, { label: string; description: string; values: Values }> = {
-  performance: { label: "Performance", description: "Fewer LOD objects, fast compression, billboard trees. Quickest build, lightest on VRAM.", values: { preset: "Low", bc7: "fast", atlasMaxTile: 512, billboardScale: 0.75, treeLod: "classic", treeModels: "off" } },
-  balanced: { label: "Balanced", description: "DynDOLOD's Medium rules, high-quality compression, billboard trees. Recommended.", values: { preset: "Medium", bc7: "high", atlasMaxTile: 1024, billboardScale: 1, treeLod: "classic", treeModels: "off" } },
-  quality: { label: "Quality", description: "High rules, Ultra trees with generated 3D models near you, larger atlas tiles.", values: { preset: "High", bc7: "high", atlasMaxTile: 2048, billboardScale: 1.5, treeLod: "ultra", treeModels: "generate" } },
+/** Quality levels for the Guided view: each sets these keys (`runtime`: the description with the LODForge Runtime on). */
+export const LEVELS: Record<string, { label: string; description: string; runtime: string; values: Values }> = {
+  performance: { label: "Performance", description: "Fewer LOD objects, fast compression, billboard trees. Quickest build, lightest on VRAM.", runtime: "Fewer LOD objects, fast compression, impostor trees without generated 3D models. Quickest build.", values: { preset: "Low", bc7: "fast", atlasMaxTile: 512, billboardScale: 0.75, treeLod: "classic", treeModels: "off" } },
+  balanced: { label: "Balanced", description: "DynDOLOD's Medium rules, high-quality compression, billboard trees. Recommended.", runtime: "DynDOLOD's Medium rules, high-quality compression, impostor trees with installed 3D tree LOD near you. Recommended.", values: { preset: "Medium", bc7: "high", atlasMaxTile: 1024, billboardScale: 1, treeLod: "classic", treeModels: "off" } },
+  quality: { label: "Quality", description: "High rules, Ultra trees with generated 3D models near you, larger atlas tiles.", runtime: "High rules, generated 3D tree models near you and impostors beyond, larger atlas tiles.", values: { preset: "High", bc7: "high", atlasMaxTile: 2048, billboardScale: 1.5, treeLod: "ultra", treeModels: "generate" } },
 };
 
 export function levelOf(v: Values): string {
