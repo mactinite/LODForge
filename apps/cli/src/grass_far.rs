@@ -41,6 +41,10 @@ pub struct Args {
 pub fn run(a: &Args) -> Result<()> {
     let p = a.profile.open()?;
     let opts = WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true };
+    // Into an existing runtime output: keep its run token (Build.txt), or the runtime reports the
+    // new .lfg files as not matching the rest of the output.
+    let token = crate::instances::init_build_token(&a.out);
+    println!("run token {token}");
     let reports = build(&p, &a.world, &a.seasons, a.cache.as_deref(), &a.out, opts)?;
     for r in &reports {
         print!("{}", r.summary());
