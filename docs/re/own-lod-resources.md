@@ -148,17 +148,42 @@ raised platforms).
 ### 3.2 Generation (`crates/lodmodel`)
 
 Per level (model level 0, 1, 2):
-1. **Collect** visible, non-skinned shapes under the root with node transforms applied; skip
+1. **Collect** visible, non-skinned shapes under the root with node transforms applied, except
+   the root's own: the engine replaces a loaded model's root transform with the reference's
+   placement, so a model whose root carries one (a Blender export with its origin moved and
+   every shape translated back, Northern Roads' `COTN_WR_Bridge.nif`: root -759.6 in y, shapes
+   +759.6) draws without it, and its LOD must too (the 2026-10-27 "bridge does not line up"
+   report: our LOD sat 760 units down the bridge's axis; DynDOLOD's output has it in place). Vanilla
+   agrees: 24 DynDOLOD Resources LOD models and their full models carry rotated roots (`CWTower01.nif`
+   and `cwtower01_lod_1.nif` both 180 degrees about Z; `SBridge01.nif` and `sbridge01_lod_2.nif` with
+   different rotations), which only draw alike if the root is ignored. The object LOD baker
+   (`crates/objlod/src/mesh.rs`) follows the same rule. Skip
    hidden nodes, editor markers, all but the first child of switch nodes, effect-shader shapes,
    decals (`SLSF1` decal / dynamic decal), alpha-blended shapes that are not alpha-tested, and
    shapes without a lighting shader.
 2. **Merge** shapes with identical shader, texture set and alpha property.
 3. **Weld** exact duplicate vertices (same position and attributes) so they are not seams.
 4. **Drop small parts**: connected parts (through shared or coincident vertices) with a bounding
-   diagonal under twice the level's error limit; the largest part always stays.
+   diagonal under twice the level's error limit, smallest first, while the area gone stays under a
+   fifth of the model's and what stays still reaches the model's box within the error limit on
+   every axis; the largest part always stays. (Before 2026-10-27 every small part went: the planks
+   of a stockade bridge, the posts of a fence and a drawbridge's boards are each small, so the
+   far levels of such models were one plank.)
 5. **Simplify** all materials together with meshoptimizer's attribute-aware edge collapse
    (normals and UVs weighted, absolute error), permissive across UV / normal seams but with
-   material borders protected; then a triangle cap as a share of the source. meshoptimizer only
+   material borders protected, and with each part's bounding-box corners locked (an axis thinner
+   than the error limit and a tenth of the part's diagonal folds to one corner: a plank keeps its
+   four footprint corners, a rope its two ends). Without the locks a thin closed part collapsed
+   flat at the cost of its thickness and then away for nothing: the degenerate box has no border
+   edges, so bridge decks, walkways and scaffolds shrank from their ends into a fragment at LOD8
+   and LOD16 (`stockadescaffoldbridge04` LOD8: 6 triangles over 540 of its 1231 units). The
+   locks pin vertices, not the extent: meshoptimizer may still collapse a locked end's
+   neighbours into it until no triangle is left there, so a long rope lost an end at one level
+   (`minescaffoldropelong03` LOD8: 165 of 595 units; `dockropestr01` LOD8: 227 of 483). So every
+   level is checked against the box of what the drop step kept, and a result that falls short
+   of it by more than the error limit on any side is redone with the triangle goal doubled until
+   it holds (the mine rope: 14 triangles instead of 4; models that keep their box take one
+   pass). Then a triangle cap as a share of the source, never below that goal. meshoptimizer only
    removes vertices, so UVs, normals, tangents and vertex colours are the source's values
    (atlas-friendly as far as the source is: LODGen atlases untiled textures and keeps tiled ones,
    exactly as for the full model).
@@ -185,7 +210,9 @@ levels, level fallback, CRC preference. Fill mode adds a level only where discov
 nothing, so a `_lod_0` next to a vanilla `_lod.nif` keeps the vanilla file for the other levels.
 They are in the output (not only a cache) because dynamic LOD copies point at level-0 models at
 runtime. A cache (`.lodforge-cache` next to the output, keyed by full-model CRC32, level,
-parameters and `GENERATOR_VERSION`) makes rebuilds near free.
+parameters and `GENERATOR_VERSION`; 5 since the extent locks, the area rule, the extent check and
+the root-transform rule of 2026-10-27, so an older output's generated models are rebuilt) makes
+rebuilds near free.
 
 ### 3.4 Dynamic LOD models (`_dyndolod_lod`), not built yet
 

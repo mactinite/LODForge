@@ -655,7 +655,10 @@ are in docs/baseline.md "AltTextures and VC side files".
 - One line per shape of every full model in the export (each model once, each shape name once), in
   export order; a child worldspace copy's line names its LOD model as the full model, and so does
   this file. Shapes are walked from the NIF's root nodes (not block 0: some files start with
-  `BSXFlags`), including those below hidden nodes.
+  `BSXFlags`), including those below hidden nodes. The root node's own transform is not applied
+  to the geometry (the engine replaces a loaded model's root transform with the reference's
+  placement; `COTN_WR_Bridge.nif` carries root -759.6 in y with every shape at +759.6, and
+  DynDOLOD's object LOD has it where the engine draws it, 2026-10-27).
 - `True` when some vertex colour is not white. LE shapes (NiTriShapeData) are always `True`
   (DynDOLOD tests SSE vertex data only): `cotn_wr_bridge.nif WRHouseMeadery01:0.001` is all white
   and `True`, `farmhouse02.nif Farmhouse02:25` all white and `False`.

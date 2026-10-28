@@ -69,6 +69,9 @@ pub struct LodMesh {
 
 /// Parses and bakes a model. Files the reader rejects are an error; a file without usable
 /// shapes is `Ok` with no parts (DynDOLOD Resources ships such "no LOD" models on purpose).
+/// The root's own transform is never applied: the engine replaces a loaded model's root
+/// transform with the reference's placement, so a file whose root carries one (a Blender export
+/// with its origin moved, each shape translated back) draws without it, and so must its LOD.
 pub fn import(path: &str, bytes: &[u8]) -> Result<LodMesh, lodforge_nif::Error> {
     import_with(path, bytes, true)
 }
@@ -83,12 +86,12 @@ pub fn import_with(path: &str, bytes: &[u8], node_transforms: bool) -> Result<Lo
     let mut visited = HashSet::new();
     let mut index = 0usize;
     for root in nif.roots.clone() {
-        walk(&nif, root, &Xform::IDENTITY, &mut mesh, &mut visited, &mut index, node_transforms);
+        walk(&nif, root, &Xform::IDENTITY, &mut mesh, &mut visited, &mut index, node_transforms, true);
     }
     Ok(mesh)
 }
 
-fn walk(nif: &Nif, r: lodforge_nif::Ref, parent: &Xform, mesh: &mut LodMesh, visited: &mut HashSet<u32>, index: &mut usize, node_transforms: bool) {
+fn walk(nif: &Nif, r: lodforge_nif::Ref, parent: &Xform, mesh: &mut LodMesh, visited: &mut HashSet<u32>, index: &mut usize, node_transforms: bool, root: bool) {
     let Some(i) = r else { return };
     if !visited.insert(i) {
         return;
@@ -98,15 +101,16 @@ fn walk(nif: &Nif, r: lodforge_nif::Ref, parent: &Xform, mesh: &mut LodMesh, vis
             if n.av.flags & 1 != 0 {
                 return;
             }
-            let world = if node_transforms { parent.then(&Xform::from_nif(&n.av.transform)) } else { Xform::IDENTITY };
+            // The root's own transform stays out (see `import`); every node below applies its own.
+            let world = if !node_transforms { Xform::IDENTITY } else if root { *parent } else { parent.then(&Xform::from_nif(&n.av.transform)) };
             for c in n.children.clone() {
-                walk(nif, c, &world, mesh, visited, index, node_transforms);
+                walk(nif, c, &world, mesh, visited, index, node_transforms, false);
             }
         }
         Some(Block::TriShape(s)) => {
             let my_index = *index;
             *index += 1;
-            match bake(nif, s, parent, my_index, node_transforms) {
+            match bake(nif, s, parent, my_index, node_transforms && !root) {
                 Ok(p) => mesh.parts.push(p),
                 Err(why) => {
                     mesh.skipped += 1;
@@ -263,7 +267,7 @@ mod tests {
     #[test]
     fn walk_and_bake() {
         let mut nif = Nif::new();
-        let root = Node { av: AvObject { net: ObjectNet::named("Root"), transform: Transform { translation: [100.0, 0.0, 0.0], scale: 2.0, ..Default::default() }, ..Default::default() }, children: vec![Some(1), Some(4), Some(5), Some(6)], ..Default::default() };
+        let root = Node { av: AvObject { net: ObjectNet::named("Root"), transform: Transform { translation: [100.0, 0.0, 0.0], scale: 2.0, ..Default::default() }, ..Default::default() }, children: vec![Some(1), Some(4), Some(5), Some(6), Some(7)], ..Default::default() };
         nif.add_block(Block::Node(root));
         let mut s = shape("A", false);
         s.shader_property = Some(2);
@@ -277,15 +281,23 @@ mod tests {
         let mut e = shape("EditorMarker", false);
         e.shader_property = Some(2);
         nif.add_block(Block::TriShape(e));
+        // A node below the root: its transform applies (the root's does not).
+        nif.add_block(Block::Node(Node { av: AvObject { net: ObjectNet::named("Sub"), transform: Transform { translation: [0.0, 5.0, 0.0], scale: 2.0, ..Default::default() }, ..Default::default() }, children: vec![Some(8)], ..Default::default() }));
+        let mut b = shape("B", false);
+        b.shader_property = Some(2);
+        nif.add_block(Block::TriShape(b));
         let bytes = nif.to_bytes().unwrap();
         let m = import("meshes\\x.nif", &bytes).unwrap();
-        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts.len(), 2);
         assert_eq!(m.skipped, 3);
         let p = &m.parts[0];
         assert_eq!(p.index, 0);
         assert_eq!(p.textures[0], "textures\\d.dds");
-        // Root scale 2 and translation, shape translation 10 in z: (1,0,0) -> 2*(1,0,10) + (100,0,0).
-        assert_eq!(p.positions[1], [102.0, 0.0, 20.0]);
+        // The root's scale 2 and translation are ignored (the engine replaces them with the
+        // reference's); the shape's own translation 10 in z applies: (1,0,0) -> (1,0,10).
+        assert_eq!(p.positions[1], [1.0, 0.0, 10.0]);
+        // Under "Sub" (scale 2, +5 in y): 2*(1,0,10) + (0,5,0).
+        assert_eq!(m.parts[1].positions[1], [2.0, 5.0, 20.0]);
         assert!(!p.source_normals && !p.source_tangents);
         assert_eq!(p.normals[0], [0.0, 0.0, 1.0]);
         assert_eq!(p.tangents[0], [1.0, 0.0, 0.0]);

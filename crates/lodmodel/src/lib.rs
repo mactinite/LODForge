@@ -7,14 +7,26 @@
 //!
 //! A level is made in four steps:
 //! 1. **Collect.** Every visible, non-skinned BSTriShape (or LE NiTriShape) under the root, with
-//!    its node transforms applied, so the result has one flat level of shapes. Skipped: hidden
+//!    its node transforms applied, so the result has one flat level of shapes. The root's own
+//!    transform is left out: the engine replaces a loaded model's root transform with the
+//!    reference's placement, so a model whose root carries one (a Blender export with its
+//!    origin moved, every shape translated back) draws without it. Skipped: hidden
 //!    nodes, editor markers, all but the first child of switch nodes, effect-shader shapes (water,
 //!    mist, fire: those belong to dynamic LOD), decals, alpha-blended (not alpha-tested) shapes,
 //!    shapes without a lighting shader.
 //! 2. **Merge.** Shapes with the same shader, textures and alpha property become one mesh.
 //! 3. **Simplify.** All merged meshes together through meshoptimizer's attribute-aware edge
 //!    collapse (positions, normals, UVs), with an absolute error limit per level and connected
-//!    parts smaller than twice that limit removed first; a second, triangle-count pass caps levels that stay too dense.
+//!    parts smaller than twice that limit removed first (smallest first, never more than a fifth
+//!    of the model's area: a deck's planks are each small and together the deck); a second,
+//!    triangle-count pass caps levels that stay too dense.
+//!    Each part keeps the vertices nearest its bounding box corners locked (thin axes folded):
+//!    a closed thin box (plank, beam, rope segment) collapses flat and then away at almost no
+//!    quadric error, so without them bridge decks, walkways and scaffolds shrank to a fragment
+//!    at the far levels. Locks pin vertices, not the extent (neighbours may still collapse into
+//!    a locked corner until no triangle is left there), so a level whose result falls short of
+//!    the box by more than the error limit on any side is redone with a doubled triangle goal
+//!    until it holds.
 //!    Collapses keep a subset of the original vertices, so UVs, normals, tangents and vertex
 //!    colours are the source's values; UV seams and material borders stay where they were.
 //! 4. **Write.** One BSTriShape per material with the source's shader and texture set (UVs are
@@ -53,8 +65,10 @@ pub const LEVELS: [LevelParams; 3] = [
 ];
 
 /// Bumped whenever generation changes the output for the same input (cache key). 2: broken
-/// source UVs repaired ([`repair_uvs`]).
-pub const GENERATOR_VERSION: u32 = 2;
+/// source UVs repaired ([`repair_uvs`]). 3: parts keep their extent ([`extent_locks`]). 4: a
+/// level that lost an end is redone with a larger goal ([`extent_lost`]). 5: the root node's own
+/// transform is ignored, as the engine does ([`collect`]).
+pub const GENERATOR_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stats {
@@ -144,21 +158,23 @@ fn is_marker(name: Option<&str>) -> bool {
     name.is_some_and(|n| n.to_ascii_lowercase().contains("editormarker"))
 }
 
-fn collect(nif: &Nif, idx: usize, parent: Xf, meshes: &mut Vec<Mesh>, keys: &mut HashMap<String, usize>, st: &mut Stats) {
+/// Shapes under node `idx`, each with the node transforms above it applied. `own` is false for
+/// the root: its transform is the reference's in the engine, not the file's.
+fn collect(nif: &Nif, idx: usize, parent: Xf, own: bool, meshes: &mut Vec<Mesh>, keys: &mut HashMap<String, usize>, st: &mut Stats) {
     let Some(Block::Node(node)) = nif.blocks.get(idx) else { return };
     if node.av.flags & 1 != 0 || is_marker(node.av.net.name.as_deref()) {
         return;
     }
-    let xf = Xf::of(&node.av.transform).then(&parent);
+    let xf = if own { Xf::of(&node.av.transform).then(&parent) } else { parent };
     let switch = nif.block_type(idx) == "NiSwitchNode";
     for c in node.children.iter().flatten().take(if switch { 1 } else { usize::MAX }) {
         let ci = *c as usize;
         match nif.blocks.get(ci) {
-            Some(Block::Node(_)) => collect(nif, ci, xf, meshes, keys, st),
+            Some(Block::Node(_)) => collect(nif, ci, xf, true, meshes, keys, st),
             Some(Block::TriShape(s)) => {
                 st.source_shapes += 1;
                 st.source_triangles += s.triangles.len();
-                if !add_shape(nif, s, &xf, meshes, keys) {
+                if !add_shape(nif, s, &xf, true, meshes, keys) {
                     st.skipped_shapes += 1;
                 }
             }
@@ -167,7 +183,7 @@ fn collect(nif: &Nif, idx: usize, parent: Xf, meshes: &mut Vec<Mesh>, keys: &mut
     }
 }
 
-fn add_shape(nif: &Nif, s: &TriShape, parent: &Xf, meshes: &mut Vec<Mesh>, keys: &mut HashMap<String, usize>) -> bool {
+fn add_shape(nif: &Nif, s: &TriShape, parent: &Xf, own: bool, meshes: &mut Vec<Mesh>, keys: &mut HashMap<String, usize>) -> bool {
     if s.skin.is_some() || s.av.flags & 1 != 0 || s.triangles.is_empty() || s.positions.is_empty() || is_marker(s.av.net.name.as_deref()) {
         return false;
     }
@@ -204,7 +220,7 @@ fn add_shape(nif: &Nif, s: &TriShape, parent: &Xf, meshes: &mut Vec<Mesh>, keys:
         meshes.len() - 1
     });
     let m = &mut meshes[mi];
-    let xf = Xf::of(&s.av.transform).then(parent);
+    let xf = if own { Xf::of(&s.av.transform).then(parent) } else { *parent };
     let base = m.positions.len() as u32;
     m.positions.extend(s.positions.iter().map(|&p| xf.point(p)));
     let rot = |v: [f32; 3]| normalize(xf.rot(v));
@@ -296,6 +312,7 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, f32) {
         indices.extend(m.triangles.iter().flat_map(|t| t.iter().map(|&i| base + canon[i as usize])));
     }
     let indices = drop_small_parts(&positions, &indices, 2.0 * p.max_error);
+    let extent = extent_locks(&positions, &indices, p.max_error);
     let weights = [p.normal_weight, p.normal_weight, p.normal_weight, p.uv_weight, p.uv_weight];
     // Vertices on a material border (coincident with a vertex of another mesh) keep the border
     // in permissive mode.
@@ -306,14 +323,57 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, f32) {
             *e = u32::MAX;
         }
     }
-    let locks: Vec<meshopt::SimplifyVertex> = positions.iter().map(|pos| if meshes_at[&pos.map(f32::to_bits)] == u32::MAX { meshopt::SimplifyVertex::Protect } else { meshopt::SimplifyVertex::None }).collect();
+    let locks: Vec<meshopt::SimplifyVertex> = positions
+        .iter()
+        .enumerate()
+        .map(|(v, pos)| {
+            let mut l = if meshes_at[&pos.map(f32::to_bits)] == u32::MAX { meshopt::SimplifyVertex::Protect } else { meshopt::SimplifyVertex::None };
+            if extent[v] {
+                l |= meshopt::SimplifyVertex::Lock;
+            }
+            l
+        })
+        .collect();
     let source = indices.len() / 3;
     let opts = if p.permissive { meshopt::SimplifyOptions::ErrorAbsolute | meshopt::SimplifyOptions::Permissive } else { meshopt::SimplifyOptions::ErrorAbsolute };
-    let mut err = 0.0f32;
-    let mut out = meshopt::simplify_with_attributes_and_locks_decoder(&indices, &positions, &attrs, &weights, 5 * 4, &locks, p.min_triangles.min(source) * 3, p.max_error, opts, Some(&mut err));
     let cap = ((source as f32 * p.max_ratio).ceil() as usize).max(p.min_triangles);
-    if out.len() / 3 > cap {
-        out = meshopt::simplify_with_attributes_and_locks_decoder(&out, &positions, &attrs, &weights, 5 * 4, &locks, cap * 3, f32::MAX, opts, None);
+    let dbg = std::env::var_os("LODFORGE_LODMODEL_DEBUG").is_some();
+    let per_owner = |idx: &[u32]| -> Vec<usize> {
+        let mut c = vec![0usize; meshes.len()];
+        for t in idx.chunks_exact(3) {
+            c[owner[t[0] as usize] as usize] += 1;
+        }
+        c
+    };
+    // The box the result must reach (within the error limit on every side): what is left after
+    // the small parts went. The locks pin the corner vertices, but meshoptimizer may still
+    // collapse a corner's neighbours into it until no triangle is left there, and a thin end
+    // (a rope, a spike, a post) then vanishes for almost no quadric error. So the goal, the
+    // triangle count the error pass may reach, doubles until the result reaches the box; only a
+    // model that lost an end takes more than one pass. The cap never goes below the goal.
+    let box_in = extent_of(&positions, &indices);
+    let mut goal = p.min_triangles.min(source);
+    let mut err = 0.0f32;
+    let mut out;
+    loop {
+        out = meshopt::simplify_with_attributes_and_locks_decoder(&indices, &positions, &attrs, &weights, 5 * 4, &locks, goal * 3, p.max_error, opts, Some(&mut err));
+        if dbg {
+            eprintln!("  after drop: {:?} tris per mesh, {} locked vertices; after error pass (goal {goal}): {:?} (cap {cap})", per_owner(&indices), extent.iter().filter(|&&b| b).count(), per_owner(&out));
+        }
+        if out.len() / 3 > cap.max(goal) {
+            out = meshopt::simplify_with_attributes_and_locks_decoder(&out, &positions, &attrs, &weights, 5 * 4, &locks, cap.max(goal) * 3, f32::MAX, opts, None);
+            if dbg {
+                eprintln!("  after cap pass: {:?}", per_owner(&out));
+            }
+        }
+        let box_out = extent_of(&positions, &out);
+        if !extent_lost(&box_in, &box_out, p.max_error) || goal >= source {
+            break;
+        }
+        if dbg {
+            eprintln!("  extent lost at goal {goal}: {box_in:?} -> {box_out:?}");
+        }
+        goal = (goal * 2).min(source);
     }
     let mut per: Vec<Vec<u32>> = vec![Vec::new(); meshes.len()];
     for t in out.chunks_exact(3) {
@@ -345,7 +405,9 @@ fn weld_duplicates(m: &Mesh) -> Vec<u32> {
 
 /// Removes connected parts (triangles joined through shared or coincident vertices) whose
 /// bounding box diagonal is below `min_size`: they are too small to see at the level's distance.
-/// The largest part always stays.
+/// The largest part always stays, and so does what many small parts add up to: they go smallest
+/// first only while the area gone stays under a fifth of the model's (the planks of a deck or the
+/// posts of a fence are each small and together the whole object; dropping them all left one).
 fn drop_small_parts(positions: &[[f32; 3]], indices: &[u32], min_size: f32) -> Vec<u32> {
     // Weld coincident positions (0.01-unit grid) so parts split only by UV or normal seams or
     // material borders count as one.
@@ -385,10 +447,131 @@ fn drop_small_parts(positions: &[[f32; 3]], indices: &[u32], min_size: f32) -> V
             e.1[k] = e.1[k].max(p[k]);
         }
     }
+    let mut area: HashMap<u32, f64> = HashMap::new();
+    let mut total = 0.0f64;
+    for t in indices.chunks_exact(3) {
+        let [a, b, c] = [positions[t[0] as usize], positions[t[1] as usize], positions[t[2] as usize]];
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let cr = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        let s = 0.5 * f64::from((cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt());
+        *area.entry(find(&mut parent, id[t[0] as usize])).or_default() += s;
+        total += s;
+    }
     let diag = |b: &([f32; 3], [f32; 3])| ((b.1[0] - b.0[0]).powi(2) + (b.1[1] - b.0[1]).powi(2) + (b.1[2] - b.0[2]).powi(2)).sqrt();
     let largest = boxes.iter().max_by(|a, b| diag(a.1).total_cmp(&diag(b.1))).map(|(r, _)| *r);
-    let keep: std::collections::HashSet<u32> = boxes.iter().filter(|(r, b)| Some(**r) == largest || diag(b) >= min_size).map(|(r, _)| *r).collect();
-    indices.chunks_exact(3).filter(|t| keep.contains(&find(&mut parent, id[t[0] as usize]))).flatten().copied().collect()
+    let mut small: Vec<(f32, u32)> = boxes.iter().filter(|(r, b)| Some(**r) != largest && diag(b) < min_size).map(|(r, b)| (diag(b), *r)).collect();
+    small.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    // The model's own box must survive: a part at an end of a deck or a fence goes only when
+    // what stays still reaches within half `min_size` of the model's extent on every axis.
+    let model = boxes.values().fold(([f32::MAX; 3], [f32::MIN; 3]), |m, b| ([m.0[0].min(b.0[0]), m.0[1].min(b.0[1]), m.0[2].min(b.0[2])], [m.1[0].max(b.1[0]), m.1[1].max(b.1[1]), m.1[2].max(b.1[2])]));
+    let mut dropped: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut gone = 0.0f64;
+    for (_, r) in small {
+        let a = area.get(&r).copied().unwrap_or(0.0);
+        if gone + a > 0.2 * total {
+            break;
+        }
+        let rest = boxes.iter().filter(|(k, _)| **k != r && !dropped.contains(k)).fold(([f32::MAX; 3], [f32::MIN; 3]), |m, (_, b)| ([m.0[0].min(b.0[0]), m.0[1].min(b.0[1]), m.0[2].min(b.0[2])], [m.1[0].max(b.1[0]), m.1[1].max(b.1[1]), m.1[2].max(b.1[2])]));
+        if (0..3).any(|k| rest.0[k] - model.0[k] > 0.5 * min_size || model.1[k] - rest.1[k] > 0.5 * min_size) {
+            continue;
+        }
+        gone += a;
+        dropped.insert(r);
+    }
+    indices.chunks_exact(3).filter(|t| !dropped.contains(&find(&mut parent, id[t[0] as usize]))).flatten().copied().collect()
+}
+
+/// Vertices that pin each connected part's extent: for every part (triangles joined through
+/// shared or coincident positions) the vertex nearest to each corner of its bounding box, with
+/// an axis thinner than `thin` and a tenth of the part's diagonal folded to its middle (a plank
+/// keeps its four footprint corners, a rope its two ends, a block all eight). Every vertex at a chosen position is marked, so a seam
+/// cannot free a copy. Locked, the corners stop a thin closed part from collapsing flat and then
+/// away: a plank's top face onto its bottom face costs its thickness in quadric error, the
+/// degenerate box then has no border edges, and the rest goes for nothing.
+fn extent_locks(positions: &[[f32; 3]], indices: &[u32], thin: f32) -> Vec<bool> {
+    let key = |p: &[f32; 3]| p.map(|v| (f64::from(v) * 100.0).round() as i64);
+    let mut weld: HashMap<[i64; 3], u32> = HashMap::new();
+    let id: Vec<u32> = positions
+        .iter()
+        .map(|p| {
+            let n = weld.len() as u32;
+            *weld.entry(key(p)).or_insert(n)
+        })
+        .collect();
+    let mut parent: Vec<u32> = (0..weld.len() as u32).collect();
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            parent[x as usize] = parent[parent[x as usize] as usize];
+            x = parent[x as usize];
+        }
+        x
+    }
+    for t in indices.chunks_exact(3) {
+        let a = find(&mut parent, id[t[0] as usize]);
+        for &v in &t[1..] {
+            let b = find(&mut parent, id[v as usize]);
+            if a != b {
+                parent[b as usize] = a;
+            }
+        }
+    }
+    let mut used = vec![false; positions.len()];
+    let mut boxes: HashMap<u32, ([f32; 3], [f32; 3])> = HashMap::new();
+    for &v in indices {
+        used[v as usize] = true;
+        let r = find(&mut parent, id[v as usize]);
+        let p = positions[v as usize];
+        let e = boxes.entry(r).or_insert((p, p));
+        for k in 0..3 {
+            e.0[k] = e.0[k].min(p[k]);
+            e.1[k] = e.1[k].max(p[k]);
+        }
+    }
+    // Per part and corner: the nearest welded position.
+    let mut best: HashMap<u32, [(f32, u32); 8]> = HashMap::new();
+    for (v, p) in positions.iter().enumerate() {
+        if !used[v] {
+            continue;
+        }
+        let r = find(&mut parent, id[v as usize]);
+        let b = boxes[&r];
+        // An axis folds (its two corners become one) when the part is thin along it: a tenth of
+        // the part's diagonal at most, so a plank folds its thickness but keeps its width.
+        let fold = (0.1 * ((b.1[0] - b.0[0]).powi(2) + (b.1[1] - b.0[1]).powi(2) + (b.1[2] - b.0[2]).powi(2)).sqrt()).min(thin);
+        let e = best.entry(r).or_insert([(f32::MAX, u32::MAX); 8]);
+        for (c, slot) in e.iter_mut().enumerate() {
+            let mut d = 0.0f32;
+            for k in 0..3 {
+                let target = if b.1[k] - b.0[k] < fold { 0.5 * (b.0[k] + b.1[k]) } else if c & (1 << k) != 0 { b.1[k] } else { b.0[k] };
+                d += (p[k] - target) * (p[k] - target);
+            }
+            if d < slot.0 {
+                *slot = (d, id[v]);
+            }
+        }
+    }
+    let chosen: std::collections::HashSet<u32> = best.values().flatten().map(|&(_, w)| w).filter(|&w| w != u32::MAX).collect();
+    id.iter().enumerate().map(|(v, w)| used[v] && chosen.contains(w)).collect()
+}
+
+/// Bounding box of the vertices the triangles reference: (min, max).
+fn extent_of(positions: &[[f32; 3]], indices: &[u32]) -> ([f32; 3], [f32; 3]) {
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for &i in indices {
+        let p = positions[i as usize];
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    (lo, hi)
+}
+
+/// Whether `out` falls short of `full` by more than `tol` on any side of any axis.
+fn extent_lost(full: &([f32; 3], [f32; 3]), out: &([f32; 3], [f32; 3]), tol: f32) -> bool {
+    (0..3).any(|k| out.0[k] > full.0[k] + tol || out.1[k] < full.1[k] - tol)
 }
 
 fn bounds(points: &[[f32; 3]]) -> ([f32; 3], f32) {
@@ -436,11 +619,11 @@ fn generate_impl(nif: &Nif, p: &LevelParams, name: &str, keep_names: bool) -> Re
     let mut keys = HashMap::new();
     let root = nif.roots.first().copied().flatten().unwrap_or(0) as usize;
     match nif.blocks.get(root) {
-        Some(Block::Node(_)) => collect(nif, root, Xf::IDENTITY, &mut meshes, &mut keys, &mut st),
+        Some(Block::Node(_)) => collect(nif, root, Xf::IDENTITY, false, &mut meshes, &mut keys, &mut st),
         Some(Block::TriShape(s)) => {
             st.source_shapes += 1;
             st.source_triangles += s.triangles.len();
-            if !add_shape(nif, s, &Xf::IDENTITY, &mut meshes, &mut keys) {
+            if !add_shape(nif, s, &Xf::IDENTITY, false, &mut meshes, &mut keys) {
                 st.skipped_shapes += 1;
             }
         }
@@ -581,6 +764,156 @@ mod tests {
         let tris: usize = back.blocks.iter().map(|b| if let Block::TriShape(s) = b { s.triangles.len() } else { 0 }).sum();
         assert_eq!(tris, st.triangles);
     }
+
+    /// Extent of every shape's vertices of a generated model: (min, max).
+    fn extent(nif: &Nif) -> ([f32; 3], [f32; 3]) {
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for b in &nif.blocks {
+            if let Block::TriShape(s) = b {
+                for p in &s.positions {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// A deck of thin closed planks (a stockade bridge, a walkway) keeps its length at every
+    /// level instead of collapsing from the ends into a fragment.
+    #[test]
+    fn plank_deck_keeps_its_extent() {
+        let mut s = TriShape::default();
+        let plank = |s: &mut TriShape, x0: f32, x1: f32, y0: f32, y1: f32, z0: f32, z1: f32| {
+            let base = s.positions.len() as u16;
+            for z in [z0, z1] {
+                for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+                    s.positions.push([x, y, z]);
+                    s.uvs.push([(x - x0) / (x1 - x0), (y - y0) / (y1 - y0)]);
+                    s.normals.push([0.0, 0.0, if z == z1 { 1.0 } else { -1.0 }]);
+                }
+            }
+            // top, bottom, four sides
+            let quads: [[u16; 4]; 6] = [[4, 5, 6, 7], [0, 3, 2, 1], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+            for q in quads {
+                s.triangles.push([base + q[0], base + q[1], base + q[2]]);
+                s.triangles.push([base + q[0], base + q[2], base + q[3]]);
+            }
+        };
+        // 20 planks across a 1200-unit span, 56 wide, 4 thick: the stockade bridge deck's shape.
+        for i in 0..20 {
+            let x0 = -600.0 + 60.0 * i as f32;
+            plank(&mut s, x0, x0 + 56.0, -120.0, 120.0, -2.0, 2.0);
+        }
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(Node::default()));
+        let ts = nif.add_block(Block::TextureSet(vec!["textures\\a.dds".into()]));
+        let sh = nif.add_block(Block::LightingShader(LightingShader { texture_set: Some(ts), ..Default::default() }));
+        s.shader_property = Some(sh);
+        s.vertex_desc = VertexDesc::with_attributes(true, true, true, false, false).0;
+        let si = nif.add_block(Block::TriShape(s));
+        if let Block::Node(r) = &mut nif.blocks[0] {
+            r.children = vec![Some(si)];
+        }
+        for (k, p) in LEVELS.iter().enumerate() {
+            let (out, st) = generate_nif(&nif, p, "t").unwrap();
+            let (lo, hi) = extent(&out);
+            // The deck spans 1196 x 240; a level may lose at most its error limit at each end.
+            let e = 2.0 * p.max_error;
+            assert!(hi[0] - lo[0] >= 1196.0 - e && hi[1] - lo[1] >= 240.0 - e, "level {k}: extent {lo:?}..{hi:?} {st:?}");
+            assert!(st.triangles <= 240, "level {k}: {st:?}");
+        }
+    }
+
+    /// A model whose root is translated and whose shape translates back (a Blender export with
+    /// its origin moved: Northern Roads' Whiterun bridge) keeps the shape's own translation only,
+    /// as the engine does; the root's is the reference's placement there.
+    #[test]
+    fn root_transform_is_ignored() {
+        let mut s = TriShape::default();
+        for z in [-2.0f32, 2.0] {
+            for (x, y) in [(-50.0f32, -20.0f32), (50.0, -20.0), (50.0, 20.0), (-50.0, 20.0)] {
+                s.positions.push([x, y, z]);
+                s.uvs.push([(x + 50.0) / 100.0, (y + 20.0) / 40.0]);
+                s.normals.push([0.0, 0.0, if z > 0.0 { 1.0 } else { -1.0 }]);
+            }
+        }
+        let quads: [[u16; 4]; 6] = [[4, 5, 6, 7], [0, 3, 2, 1], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+        for q in quads {
+            s.triangles.push([q[0], q[1], q[2]]);
+            s.triangles.push([q[0], q[2], q[3]]);
+        }
+        s.av.transform.translation = [0.0, 759.6, 0.0];
+        let mut root = Node::default();
+        root.av.transform.translation = [0.0, -759.6, 0.0];
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(root));
+        let ts = nif.add_block(Block::TextureSet(vec!["textures\\a.dds".into()]));
+        let sh = nif.add_block(Block::LightingShader(LightingShader { texture_set: Some(ts), ..Default::default() }));
+        s.shader_property = Some(sh);
+        s.vertex_desc = VertexDesc::with_attributes(true, true, true, false, false).0;
+        let si = nif.add_block(Block::TriShape(s));
+        if let Block::Node(r) = &mut nif.blocks[0] {
+            r.children = vec![Some(si)];
+        }
+        let (out, st) = generate_nif(&nif, &LEVELS[0], "t").unwrap();
+        let (lo, hi) = extent(&out);
+        assert!(lo[1] > 700.0 && hi[1] < 820.0 && lo[0] < -40.0 && hi[0] > 40.0, "extent {lo:?}..{hi:?} {st:?}");
+    }
+
+    /// A long thin rope (one closed sagging tube) keeps its length at every level. Locked end
+    /// vertices alone do not guarantee that: meshoptimizer may collapse an end's neighbours into
+    /// the locked vertex until no triangle is left at that end, for almost no quadric error.
+    #[test]
+    fn rope_keeps_its_length() {
+        let mut s = TriShape::default();
+        let rings = 10usize;
+        let sides = 6u16;
+        for r in 0..rings {
+            let t = r as f32 / (rings - 1) as f32;
+            let x = -300.0 + 600.0 * t;
+            let sag = -40.0 * (std::f32::consts::PI * t).sin();
+            for v in 0..sides {
+                let a = v as f32 / sides as f32 * std::f32::consts::TAU;
+                s.positions.push([x, 1.5 * a.cos(), sag + 1.5 * a.sin()]);
+                s.uvs.push([t, v as f32 / sides as f32]);
+                s.normals.push([0.0, a.cos(), a.sin()]);
+            }
+        }
+        for r in 0..rings - 1 {
+            let b0 = (r as u16) * sides;
+            let b1 = b0 + sides;
+            for v in 0..sides {
+                let w = (v + 1) % sides;
+                s.triangles.push([b0 + v, b1 + v, b1 + w]);
+                s.triangles.push([b0 + v, b1 + w, b0 + w]);
+            }
+        }
+        let last = ((rings - 1) as u16) * sides;
+        for v in 1..sides - 1 {
+            s.triangles.push([0, v + 1, v]);
+            s.triangles.push([last, last + v, last + v + 1]);
+        }
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(Node::default()));
+        let ts = nif.add_block(Block::TextureSet(vec!["textures\\a.dds".into()]));
+        let sh = nif.add_block(Block::LightingShader(LightingShader { texture_set: Some(ts), ..Default::default() }));
+        s.shader_property = Some(sh);
+        s.vertex_desc = VertexDesc::with_attributes(true, true, true, false, false).0;
+        let si = nif.add_block(Block::TriShape(s));
+        if let Block::Node(r) = &mut nif.blocks[0] {
+            r.children = vec![Some(si)];
+        }
+        for (k, p) in LEVELS.iter().enumerate() {
+            let (out, st) = generate_nif(&nif, p, "t").unwrap();
+            let (lo, hi) = extent(&out);
+            assert!(hi[0] - lo[0] >= 600.0 - 2.0 * p.max_error, "level {k}: extent {lo:?}..{hi:?} {st:?}");
+            assert!(st.triangles <= 60, "level {k}: {st:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -602,8 +935,14 @@ mod file_tests {
                 _ => println!("{i} {}", nif.block_type(i)),
             }
         }
+        let out_dir = std::env::var_os("LODFORGE_LODMODEL_OUT");
         for (k, p) in super::LEVELS.iter().enumerate() {
-            println!("level {k}: {:?}", super::generate_nif(&nif, p, "x").map(|r| r.1));
+            let r = super::generate_nif(&nif, p, "x");
+            println!("level {k}: {:?}", r.as_ref().map(|r| r.1.clone()));
+            if let (Some(dir), Ok((out, _))) = (&out_dir, &r) {
+                let stem = std::path::Path::new(&path).file_stem().unwrap().to_string_lossy().to_string();
+                std::fs::write(std::path::Path::new(dir).join(format!("{stem}_lod_{k}.nif")), out.to_bytes().unwrap()).unwrap();
+            }
         }
     }
 }
