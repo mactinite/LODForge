@@ -54,10 +54,10 @@ pub struct Args {
     /// Cloud crowns: largest tile side in pixels.
     #[arg(long, default_value_t = 256)]
     pub cloud_max_tile: u32,
-    /// Cloud crowns: keep the rendered soft coverage instead of dithering it into on/off alpha
-    /// (the game alpha-tests the crown, which cuts away soft thin foliage).
+    /// Cloud crowns: dither the rendered soft coverage into on/off alpha (the behaviour before
+    /// 2026-10-28; the default keeps the coverage and tests it at a low threshold).
     #[arg(long)]
-    pub cloud_soft: bool,
+    pub cloud_dither: bool,
     /// With `--inspect`: render the full model and its generated levels side by side into
     /// `<dir>\<stem>.png` (TexGen's billboard camera, same scale).
     #[arg(long)]
@@ -152,6 +152,12 @@ pub enum CrownMode {
 
 /// Folder of the crown textures below `textures\`.
 pub const CROWN_TEXTURES: &str = "dyndolod\\lod\\trees";
+
+/// Alpha-test threshold of the crown material. The baked alpha is coverage (the share of a texel
+/// the rendered leaves cover), so the threshold decides how thin foliage may be and still show:
+/// a quarter. The source leaves' own threshold applied while rendering the tiles. The runtime's
+/// tree atlas remaps it to 128, and its plane fade thins a plane by scaling this alpha.
+pub const CROWN_ALPHA_THRESHOLD: u8 = 64;
 
 /// A tree's cloud crown and trunk levels, ready to render (CPU part, runs in parallel).
 pub struct CloudPrep {
@@ -290,10 +296,10 @@ fn crown_material(prep: &CloudPrep, diffuse: &str, normal: &str) -> lodforge_tre
     shader.net = lodforge_nif::ObjectNet { name: shader.net.name.clone(), ..Default::default() };
     let alpha = src
         .and_then(|s| match s.alpha_property.and_then(|r| prep.nif.blocks.get(r as usize)) {
-            Some(lodforge_nif::Block::Alpha { flags, threshold, .. }) => Some((*flags | 0x200, *threshold)),
+            Some(lodforge_nif::Block::Alpha { flags, .. }) => Some((*flags | 0x200, CROWN_ALPHA_THRESHOLD)),
             _ => None,
         })
-        .or(Some((4844, 128)));
+        .or(Some((4844, CROWN_ALPHA_THRESHOLD)));
     let mut textures = vec![diffuse.to_string(), normal.to_string()];
     if soft {
         textures.push(diffuse.to_string());
@@ -667,7 +673,7 @@ fn render_sheet(p: &Profile, nifs: &[lodforge_nif::Nif], png: &Path, extra: &Has
 pub fn run(a: &Args) -> Result<()> {
     let p = a.profile.open()?;
     let params = levels_arg(a.levels.as_deref())?;
-    let cp = lodforge_treemodel::cloud::CloudParams { max_tile: a.cloud_max_tile, dither: !a.cloud_soft, ..Default::default() };
+    let cp = lodforge_treemodel::cloud::CloudParams { max_tile: a.cloud_max_tile, dither: a.cloud_dither, ..Default::default() };
     if !a.inspect.is_empty() {
         return inspect(&p, &a.inspect, a.render.as_deref(), &params, a.crown, &cp);
     }

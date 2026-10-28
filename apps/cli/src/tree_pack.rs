@@ -20,6 +20,14 @@ use crate::profile::Profile;
 /// Game path stem of the pages (`<stem>_Alpha[NN].dds`: the `_Alpha` suffix makes the page renderer treat them as alpha-tested
 /// pages: average colour under the cut-out, coverage-preserving mips).
 pub const PAGE_BASE: &str = r"textures\LODForge\TreeAtlas\TreeAtlas";
+
+/// Largest atlas tile of a generated crown atlas (see `make`).
+pub const CROWN_TILE_CAP: u32 = 1024;
+
+/// Shape name of a generated crown cloud (`tree_models::crown_material`): its vertices get alpha
+/// 255 in the pack and every other vertex at most 254, so the runtime's vertex shader can tell
+/// crown planes (which it fades when seen edge-on) from trunks.
+pub const CROWN_SHAPE: &str = "Crown Cloud";
 /// UV slack before a part is re-cut (half a texel of a 512 tile).
 const UV_SLACK: f32 = 0.001;
 
@@ -253,7 +261,10 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                 key.push_str(crate::object_atlas::HALF_TOP);
             }
             if !sizes.contains_key(&(class, key.clone())) {
-                let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, if complex { (i.height / 2).max(1) } else { i.height }, s.tile_cap));
+                // A generated crown atlas (`<stem>_<crc>crown.dds`) is one tree's own foliage, not a
+                // tiling texture: it keeps its full size (its texels are spent on leaves already).
+                let cap = if shape.diffuse.to_ascii_lowercase().ends_with("crown.dds") { s.tile_cap.max(CROWN_TILE_CAP) } else { s.tile_cap };
+                let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, if complex { (i.height / 2).max(1) } else { i.height }, cap));
                 let Some(size) = size else {
                     rep.dropped_parts += 1;
                     continue;
@@ -326,6 +337,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
             // Complex grass pages: UVs in the top half's space (CS samples colour at v * 0.5).
             let page_h = if *class == lodforge_instances::meshpack::CLASS_GRASS_COMPLEX { pg.height / 2 } else { pg.height };
             let base = input.vertices.len() as u32;
+            let crown_part = format!("{:?}", part.name).contains(CROWN_SHAPE);
             // Half-texel inset so bilinear filtering stays inside the tile.
             let map = |uv: f32, origin: u32, size: u32, page: u32| ((f64::from(origin) + 0.5 + f64::from(uv.clamp(0.0, 1.0)) * f64::from(size.saturating_sub(1))) / f64::from(page) * 65535.0).round().clamp(0.0, 65535.0) as u16;
             for (i, pos) in part.positions.iter().enumerate() {
@@ -340,7 +352,12 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                     normal: pack_unit(n, 0),
                     tangent: pack_unit(t, w),
                     uv: [map(uv[0], e.x, e.width, pg.width), map(uv[1], e.y, e.height, page_h)],
-                    color: part.colors.as_ref().and_then(|c| c.get(i).copied()).map(|c| if *whiten { [255, 255, 255, c[3]] } else { c }).unwrap_or([255; 4]),
+                    color: {
+                        let c = part.colors.as_ref().and_then(|c| c.get(i).copied()).map(|c| if *whiten { [255, 255, 255, c[3]] } else { c }).unwrap_or([255; 4]);
+                        // The alpha channel marks crown planes (255) against everything else (<= 254); the
+                        // source alpha (wind weights on trees) has no use in the pack.
+                        [c[0], c[1], c[2], if crown_part { 255 } else { 254 }]
+                    },
                 });
             }
             for tri in &part.triangles {
@@ -377,6 +394,24 @@ pub struct StaticsArgs {
     pub tile: u32,
     #[arg(long, default_value_t = 3)]
     pub zstd: i32,
+}
+
+/// `lodforge runtime-tree-pack`: rebuilds only `TreeMeshes.bin` (and its pages) from the trees
+/// files of an output, with that output's own files (generated tree LOD models, crown textures)
+/// visible as inputs, and links the trees files to it. For iterating on the generated crowns
+/// without a full build: `tree-models --out <output>` then this.
+pub fn run_trees(a: &StaticsArgs) -> Result<()> {
+    let mut p = a.profile.open()?;
+    p.vfs.add_loose_root_since(&a.data, &lodforge_archive::DirSnapshot::default())?;
+    // TreeMeshes.bin takes the output's run token (Build.txt), like the files it links to; the
+    // runtime checks that they agree.
+    println!("run token {}", crate::instances::init_build_token(&a.data));
+    let rep = build(&p, &a.data, &Settings { tile_cap: a.tile, ..Default::default() }, WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true })?;
+    println!("tree {}", rep.summary());
+    for u in &rep.unresolved {
+        println!("  unresolved: {u}");
+    }
+    Ok(())
 }
 
 pub fn run_statics(a: &StaticsArgs) -> Result<()> {

@@ -243,6 +243,8 @@ enum Command {
     TreePackPreview(tree_pack_preview::Args),
     /// Rebuilds only StaticMeshes.bin from the statics files of an output.
     RuntimeStaticsPack(tree_pack::StaticsArgs),
+    /// Rebuilds only TreeMeshes.bin (and its atlas pages) from the trees files of an output.
+    RuntimeTreePack(tree_pack::StaticsArgs),
     /// Projects what static instancing would take out of .bto per copy threshold (export only).
     RuntimeStaticsPlan(runtime_trees::PlanArgs),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
@@ -348,6 +350,7 @@ fn main() -> Result<()> {
         Command::RuntimeGrassPack(a) => grass_pack::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
+        Command::RuntimeTreePack(a) => tree_pack::run_trees(&a),
         Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),

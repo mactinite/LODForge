@@ -147,3 +147,42 @@ vanilla leaves (switch nodes), bark-blend cards projected off the trunk (kept 3D
 Verified in game at the user's boxy pine cluster (33988, 19251). Still open: fine twigs and roots
 (bare winter ash/elm/oak, reach cliff trees, Soul Cairn) break into specks, saplings thin out,
 glow (magic tree) is lost, some Reach and aspen crowns stay a little darker.
+
+## Crown quality pass (2026-10-28)
+
+The user saw the near-tier crowns in game as dark, blobby cut-outs (JK's Whiterun Outskirts,
+Ulvenwald's summer `tundradriftwood01sum.nif`, player four cells away). Measured on that tree:
+the crown atlas (1024 x 512) kept leaves on 4.3% of its texels, the rest was fill; the leaf
+colour was 55% of the source leaf texture's (dark vertex colours baked in); the runtime's tree
+atlas halved the crown (tile cap 512); the alpha was dithered 0/255, so every magnified texel was
+a hard blob; and the soft-light mask the engine sampled (t12) was the template shape's texture,
+another tree's crown. Changes:
+
+- `cloud::split_slab`: a slab's leaves are grouped by an occupancy grid (6 x 6, up to 8 groups,
+  else 3 x 3, else one) and each group is a tile of its own, so the atlas spends its texels on
+  foliage; `atlas_budget` (1024 x 512 texels) bounds the packed atlas by lowering the pixels per
+  unit, so the sub-tiles do not grow it. The driftwood crown went from 4.3% to 6.0% foliage
+  coverage at the same size (+40% foliage texels).
+- `vertex_color_weight` (0): the leaves' vertex colours are not baked in. The full tree darkens
+  its leaves by them and lights them back up through its soft-light mask (slot 2, `_s`, mean 111
+  against a diffuse mean of 70); the crown has only its diffuse as a mask, so the darkening had
+  nothing to make up for it (leaf mean 40 -> 56 of the source's 70; the rest is twigs in the
+  slices).
+- Soft coverage alpha by default (`--cloud-dither` restores the old behaviour) with a crown alpha
+  threshold of 64 (`CROWN_ALPHA_THRESHOLD`; the runtime atlas remaps it to 128): the bilinear
+  filter traces silhouettes between texels, and a vertex alpha can thin a plane gradually.
+- The tree mesh pack keeps crown atlases at full size (`CROWN_TILE_CAP` 1024) and marks crown
+  vertices with alpha 255 (everything else 254) for the runtime's plane fade. Cost: 7 -> 15
+  atlas pages (291 -> 649 MB with mips) on skyrim-cs-base; the runtime reported 619 MB of tree
+  textures. `lodforge runtime-tree-pack --data <output>` rebuilds the pack alone (12 s) after
+  `tree-models --out <output>` (43 s for 514 trees), keeping the output's run token.
+- Runtime (LODForge-Runtime `ClusterVS.hlsl`): crown planes fade with |normal . view| ([Trees]
+  `fPlaneFadeStart` 0.1, `fPlaneFadeEnd` 0.35, horizontal slices times 1.5), their normals turn
+  toward the eye, and the page albedo is bound as the soft-light mask (t12).
+
+In game (same camera, player four cells away) the crowns are brighter, read as leaves, and the
+edge-on streaks are gone; up close (free camera at 1,500 units) the texels still show as soft
+blobs, which is the 1024 x 512 budget. Screenshots: `D:\workspace\SkyrimMCP\runs\screenshots\
+20261028T043817Z\trees-lod-mesh-a.png` (before), `20261028T053101Z\trees-lod-mesh-a2.png` (after),
+`trees-full-a.png` (full trees). Not done: a baked soft-light mask of its own (third page set),
+the far tier (impostors at 24 units per pixel in the user's build; the default is 12).
