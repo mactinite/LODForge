@@ -328,7 +328,30 @@ pub struct RuntimeObjects {
     pub large_refs_always: bool,
     pub model_masks: Vec<String>,
     pub names: Arc<FormNames>,
+    /// This worldspace's child-world copies: copy id -> object id of the copy's
+    /// `_DynDOLOD_CHILD` reference in DynDOLOD.esm (`dyndolod_build::child_copy_ids`). A copy
+    /// missing here is written as a synthetic instance.
+    pub child_copy_ids: Arc<HashMap<u32, u32>>,
     pub write: WriteOptions,
+}
+
+/// The plugin the child-world copies' references live in.
+pub const DYNDOLOD_ESM: &str = "DynDOLOD.esm";
+
+/// (synthetic instances, those on large-reference `MESH` entries) of a statics file: records
+/// with plugin `NO_PLUGIN`, which the runtime's per-reference large-reference hand-off cannot
+/// follow (it falls back to hiding them inside the large-reference grid).
+pub fn synthetic_counts(f: &StaticsFile) -> (usize, usize) {
+    let mut n = (0, 0);
+    for recs in f.blocks.values() {
+        for r in recs.iter().filter(|r| r.plugin == lodforge_instances::statics::NO_PLUGIN) {
+            n.0 += 1;
+            if f.meshes.get(usize::from(r.mesh)).is_some_and(|m| m.flags & lodforge_instances::statics::MESH_LARGE_REF != 0) {
+                n.1 += 1;
+            }
+        }
+    }
+    n
 }
 
 impl std::fmt::Debug for RuntimeObjects {
@@ -380,9 +403,19 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
                 f.meshes[usize::from(m)].flags |= MESH_TREE;
             }
             let id = u32::from_str_radix(&i.ref_id, 16).unwrap_or(0);
-            let (plugin, form) = match rt.names.split(id) {
-                Some((n, local)) => (Some(n.to_string()), local),
-                None => (None, 0),
+            let (plugin, form) = if lodforge_dyndolod::childworld::is_copy(id) {
+                // A child-world copy is named by its `_DynDOLOD_CHILD` reference in DynDOLOD.esm
+                // (the engine's own large reference of it), so the runtime's per-reference
+                // hand-off can follow it; synthetic when that plugin has none for it.
+                match rt.child_copy_ids.get(&id) {
+                    Some(&object_id) => (Some(DYNDOLOD_ESM.to_string()), object_id),
+                    None => (None, 0),
+                }
+            } else {
+                match rt.names.split(id) {
+                    Some((n, local)) => (Some(n.to_string()), local),
+                    None => (None, 0),
+                }
             };
             let angles = i.rotation_deg.map(f32::to_radians);
             f.add(q.level as u8, (q.x as i16, q.y as i16), i.position, angles, i.scale, m, plugin.as_deref(), form);

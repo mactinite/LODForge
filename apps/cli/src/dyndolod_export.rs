@@ -192,7 +192,7 @@ pub fn run(a: &Args) -> Result<()> {
             let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
             let (prev_esm, prev_esp) = crate::dyndolod_build::previous_plugins(dir);
             let token = prev_esp.as_ref().and_then(|pr| pr.token.clone()).unwrap_or_else(|| lodforge_dyndolod::dynplugins::bunch_of_numbers(seed));
-            let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref() };
+            let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref(), esm_next_object_id: 0 };
             let base_data = crate::dyndolod_build::base_lod_data(&p, &c, we.lod_bases.iter().copied())?;
             let mut out = lodforge_dyndolod::dynplugins::build(lo, &world, bases, dynamic, sw, near, far, &token, &rolling).map_err(anyhow::Error::msg)?;
             out.worlds_txt.push_str(&base_data);

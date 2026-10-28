@@ -29,6 +29,11 @@ pub struct Args {
     /// DynDOLOD's `DynDOLOD_SSE_ChildworldCopies_<World>.txt` to compare with.
     #[arg(long)]
     pub golden: Option<PathBuf>,
+    /// A DynDOLOD.esm to resolve the copies' `_DynDOLOD_CHILD` references against, as the
+    /// runtime statics export does when the build writes no plugins (instance-formats.md
+    /// section 6): prints how many copies it names and which it lacks.
+    #[arg(long)]
+    pub esm: Option<PathBuf>,
 }
 
 /// The copies for `parent` from every child worldspace with settings.
@@ -89,6 +94,40 @@ pub fn run(a: &Args) -> Result<()> {
         println!("golden {}, ours {}, both {}", golden.len(), ours.len(), golden.intersection(&ours).count());
         println!("golden only ({}): {}", only_g.len(), only_g.iter().take(30).map(|i| label(i)).collect::<Vec<_>>().join("; "));
         println!("ours only ({}): {}", only_o.len(), only_o.iter().take(60).map(|i| label(i)).collect::<Vec<_>>().join("; "));
+    }
+    if let Some(esm) = &a.esm {
+        use lodforge_dyndolod::dynplugins::{ChildCopyIds, child_copy_editor_id, plugin_name_of};
+        let bytes = std::fs::read(esm).with_context(|| format!("reading {}", esm.display()))?;
+        let prev = lodforge_dyndolod::plugin::Previous::read(&bytes).context("not a plugin")?;
+        let mut ids = ChildCopyIds::new(Some(&prev), false);
+        let map = ids.assign(&p.load_order, parent, &copies).clone();
+        let no_cell = copies.iter().filter(|c| !parent.cell_records.contains_key(&((c.placement.position[0] / 4096.0).floor() as i32, (c.placement.position[1] / 4096.0).floor() as i32))).count();
+        println!(
+            "{}: author {}, {} records, next object id {:X}; {} copies named by a _DynDOLOD_CHILD record, {} without one, {} in cells the worldspace has no record for (no copy there)",
+            esm.display(),
+            prev.author,
+            prev.records,
+            prev.next_object_id,
+            ids.kept,
+            ids.unresolved,
+            no_cell
+        );
+        let owners = lodforge_dyndolod::bases::owners(&p.load_order);
+        let mut missing: Vec<String> = copies
+            .iter()
+            .filter(|c| !map.contains_key(&c.copy_id))
+            .map(|c| {
+                let (local, plugin) = plugin_name_of(&p.load_order, &owners, c.ref_id);
+                format!("{:08X} {} ({}{})", c.ref_id, child_copy_editor_id(&plugin, local), name(c.child_world), if c.large { ", large" } else { "" })
+            })
+            .collect();
+        missing.sort();
+        if !missing.is_empty() {
+            println!("without a record ({}): {}", missing.len(), missing.iter().take(40).cloned().collect::<Vec<_>>().join("; "));
+        }
+        let mut sample: Vec<(u32, u32)> = map.iter().map(|(&c, &o)| (c, o)).collect();
+        sample.sort_unstable();
+        println!("first ids: {}", sample.iter().take(8).map(|(c, o)| format!("{c:08X}->{o:06X}")).collect::<Vec<_>>().join(", "));
     }
     Ok(())
 }

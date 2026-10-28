@@ -759,6 +759,27 @@ pub fn previous_plugins(out: &Path) -> (Option<Previous>, Option<Previous>) {
     (read("DynDOLOD.esm"), read("DynDOLOD.esp"))
 }
 
+/// The DynDOLOD.esm form ids of the child-world copies, settled before the object LOD stage
+/// writes the runtime statics (instance-formats.md section 6): from the earlier LODForge build's
+/// plugin that [`write_plugins`] continues (copies it lacks get ids reserved after its last), or,
+/// when this build writes no plugins (`--runtime-no-dyndolod-plugins`, `--no-plugins`), from
+/// whatever DynDOLOD.esm the output holds, LODForge's or DynDOLOD's own, since that is the one
+/// the game loads with the statics; copies it lacks stay synthetic instances.
+pub fn child_copy_ids(opts: &Opts, writes_plugins: bool, out: &Path) -> lodforge_dyndolod::dynplugins::ChildCopyIds {
+    let path = out.join("DynDOLOD.esm");
+    let prev = if writes_plugins {
+        if opts.renumber { None } else { previous_plugins(out).0 }
+    } else {
+        std::fs::read(&path).ok().and_then(|b| Previous::read(&b))
+    };
+    match &prev {
+        Some(p) => println!("  child-world copies take their reference ids from {} ({} records, author {}, next object id {:X}){}", path.display(), p.records, p.author, p.next_object_id, if writes_plugins { "; new copies get ids after it" } else { "; copies it lacks stay synthetic" }),
+        None if writes_plugins => println!("  child-world copies get new DynDOLOD.esm reference ids{}", if opts.renumber { " (--renumber)" } else { " (no earlier LODForge DynDOLOD.esm in the output)" }),
+        None => println!("  no DynDOLOD.esm in {}: child-world copies stay synthetic in the runtime statics", out.display()),
+    }
+    lodforge_dyndolod::dynplugins::ChildCopyIds::new(prev.as_ref(), writes_plugins)
+}
+
 /// One worldspace's input to [`write_plugins`], from its export.
 pub struct PluginWorld<'a> {
     pub world: &'a Worldspace,
@@ -795,7 +816,8 @@ pub fn workarounds_on(c: &Config, opts: &Opts) -> bool {
 /// Returns (dynamic references, worldspaces).
 /// Returns (dynamic references, worldspaces, the `...linear.dds` copies the base copies' texture
 /// sets point at, lower-case).
-pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, margin: i32, out: &Path) -> Result<(usize, usize, std::collections::BTreeSet<String>)> {
+#[allow(clippy::too_many_arguments)]
+pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, margin: i32, out: &Path, copy_ids: Option<&lodforge_dyndolod::dynplugins::ChildCopyIds>) -> Result<(usize, usize, std::collections::BTreeSet<String>)> {
     let (prev_esm, prev_esp) = if opts.renumber { (None, None) } else { previous_plugins(out) };
     for (name, prev) in [("DynDOLOD.esm", &prev_esm), ("DynDOLOD.esp", &prev_esp)] {
         if let Some(pr) = prev {
@@ -809,7 +831,9 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
             lodforge_dyndolod::dynplugins::bunch_of_numbers(seed)
         }
     };
-    let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref() };
+    // The child-world copies' ids were settled before the object LOD stage (`child_copy_ids`),
+    // from the same earlier plugin; the new ones among them are taken.
+    let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref(), esm_next_object_id: copy_ids.map_or(0, |ci| ci.next_object_id) };
     let height: f32 = c.num("TerrainUndersideHeight", 500.0);
     // The underside is enabled in the worldspace and in the child worldspaces that use its land.
     let underside = |w: &Worldspace| -> Option<(f32, Vec<u32>)> {
@@ -832,7 +856,8 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
                     lodforge_dyndolod::dynplugins::ChildWorld { world: x, revert_refs, bounds, no_navmesh_cells }
                 })
                 .collect();
-            lodforge_dyndolod::dynplugins::WorldDynamic { world: w, dynamic: &pw.dynamic, south_west: south_west(p, &w.editor_id), lod_refs: &pw.lod_refs, children, underside: underside(w), seasonal: pw.seasonal.clone(), child_copies: pw.child_copies.clone() }
+            let child_copy_ids = copy_ids.and_then(|ci| ci.world(w.form_id)).cloned().unwrap_or_default();
+            lodforge_dyndolod::dynplugins::WorldDynamic { world: w, dynamic: &pw.dynamic, south_west: south_west(p, &w.editor_id), lod_refs: &pw.lod_refs, children, underside: underside(w), seasonal: pw.seasonal.clone(), child_copies: pw.child_copies.clone(), child_copy_ids }
         })
         .collect();
     // WorkaroundLargeReferencesBugs (on with DLL NG) unless large references are not used.

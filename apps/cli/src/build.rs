@@ -460,6 +460,10 @@ pub fn run(a: &Args) -> Result<()> {
     if a.rt.on() {
         crate::instances::init_build_token(&out);
     }
+    // Runtime mode: the DynDOLOD.esm reference ids of the child-world copies, settled before the
+    // object LOD stage writes the statics (the plugin stage below keeps them).
+    let writes_plugins = dyn_mode && !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod && !(a.rt.on() && a.rt.runtime_no_dyndolod_plugins);
+    let mut copy_ids = (a.rt.on() && dyn_mode && !a.no_objects).then(|| crate::dyndolod_build::child_copy_ids(&a.dyn_opts, writes_plugins, &out));
     // Runtime mode: per worldspace, the export's large references -> `.bto` levels with a column.
     let mut large_columns: std::collections::HashMap<String, std::collections::HashMap<u32, u16>> = std::collections::HashMap::new();
     // Runtime mode: per worldspace, its export lines inside the bounds of a child worldspace that
@@ -537,6 +541,23 @@ pub fn run(a: &Args) -> Result<()> {
                 }
                 if !a.json && !we.child_copies.is_empty() {
                     println!("  {} child worldspace references copied in", we.child_copies.len());
+                }
+                // Runtime mode: the copies' DynDOLOD.esm reference ids, for the statics the
+                // object LOD stage writes below (and for the plugin stage, which keeps them).
+                if let Some(ci) = copy_ids.as_mut()
+                    && !we.child_copies.is_empty()
+                {
+                    let before = (ci.kept, ci.reserved, ci.unresolved);
+                    ci.assign(&p.load_order, ws, we.child_copies.iter().map(|(cp, _)| cp));
+                    if !a.json {
+                        println!(
+                            "  runtime statics: {} child copies named by their DynDOLOD.esm reference ({} kept, {} new), {} without one (synthetic)",
+                            ci.kept + ci.reserved - before.0 - before.1,
+                            ci.kept - before.0,
+                            ci.reserved - before.1,
+                            ci.unresolved - before.2
+                        );
+                    }
                 }
                 if a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Bto {
                     let keys = crate::dyndolod_build::grass_header(c);
@@ -746,7 +767,8 @@ pub fn run(a: &Args) -> Result<()> {
                 l.wait_meshes(world);
             }
             if let Some(names) = &form_names {
-                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
+                let child_copy_ids = copy_ids.as_ref().and_then(|ci| ci.world(ws.form_id)).cloned().map(std::sync::Arc::new).unwrap_or_default();
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), child_copy_ids, write: a.rt.write_options() });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
             if let Some(l) = &occ_lane {
@@ -931,7 +953,7 @@ pub fn run(a: &Args) -> Result<()> {
                 .drain(..)
                 .filter_map(|(w, dynamic, seasonal, child_copies, lod_refs, lod_bases)| dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(&w)).map(|world| crate::dyndolod_build::PluginWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases }))
                 .collect();
-            match crate::dyndolod_build::write_plugins(&p, c, &a.dyn_opts, &refs, &dyn_worlds, &undersides, crate::dyndolod_build::large_ref_margin(&a.profile), &out) {
+            match crate::dyndolod_build::write_plugins(&p, c, &a.dyn_opts, &refs, &dyn_worlds, &undersides, crate::dyndolod_build::large_ref_margin(&a.profile), &out, copy_ids.as_ref()) {
                 Ok((n, w, mut used)) => {
                     if !a.json {
                         println!("  DynDOLOD.esm/.esp: {n} dynamic LOD references in {w} worldspace(s)");
