@@ -27,6 +27,7 @@
 //! parsed file round-trips byte for byte. Terrain LOD files are assembled by the `lodforge-btr`
 //! crate on top of this writer.
 
+pub mod anim;
 mod reader;
 pub mod skin;
 pub use skin::SkinGeometry;

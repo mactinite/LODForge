@@ -39,6 +39,8 @@ pub struct Placement {
     /// XESP parent (global form id) and flags (1 = set enable state to opposite of parent).
     pub enable_parent_id: u32,
     pub enable_parent_flags: u8,
+    /// ONAM is present: a door or container that begins open ("Open by Default").
+    pub open_by_default: bool,
     pub flags: u32,
     /// Exterior cell the reference sits in; `None` for the persistent cell.
     pub cell: Option<(i32, i32)>,
@@ -445,7 +447,7 @@ fn scan_cell_children(lp: &LoadedPlugin, plugin_index: u16, g: Group<'_>, cell: 
 }
 
 fn empty_placement(plugin: u16) -> Placement {
-    Placement { base: 0, position: [0.0; 3], rotation: [0.0; 3], scale: 1.0, has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0, flags: 0, cell: None, plugin, offset: 0 }
+    Placement { base: 0, position: [0.0; 3], rotation: [0.0; 3], scale: 1.0, has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0, open_by_default: false, flags: 0, cell: None, plugin, offset: 0 }
 }
 
 fn placement(lp: &LoadedPlugin, plugin_index: u16, r: &Record<'_>, cell: Option<(i32, i32)>) -> Result<Option<Placement>> {
@@ -477,6 +479,7 @@ fn placement(lp: &LoadedPlugin, plugin_index: u16, r: &Record<'_>, cell: Option<
                     p.enable_parent_flags = f.data[4];
                 }
             }
+            b"ONAM" => p.open_by_default = true,
             _ => {}
         }
     }

@@ -93,6 +93,30 @@ mod tests {
         base.flags = 0;
         assert!(resolve(&base, false, true).levels.iter().all(Option::is_none));
     }
+
+    /// A reference open by default takes the `_lfopen` models of the levels its columns use; a
+    /// base without them keeps its columns.
+    #[test]
+    fn open_by_default_references_take_the_open_state_models() {
+        let paths = ["meshes\\lod\\gate_lod_0.nif", "meshes\\lod\\gate_lod_1.nif", "meshes\\lod\\gate_lfopen_lod_0.nif", "meshes\\lod\\gate_lfopen_lod_1.nif"];
+        let index = LodIndex::scan(paths.iter().copied(), &["meshes".into()], &[], &Default::default());
+        let parallax = Default::default();
+        let materials = HashMap::new();
+        let owners = HashMap::new();
+        let rules = vec![crate::rules::Rule::parse("gate,Level0,Level1,Level1,Far LOD,Unchanged,0", "test").unwrap()];
+        let r = Resolver { rules: &rules, index: &index, parallax: &parallax, materials: &materials, plugins: &[], owners: &owners, read: &|_| None, exists: &|p| paths.contains(&p), level32: false, mesh_crc: &crate::lodmodels::MeshCrcTable::default() };
+        let base = Base { signature: *b"DOOR", model: "gate.nif".into(), ..Default::default() };
+        let lod = r.resolve(&base);
+        assert_eq!(lod.columns[0], "meshes\\lod\\gate_lod_0.nif");
+        assert_eq!(lod.columns[2], "meshes\\lod\\gate_lod_1.nif");
+        let open = r.open_columns(&base, &lod, &lod.columns).unwrap();
+        assert_eq!(open[0], "meshes\\lod\\gate_lfopen_lod_0.nif");
+        assert_eq!(open[1], "meshes\\lod\\gate_lfopen_lod_1.nif");
+        assert_eq!(open[2], "meshes\\lod\\gate_lfopen_lod_1.nif");
+        assert_eq!(open[3], "");
+        let other = Base { signature: *b"DOOR", model: "door.nif".into(), ..Default::default() };
+        assert!(r.open_columns(&other, &r.resolve(&other), &lod.columns).is_none());
+    }
 }
 
 impl Resolver<'_> {
@@ -182,7 +206,39 @@ impl Resolver<'_> {
     }
 }
 
+/// Name infix of the open-state LOD models `lod-models` generates for doors and gates that
+/// references flag open by default: `<stem>_lfopen[_<crc>]_lod_<k>.nif` beside
+/// `<stem>[_<crc>]_lod_<k>.nif` (an infix no full model uses, so discovery never takes one for
+/// another model's LOD).
+pub const OPEN_INFIX: &str = "_lfopen";
+
 impl Resolver<'_> {
+    /// Columns for a reference that begins open (REFR ONAM): every level column that names one of
+    /// the base's own LOD models takes that level's open-state model ([`OPEN_INFIX`], the door's
+    /// `Open` sequence played to its end) where one exists. None when no column changes.
+    pub fn open_columns(&self, b: &Base, lod: &BaseLod, normal: &[String; 4]) -> Option<[String; 4]> {
+        let stem = lod.model.rsplit('\\').next().unwrap_or(&lod.model).trim_end_matches(".nif").to_ascii_lowercase();
+        let open_stem = format!("{stem}{OPEN_INFIX}");
+        if !self.index.any_with_prefix(&open_stem) {
+            return None;
+        }
+        let crc = self.model_crc(&lod.model);
+        let open = crate::lodmodels::lod_set_with(self.index, &open_stem, crc, snow_of(b, self.materials), false, true);
+        let mut out = normal.clone();
+        let mut changed = false;
+        for col in out.iter_mut() {
+            if col.is_empty() {
+                continue;
+            }
+            let Some(j) = lod.levels.iter().position(|l| l.as_deref() == Some(col.as_str())) else { continue };
+            if let Some(o) = &open[j] {
+                *col = o.clone();
+                changed = true;
+            }
+        }
+        changed.then_some(out)
+    }
+
     /// Glow window columns: for each level column the normal line uses, the smallest existing
     /// `<model>glow_lod_<j>.nif` with j at least the rule's model level there (golden: a base with
     /// only `glow_lod_0` glows in LOD4 only; `glow_lod_1` covers LOD4 and LOD8, and LOD16 where the

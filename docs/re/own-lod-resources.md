@@ -231,6 +231,85 @@ shaders), fires (particles, emissive), a water plane. Plan:
 template with the same plane layout, written by LODForge to its work folder; `objlod::flat`
 already builds the 2-plane tree billboard NIF itself when no template is given.
 
+### 3.6 Doors and gates open by default (2026-10-27)
+
+A door's full model is modelled closed; its `Open` controller sequence swings the leaf. A LOD
+model generated from the file shows the closed pose, so a gate the reference flags **Open by
+Default** (REFR `ONAM`, what the Creation Kit's checkbox and Papyrus `SetDefaultOpen` write; 96
+such references in Tamriel on skyrim-cs-base, mostly JK's outskirts gates) stood closed in LOD
+and open up close. Now:
+
+- `lodforge_nif::anim` decodes the animation blocks the parser keeps raw (NiControllerManager
+  -> NiControllerSequence -> NiTransformInterpolator -> NiTransformData; XYZ Euler or quaternion
+  rotation keys, translation and scale keys) into each sequence's end pose per controlled node.
+  Layouts were checked against `wrstablegate01anim.nif` and `helgengate01.nif`
+  (`scratchpad/nif_anim_dump.py` style dumps: the sequence ends with the accum root name and a
+  zero `u16` anim-note count; interpolator bases are `-FLT_MAX` = undefined).
+- `lodforge_lodmodel::open_pose` turns the `Open` sequence's end pose into a [`Pose`] that
+  `generate_nif_posed` applies while collecting (the hinge node's rotation, translation or scale
+  replaced; the rest of the node's transform kept).
+- `lod-models` generates `<stem>_lfopen[_<CRC32>]_lod_<N>.nif` beside the closed levels for every
+  planned model some reference begins open (the `_lfopen` infix is one no full model uses, so
+  discovery never takes an open model for another model's LOD). The cache key carries `_open`.
+- `Resolver::open_columns` swaps the level columns of an open-by-default reference to the open
+  models where they exist; `export.rs` applies it per reference, so the object LOD (BTO), the
+  child-world copies and the runtime statics (`instances.rs` reads the LOD4 column) all show the
+  open gate. Not covered: dynamic LOD references (enable parents) and a door the player opened
+  (no saved state at generation time; the runtime hand-over hides the LOD while the cell is
+  loaded anyway).
+
+### 3.7 Silhouette check (GENERATOR_VERSION 6)
+
+The quadric error does not see area. Two failures the user found in game: wagon wheels
+(`cartfurnstatic01.nif`, `prisonercarriage01static.nif`) crumpled at LOD4 and vanished at LOD8
+(a rim of radius 60 and tube 4 folds into the axle under a 56-unit limit), and the bars of iron
+gates (`winterholdgate01.nif`) merged into triangles filling the open lattice. The side boards of
+the wagons, each a thin closed box of its own, also vanished one by one.
+
+`simplify` now works per group: every connected part (triangles joined through shared or
+coincident positions) whose own silhouette is at least 3% of the model's from one of five
+directions (along X, Y, Z and the two horizontal diagonals) is simplified on its own, the rest
+together. Each group's result is rasterized orthographically into texels of a sixteenth of the
+error limit and compared with its source as the covered share of each block of a quarter of the
+limit: `fill` = coverage the result adds, `loss` = coverage it loses, both relative to the
+source's, the largest over the five views. Fractional blocks make a lattice's filled gaps count
+as added coverage while a surface shifted within a block does not. A group above the level's
+tolerance (0.2 / 0.25 / 0.4 for levels 0 / 1 / 2) is redone with the error limit halved, down
+to 4 / 8 / 20 units; a lost extent still doubles the triangle goal as before. Edges are drawn
+for every triangle so an edge-on surface or a sliver covers the same texels as its dense source.
+
+Per model, LOD4 / LOD8 / LOD16 triangles before -> after:
+
+| model | before | after | note |
+|---|---|---|---|
+| `cartfurnstatic01` (17,242) | 698 / 504 / 476 | 1,371 / 842 / 495 | wheels are rings at LOD4 and LOD8 (140 and 44 triangles each), boards complete |
+| `prisonercarriage01static` (20,135) | 741 / 521 / 496 | 1,227 / 701 / 486 | same |
+| `winterholdgate01` (3,744) | 249 / 40 / 16 | 703 / 294 / 61 | lattice kept at LOD4 (leaf at limit 8), readable at LOD8 |
+| `helgengate01` (928) | 110 / 88 / 86 | 115 / 106 / 98 | unchanged in substance |
+| `wrstablegate01anim` (241) | 34 / 8 / 4 | 61 / 40 / 39 | the top rail no longer sticks out at LOD8/16 |
+
+Tamriel (High preset, skyrim-cs-base, `lod-models --exclude-mod "LODForge Output"`, 1,492 full
+models planned, 2,296 levels, 128 model-less failures in both runs), triangles per level over all
+generated models (not weighted by references):
+
+| level | models | before (v5) | after (v6) | change |
+|---|---|---|---|---|
+| 0 (LOD4) | 990 | 265,062 | 298,240 | +12.5% |
+| 1 (LOD8) | 664 | 150,691 | 163,514 | +8.5% |
+| 2 (LOD16) | 326 | 65,234 | 65,783 | +0.8% |
+
+plus 8 open-state models (9 levels, 1,934 triangles). Generation took 8.3 s instead of 4.4 s and
+is deterministic run to run (byte-identical output).
+
+### 3.8 Contact sheets
+
+`cargo run --release --example lodmodel_sheet -- <full.nif> <out.png> [--mods <MO2 mods folder>]
+[--open] [--upp 1.5] [--max-error a,b,c] [--max-ratio a,b,c]` renders the full model and the
+three levels (and the open state with `--open`) from the front, the side, a three-quarter view
+from above, and the three-quarter view at eight times the distance, every cell of a row in one
+orthographic frame, so silhouettes compare across columns. `LODFORGE_LODMODEL_DEBUG=1` prints
+the groups, their passes and the fill / loss of each.
+
 ## 4. Prototype status and numbers
 
 Tamriel on LODForge-E2E without Resources, `build --mode dyndolod --texgen --lod-models` (82 s):
@@ -246,6 +325,17 @@ docs/baseline.md "Own LOD resources".
 2. Selection: a debris rule (low, flat models; `landscape\trees\` non-tree statics) and enable-
    parented Hearthfire / Civil War parts, to get closer to Resources' 34 k lines.
 3. Coarser architecture: a box/hull proxy level (silhouette-preserving, e.g. voxel or convex
-   decomposition) for city buildings that Resources ships as `_lod_2` only.
-4. `_dyndolod_lod` effect models (3.4), then the DynDOLOD-install pieces (2): rule preset,
+   decomposition) for city buildings that Resources ships as `_lod_2` only. A feasibility study
+   of voxel remeshing and octree / cluster streaming is in progress
+   (`docs/lod-voxel-octree-feasibility.md`, branch `voxel-lod-feasibility`).
+4. Baked detail (the user's suggestion of 2026-10-27): the detail a collapse removes (planks,
+   nails, bevels, the wheel's spokes) could be baked into a normal map of the LOD model so the
+   lighting keeps it. The generated models keep the full model's UVs so that the object LOD
+   atlas treats them like the full model, and the LOD shader samples one normal map at the same
+   UVs as the diffuse; a baked normal map therefore needs unique UVs of its own, and with them
+   the diffuse (and the PBR channels under Community Shaders) must be baked as well, as one tile
+   per model in the atlas (the runtime's cluster pages take their textures from the same atlas).
+   That is the "remeshing + baking" path the study above covers; the silhouette check (3.7) is
+   what can be had without it.
+5. `_dyndolod_lod` effect models (3.4), then the DynDOLOD-install pieces (2): rule preset,
    billboard template, TexGen stand-ins.

@@ -7,6 +7,11 @@
 //! the names DynDOLOD's own LOD model discovery uses (`Folder4=meshes\lod`, bare file name), plus
 //! `<stem>_<CRC32>_lod_<N>.nif` where several different full models share a file name. A cache
 //! folder keyed by the full model's CRC32 and the generator version avoids regenerating.
+//!
+//! A door or gate that some reference flags open by default (REFR ONAM) also gets open-state
+//! levels, `<stem>_lfopen[_<CRC32>]_lod_<N>.nif`, generated in the pose at the end of the model's
+//! `Open` sequence; the export gives those references the open models
+//! (`Resolver::open_columns`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -15,6 +20,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
+use lodforge_dyndolod::assign::OPEN_INFIX;
 use lodforge_dyndolod::lodmodels::{LodIndex, Snow, crc32, lod_set};
 use lodforge_dyndolod::rules::{Level, select_mask_rule};
 use lodforge_esp::Worldspace;
@@ -104,26 +110,37 @@ pub struct Item {
     pub extent: [f32; 3],
     pub refs: usize,
     pub bases: Vec<String>,
+    /// References flagged open by default (REFR ONAM): the model also gets open-state levels.
+    pub open_refs: usize,
+}
+
+impl Item {
+    /// Name prefix of the open-state output files: `<stem>_lfopen` or `<stem>_lfopen_<CRC32>`.
+    pub fn open_name(&self) -> String {
+        if self.name == self.stem { format!("{}{OPEN_INFIX}", self.stem) } else { format!("{}{OPEN_INFIX}_{:08x}", self.stem, self.crc) }
+    }
 }
 
 /// Bases the rules give object LOD levels to that have no installed LOD model for them.
 pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) -> Vec<Item> {
-    // Per base: references and the largest scale.
-    let mut used: HashMap<u32, (usize, f32)> = HashMap::new();
+    // Per base: references, the largest scale, references open by default.
+    let mut used: HashMap<u32, (usize, f32, usize)> = HashMap::new();
     for w in worlds {
         for q in w.refs.values() {
             if q.flags & FLAG_DELETED != 0 {
                 continue;
             }
-            let e = used.entry(q.base).or_insert((0, 0.0));
+            let e = used.entry(q.base).or_insert((0, 0.0, 0));
             e.0 += 1;
             e.1 = e.1.max(if q.has_scale { q.scale } else { 1.0 });
+            e.2 += usize::from(q.open_by_default);
         }
     }
     // Per full model: the levels any of its bases needs.
-    let mut by_model: BTreeMap<String, (HashSet<u8>, [f32; 3], usize, Vec<String>)> = BTreeMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut by_model: BTreeMap<String, (HashSet<u8>, [f32; 3], usize, Vec<String>, usize)> = BTreeMap::new();
     crate::dyndolod_build::with_resolver(p, c, |r| {
-        for (id, (refs, scale)) in &used {
+        for (id, (refs, scale, open)) in &used {
             let Some(b) = c.bases.get(id) else { continue };
             if lodforge_dyndolod::assign::is_tree(b) || b.model.is_empty() {
                 continue;
@@ -158,18 +175,20 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
             if need.is_empty() {
                 continue;
             }
-            let e = by_model.entry(model).or_insert((HashSet::new(), [0.0; 3], 0, Vec::new()));
+            let e = by_model.entry(model).or_insert((HashSet::new(), [0.0; 3], 0, Vec::new(), 0));
             e.0.extend(need);
             for k in 0..3 {
                 e.1[k] = e.1[k].max(ext[k] * scale);
             }
             e.2 += refs;
             e.3.push(b.editor_id.clone());
+            e.4 += open;
         }
     });
     // CRC32 of each full model (the original one for a PGPatcher-patched mesh, as discovery
     // uses it); several full models with one file name get CRC-named outputs.
-    let models: Vec<(String, (HashSet<u8>, [f32; 3], usize, Vec<String>))> = by_model.into_iter().collect();
+    #[allow(clippy::type_complexity)]
+    let models: Vec<(String, (HashSet<u8>, [f32; 3], usize, Vec<String>, usize))> = by_model.into_iter().collect();
     let crcs: Vec<Option<u32>> = models.par_iter().map(|(m, _)| p.vfs.read(m).ok().flatten().map(|b| c.parallax.discovery_crc(m, crc32(&b)))).collect();
     let mut stems: HashMap<String, HashSet<u32>> = HashMap::new();
     for ((m, _), crc) in models.iter().zip(&crcs) {
@@ -178,14 +197,14 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
         }
     }
     let mut out = Vec::new();
-    for ((model, (levels, extent, refs, bases)), crc) in models.into_iter().zip(crcs) {
+    for ((model, (levels, extent, refs, bases, open_refs)), crc) in models.into_iter().zip(crcs) {
         let size = extent.iter().copied().fold(0.0f32, f32::max);
         let Some(crc) = crc else { continue };
         let stem = stem_of(&model);
         let name = if stems[&stem].len() > 1 { format!("{stem}_{crc:08x}") } else { stem.clone() };
         let mut levels: Vec<u8> = levels.into_iter().collect();
         levels.sort_unstable();
-        out.push(Item { model, stem, crc, name, levels, size, extent, refs, bases });
+        out.push(Item { model, stem, crc, name, levels, size, extent, refs, bases, open_refs });
     }
     out
 }
@@ -216,6 +235,8 @@ pub struct Made {
     pub source_triangles: usize,
     pub triangles: usize,
     pub cached: bool,
+    /// An open-state level (the model's `Open` sequence played to its end).
+    pub open: bool,
 }
 
 #[derive(Debug, Default)]
@@ -254,7 +275,38 @@ pub fn generate(p: &Profile, items: &[Item], out: &Path, cache: Option<&Path>, p
                     };
                     std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
                     std::fs::write(&dest, &data).map_err(|e| e.to_string())?;
-                    made.push(Made { path: rel, level: k, source_triangles: st.source_triangles, triangles: st.triangles, cached });
+                    made.push(Made { path: rel, level: k, source_triangles: st.source_triangles, triangles: st.triangles, cached, open: false });
+                }
+                // Open-state levels for a door or gate some reference begins open: the model in
+                // the pose at the end of its `Open` sequence (none for a model without one).
+                if it.open_refs > 0
+                    && let Ok(nif) = lodforge_nif::parse(&bytes)
+                    && let Some(pose) = lodforge_lodmodel::open_pose(&nif)
+                {
+                    let open_name = it.open_name();
+                    for &k in &it.levels {
+                        let rel = format!("{dir}\\{open_name}_lod_{k}.nif");
+                        let dest = out.join(&rel);
+                        let pk = params[usize::from(k)];
+                        let key = cache.map(|c| c.join(format!("v{}", lodforge_lodmodel::GENERATOR_VERSION)).join(format!("{:08x}_{k}_{:08x}_open.nif", it.crc, crc32(format!("{pk:?}").as_bytes()))));
+                        let (data, st, cached) = match key.as_ref().and_then(|k| std::fs::read(k).ok()) {
+                            Some(d) => {
+                                let tris = lodforge_nif::parse(&d).map(|n| n.blocks.iter().map(|b| if let lodforge_nif::Block::TriShape(s) = b { s.triangles.len() } else { 0 }).sum()).unwrap_or(0);
+                                (d, lodforge_lodmodel::Stats { triangles: tris, ..Default::default() }, true)
+                            }
+                            None => {
+                                let (n, st) = lodforge_lodmodel::generate_nif_posed(&nif, &pk, &open_name, Some(&pose)).map_err(|e| format!("{e:?}"))?;
+                                let d = n.to_bytes().map_err(|e| e.to_string())?;
+                                if let Some(k) = &key {
+                                    let _ = std::fs::create_dir_all(k.parent().unwrap()).and_then(|_| std::fs::write(k, &d));
+                                }
+                                (d, st, false)
+                            }
+                        };
+                        std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+                        std::fs::write(&dest, &data).map_err(|e| e.to_string())?;
+                        made.push(Made { path: rel, level: k, source_triangles: st.source_triangles, triangles: st.triangles, cached, open: true });
+                    }
                 }
                 Ok(made)
             })();
@@ -318,13 +370,20 @@ pub fn run(a: &Args) -> Result<()> {
     let mut src = [0usize; 3];
     let mut ours = [0usize; 3];
     let mut count = [0usize; 3];
-    for (_, m) in &rep.made {
+    for (_, m) in rep.made.iter().filter(|(_, m)| !m.open) {
         let k = usize::from(m.level);
         src[k] += m.source_triangles;
         ours[k] += m.triangles;
         count[k] += 1;
     }
-    println!("generated {} files in {gen_ms} ms ({} from cache), {} models failed", rep.made.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len());
+    println!(
+        "generated {} files in {gen_ms} ms ({} from cache, {} open-state for {} models), {} models failed",
+        rep.made.len(),
+        rep.made.iter().filter(|(_, m)| m.cached).count(),
+        rep.made.iter().filter(|(_, m)| m.open).count(),
+        items.iter().filter(|i| i.open_refs > 0).count(),
+        rep.failed.len()
+    );
     for k in 0..3 {
         println!("  level {k}: {:>5} models, {:>9} source triangles -> {:>8} ({:.1}%), {:.0} per model", count[k], src[k], ours[k], 100.0 * ours[k] as f64 / src[k].max(1) as f64, ours[k] as f64 / count[k].max(1) as f64);
     }
