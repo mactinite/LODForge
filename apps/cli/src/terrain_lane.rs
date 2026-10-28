@@ -31,6 +31,8 @@ pub struct LaneArgs {
     pub pbr_scale: f32,
     /// Fill cells without LAND from the shipped terrain LOD meshes (`--no-lod-fill` clears it).
     pub lod_fill: bool,
+    /// Also write each world's occlusion heightfield (`<World>.hf.bin`, `--runtime lodforge`).
+    pub heightfield: bool,
 }
 
 #[derive(Default)]
@@ -121,6 +123,15 @@ fn run(a: &LaneArgs, shared: &Shared) {
                 let args = crate::terrain_meshes::Args { profile: a.profile.clone(), world: world.clone(), out: a.out.clone(), seasons: a.seasons.clone(), settings: None, golden: None, no_lod_fill: !a.lod_fill, lod32_quality: a.lod32.mesh_quality() };
                 step(world, "terrain-meshes", None, &mut || crate::terrain_meshes::run_with(ctx.p, &args));
                 meshes_done(world);
+                if a.heightfield {
+                    step(world, "runtime-heightfield", None, &mut || {
+                        match crate::runtime_heightfield::write_world(ctx.p, &a.out, world, 2, 48.0, &crate::instances::build_token())? {
+                            Some(r) => println!("  {}: {} x {} samples, {} holes", r.path.display(), r.nx, r.ny, r.holes),
+                            None => println!("  {world}: no lodsettings (no terrain LOD): no heightfield"),
+                        }
+                        Ok(())
+                    });
+                }
             }
             for world in &a.worlds {
                 for season in &seasons {

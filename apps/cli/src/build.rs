@@ -314,7 +314,7 @@ pub fn run(a: &Args) -> Result<()> {
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
     // Terrain meshes and textures of every worldspace and season run on their own thread from
     // here on; the object stages below wait per worldspace for its meshes.
-    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, filter: a.terrain_filter, lod32: a.lod32, pbr_scale: a.terrain_pbr_scale, json: a.json, lod_fill: !a.no_lod_fill }));
+    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, filter: a.terrain_filter, lod32: a.lod32, pbr_scale: a.terrain_pbr_scale, json: a.json, lod_fill: !a.no_lod_fill, heightfield: a.rt.on() }));
     if a.texgen {
         let t = Instant::now();
         begin(a.json, "all", "texgen", None);

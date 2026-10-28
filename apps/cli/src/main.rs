@@ -22,6 +22,7 @@ mod build;
 mod info;
 mod instances;
 mod runtime_trees;
+mod runtime_heightfield;
 mod strip_statics;
 mod tree_pack;
 mod tree_pack_preview;
@@ -222,6 +223,8 @@ enum Command {
     BtoStats(instances::StatsArgs),
     /// Rewrites only the trees files of a `build --runtime lodforge` output (export + existing impostor sets).
     RuntimeTrees(runtime_trees::Args),
+    /// Conservative terrain heightfields (`<World>.hf.bin`) for the LODForge Runtime's occlusion culling.
+    RuntimeHeightfield(runtime_heightfield::Args),
     /// Removes from .statics.bin files the instances of references the matching .trees.bin draws.
     RuntimeStripStatics(strip_statics::Args),
     /// Lists statics instances whose mesh has no pack mesh.
@@ -335,6 +338,7 @@ fn main() -> Result<()> {
         Command::RuntimeGrass(a) => grass_far::run(&a),
         Command::BtoStats(a) => instances::bto_stats(&a),
         Command::RuntimeTrees(a) => runtime_trees::run(&a),
+        Command::RuntimeHeightfield(a) => runtime_heightfield::run(&a),
         Command::RuntimeStripStatics(a) => strip_statics::run(&a),
         Command::RuntimeCheck(a) => strip_statics::check(&a),
         Command::RuntimeDynInfo(a) => dyn_export::info(&a),
