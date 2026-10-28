@@ -49,6 +49,12 @@ pub struct Opts {
     /// still ignored `stonewall` / `treepine` bases, which only the Low list names).
     #[arg(long, default_value = "Low")]
     pub child_parent: String,
+    /// Keep the child-world copies the floating rule leaves out: models under 150 units standing
+    /// above the parent's ground with no LOD surface under them (Whiterun's brazier bowls on
+    /// interior column pieces hang in the air seen from Tamriel; docs/re/dyndolod-spec.md, child
+    /// worldspace copies).
+    #[arg(long)]
+    pub child_keep_floating: bool,
     /// DynDOLOD's `Edit Scripts\DynDOLOD` folder (configuration only; default:
     /// `<instance>\tools\DynDOLOD\Edit Scripts\DynDOLOD`).
     #[arg(long)]
@@ -192,6 +198,9 @@ pub struct Config {
     /// Winning TXST texture sets (MODS alternate textures).
     pub texture_sets: HashMap<u32, Vec<String>>,
     pub reference_states: HashMap<u32, lodforge_dyndolod::export::ReferenceState>,
+    /// Child-world copies left out as floating (`childworld::drop_floating`): small models with
+    /// no LOD surface under them; `None` keeps DynDOLOD's own selection (`build --child-keep-floating`).
+    pub child_floating: Option<lodforge_dyndolod::childworld::FloatingRule>,
 }
 
 impl Config {
@@ -215,7 +224,7 @@ impl Config {
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
         let reference_states = lodforge_dyndolod::export::read_reference_states(lo)?;
-        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states })
+        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()) })
     }
 
     /// Re-reads LOD model discovery after files were added to the VFS (generated LOD models).

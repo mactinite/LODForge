@@ -384,6 +384,9 @@ pub fn run(a: &Args) -> Result<()> {
         match crate::dyndolod_build::Config::load(&p, &dir, &a.dyn_opts.preset, a.dyn_opts.static_lod) {
             Ok(mut c) => {
                 c.windows = a.dyn_opts.windows;
+                if a.dyn_opts.child_keep_floating {
+                    c.child_floating = None;
+                }
                 // Runtime mode keeps every tree in the export (as Ultra does); the object LOD stage then
                 // leaves the runtime trees out of the merged shapes.
                 c.ultra = a.dyn_opts.tree_lod == crate::dyndolod_build::TreeLodMode::Ultra || a.rt.on();
@@ -525,8 +528,8 @@ pub fn run(a: &Args) -> Result<()> {
                 let export_text = format!("{}\\", export_dir.display()).replace('/', "\\");
                 let path_output = format!("{}\\", out.join("meshes").join("terrain").join(world).join("Objects").display()).replace('/', "\\");
                 let h = crate::dyndolod_build::header(&p, c, ws, &export_text, &a.profile.game_dir().join("Data"), &path_output);
-                let (mut we, tree_rows) = crate::dyndolod_build::with_resolver(&p, c, |r| -> Result<_> {
-                    let copies = crate::child_copies::for_world(&p, c, r, &dyn_worlds, ws, &a.dyn_opts.child_parent);
+                let (mut we, tree_rows, floating) = crate::dyndolod_build::with_resolver(&p, c, |r| -> Result<_> {
+                    let (copies, floating) = crate::child_copies::for_world_report(&p, c, r, &dyn_worlds, ws, &a.dyn_opts.child_parent);
                     let we = crate::dyndolod_build::export_world(&p, c, r, ws, &seasons, &h, &copies)?;
                     // What every tree got (docs: tree_report.rs), from the default season.
                     let with = lodforge_dyndolod::childworld::with_copies(ws, &copies);
@@ -536,7 +539,7 @@ pub fn run(a: &Args) -> Result<()> {
                     }
                     let s = &we.seasons[0];
                     let rows = crate::tree_report::rows(&p, c, r, &with, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "DynDOLOD Resources SE 3", &std::collections::HashMap::new());
-                    Ok((we, rows))
+                    Ok((we, rows, floating.len()))
                 })?;
                 if a.rt.on() {
                     // Written by `runtime-trees` with the runtime column.
@@ -549,6 +552,9 @@ pub fn run(a: &Args) -> Result<()> {
                 }
                 if !a.json && !we.child_copies.is_empty() {
                     println!("  {} child worldspace references copied in", we.child_copies.len());
+                }
+                if !a.json && floating > 0 {
+                    println!("  {floating} floating child-world copies left out (small models with no LOD surface under them; --child-keep-floating keeps them)");
                 }
                 // Runtime mode: the copies' DynDOLOD.esm reference ids, for the statics the
                 // object LOD stage writes below (and for the plugin stage, which keeps them).

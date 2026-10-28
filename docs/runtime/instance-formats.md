@@ -350,6 +350,12 @@ split), so the instances swap together with the merged shapes of the same block.
   DynDOLOD.esm is loaded. `build` prints the counts per worldspace ("runtime statics: N child
   copies named by their DynDOLOD.esm reference ..."), `runtime-check` the synthetic instances
   per file, `child-copies --esm` the resolution without a build.
+  The copies are the `childworld.rs` selection less the floating ones (`drop_floating`: a
+  model under 150 units standing more than 48 units above the parent's ground with no LOD
+  surface under, through or just over it, like Whiterun's brazier bowls on interior column
+  pieces; dyndolod-spec.md, child worldspace copies), so a dropped copy has neither a
+  `_DynDOLOD_CHILD` record nor an instance nor an export line; `build --child-keep-floating`
+  keeps them, as DynDOLOD does.
 
 An instanced reference keeps its LOD model as the merged shapes would: the runtime draws the
 entry's pack mesh (`SMPK`) with the record's transform (section 1, full 3-axis rotation). The
@@ -774,6 +780,10 @@ kinds, raw and zstd.
 
 ## History
 
+- **1.7, 2026-10-27 (generator only, no format change)**: floating child-world copies (small
+  models standing on pieces without LOD, like Whiterun's brazier bowls) are left out of the
+  export, the statics and DynDOLOD.esm alike (section 6; `build --child-keep-floating` keeps
+  them, as DynDOLOD does).
 - **1.7, 2026-10-27 (generator only, no format change)**: `.statics.bin` names child-world
   copies by their `_DynDOLOD_CHILD` reference in DynDOLOD.esm (section 6) instead of writing
   them as synthetic instances; the ids match the plugin the build writes or, without the plugin

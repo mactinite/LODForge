@@ -57,7 +57,9 @@ pub fn run(a: &Args) -> Result<()> {
     let p = a.profile.open()?;
     let dir = a.dyndolod_dir.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
     let t = std::time::Instant::now();
-    let c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, a.static_lod)?;
+    let mut c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, a.static_lod)?;
+    // This command compares with DynDOLOD's own output: its child-world selection, floating copies included.
+    c.child_floating = None;
     let rules = &c.rules;
     println!("rules: {} from the rule files", rules.len());
     if let Some(g) = &a.golden {

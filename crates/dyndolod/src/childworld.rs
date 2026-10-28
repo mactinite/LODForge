@@ -434,3 +434,437 @@ pub fn parent_duplicates(lo: &LoadOrder, parent: &Worldspace, child: &Worldspace
         .filter_map(|(&id, p)| identity(id).and_then(|k| paired.get(&k).copied()).or_else(|| child_keys.get(&ref_key(model_of(p), p)).copied()).map(|twin| (id, twin)))
         .collect()
 }
+
+// ---------------------------------------------------------------------------------------------
+// Floating copies (a deliberate divergence from DynDOLOD; docs/re/dyndolod-spec.md "Child
+// worldspace copies"): a small model that stands on something the parent world has no LOD for.
+// ---------------------------------------------------------------------------------------------
+
+use lodforge_objlod::transform::{Mat3, Xform};
+
+/// The rule of [`drop_floating`]: a copy whose scaled OBND is under `max_extent` on every axis,
+/// whose lowest point is more than `clearance` above the parent's ground and which no LOD
+/// surface (another copy's or a parent LOD reference's LOD model) passes under, through or
+/// just over is left out.
+///
+/// Whiterun (cs-base 2026-10-27): the brazier bowls `WRBrazierBowl01` (`082834`, `082837` of
+/// Skyrim.esm) on the north wall stand on `WRIntCastleStoneColumn01` pieces that have no LOD
+/// model, so DynDOLOD's own output (and ours before this rule) shows two bowls hanging in the
+/// air above the city wall when looking from Tamriel's side. Large structures are never dropped:
+/// at worst they are the support of something smaller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FloatingRule {
+    /// Largest scaled OBND extent (on any axis) of a copy the rule looks at, game units.
+    pub max_extent: f32,
+    /// A copy whose lowest point is more than this above the parent's ground is not standing on
+    /// it (the terrain of a walled city and the parent's land under it differ by a few units
+    /// where they agree at all); also how far below the foot, or above the top, a LOD surface
+    /// may pass and still hold the copy (the parent's terrain stand-ins are coarse meshes:
+    /// JK's Whiterun braziers sit up to 30 units over `WRCloudDistrictTerrainLOD`, JK's Riften
+    /// steps up to 48 over `RTLandC01`).
+    pub clearance: f32,
+    /// Slack around a support's OBND box when looking for the supports to test, game units.
+    pub margin: f32,
+}
+
+impl Default for FloatingRule {
+    fn default() -> Self {
+        FloatingRule { max_extent: 150.0, clearance: 48.0, margin: 16.0 }
+    }
+}
+
+/// A copy [`drop_floating`] left out, with what it measured.
+#[derive(Debug, Clone)]
+pub struct Floating {
+    pub copy: ChildCopy,
+    /// Largest scaled OBND extent.
+    pub extent: f32,
+    /// The copy's lowest point above the parent's ground.
+    pub above_terrain: f32,
+}
+
+/// Ground heights of a worldspace: its winning LAND records (`Worldspace::land_by_cell`),
+/// decoded per cell on first use and bilinear inside the cell's 33 x 33 grid, and its water
+/// (the cell's XCLW, else the WRLD default; a one-byte CELL DATA means no water), where that
+/// is higher: a model at the water surface does not float.
+pub struct LandHeights<'a> {
+    lo: &'a LoadOrder,
+    world: &'a Worldspace,
+    lands: HashMap<(i32, i32), lodforge_esp::LandRef>,
+    default_water: Option<f32>,
+    cache: std::cell::RefCell<HashMap<(i32, i32), Option<std::rc::Rc<Vec<f32>>>>>,
+}
+
+impl<'a> LandHeights<'a> {
+    pub fn new(lo: &'a LoadOrder, world: &'a Worldspace) -> LandHeights<'a> {
+        // WRLD DATA 0x08: no LOD water.
+        let default_water = world.default_heights.filter(|_| world.flags & 0x08 == 0).map(|d| d.1);
+        LandHeights { lo, world, lands: world.land_by_cell(), default_water, cache: Default::default() }
+    }
+
+    fn cell(&self, c: (i32, i32)) -> Option<std::rc::Rc<Vec<f32>>> {
+        if let Some(h) = self.cache.borrow().get(&c) {
+            return h.clone();
+        }
+        let h = self.lands.get(&c).and_then(|l| {
+            let pl = self.lo.plugins.get(usize::from(l.plugin))?;
+            let r = pl.record_at(l.offset).ok()?;
+            pl.decode_land(&r).ok()?.heights.map(std::rc::Rc::new)
+        });
+        self.cache.borrow_mut().insert(c, h.clone());
+        h
+    }
+
+    /// Terrain height under (x, y); `None` where the cell has no LAND.
+    pub fn height_at(&self, x: f32, y: f32) -> Option<f32> {
+        const GRID: usize = lodforge_esp::terrain::GRID;
+        let (cx, cy) = ((x / 4096.0).floor() as i32, (y / 4096.0).floor() as i32);
+        let h = self.cell((cx, cy))?;
+        let gx = (x - cx as f32 * 4096.0) / 128.0;
+        let gy = (y - cy as f32 * 4096.0) / 128.0;
+        let (ix, iy) = (gx.floor().clamp(0.0, (GRID - 2) as f32), gy.floor().clamp(0.0, (GRID - 2) as f32));
+        let (fx, fy) = ((gx - ix).clamp(0.0, 1.0), (gy - iy).clamp(0.0, 1.0));
+        let (col, row) = (ix as usize, iy as usize);
+        let at = |c: usize, r: usize| h[r * GRID + c];
+        let south = at(col, row) * (1.0 - fx) + at(col + 1, row) * fx;
+        let north = at(col, row + 1) * (1.0 - fx) + at(col + 1, row + 1) * fx;
+        Some(south * (1.0 - fy) + north * fy)
+    }
+
+    /// Water height of the cell under (x, y), as the terrain export takes it.
+    pub fn water_at(&self, x: f32, y: f32) -> Option<f32> {
+        let cell = ((x / 4096.0).floor() as i32, (y / 4096.0).floor() as i32);
+        if self.world.cell_flags.get(&cell).is_some_and(|f| f & lodforge_esp::CELL_SHORT_DATA != 0) {
+            return None;
+        }
+        match self.world.cell_water.get(&cell) {
+            Some(&h) if h.abs() < 16_777_216.0 => Some(h),
+            _ => self.default_water,
+        }
+    }
+
+    /// The ground under (x, y): the terrain, or the water where that is higher.
+    pub fn ground_at(&self, x: f32, y: f32) -> Option<f32> {
+        let land = self.height_at(x, y)?;
+        Some(self.water_at(x, y).map_or(land, |w| land.max(w)))
+    }
+}
+
+/// The placed transform of a reference (`T R S`, as the export's reference lines).
+pub fn placed(p: &Placement) -> Xform {
+    Xform::reference(p.position, p.rotation.map(f32::to_degrees), if p.has_scale && p.scale > 0.0 { p.scale } else { 1.0 })
+}
+
+/// The triangles of a loaded LOD model in model space (every part, as `mesh::import` bakes them).
+pub fn mesh_triangles(m: &lodforge_objlod::mesh::LodMesh) -> Vec<[[f32; 3]; 3]> {
+    m.parts.iter().flat_map(|p| p.triangles.iter().filter_map(|t| Some([*p.positions.get(usize::from(t[0]))?, *p.positions.get(usize::from(t[1]))?, *p.positions.get(usize::from(t[2]))?]))).collect()
+}
+
+/// The heights at which the surface of `triangles` (model space) placed by `xf` crosses the
+/// vertical line through world (x, y): one per triangle whose XY projection holds the point.
+pub fn surface_crossings(triangles: &[[[f32; 3]; 3]], xf: &Xform, x: f32, y: f32) -> Vec<f32> {
+    let mut out = Vec::new();
+    for t in triangles {
+        let [a, b, c] = t.map(|v| xf.apply(v));
+        let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if d.abs() < 1e-9 {
+            continue;
+        }
+        let l0 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d;
+        let l1 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d;
+        let l2 = 1.0 - l0 - l1;
+        const EPS: f32 = -1e-4;
+        if l0 >= EPS && l1 >= EPS && l2 >= EPS {
+            out.push(l0 * a[2] + l1 * b[2] + l2 * c[2]);
+        }
+    }
+    out
+}
+
+/// A base's OBND placed by a reference: the world hull of the rotated box and the inverse
+/// transform for tests in the box's own frame.
+#[derive(Clone)]
+struct PlacedBox {
+    bounds: [f32; 6],
+    scale: f32,
+    world_min: [f32; 3],
+    world_max: [f32; 3],
+    /// world -> local: `v = R^T (v' - t) / s`.
+    inv: Mat3,
+    t: [f32; 3],
+}
+
+impl PlacedBox {
+    /// `None` for a base without OBND (nothing to measure).
+    fn new(p: &Placement, b: &Base) -> Option<PlacedBox> {
+        if b.bounds.iter().all(|&v| v == 0) {
+            return None;
+        }
+        let bounds = b.bounds.map(f32::from);
+        let scale = if p.has_scale && p.scale > 0.0 { p.scale } else { 1.0 };
+        let xf = placed(p);
+        let (mut world_min, mut world_max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for i in 0..8 {
+            let c = xf.apply([bounds[if i & 1 == 0 { 0 } else { 3 }], bounds[if i & 2 == 0 { 1 } else { 4 }], bounds[if i & 4 == 0 { 2 } else { 5 }]]);
+            for k in 0..3 {
+                world_min[k] = world_min[k].min(c[k]);
+                world_max[k] = world_max[k].max(c[k]);
+            }
+        }
+        let r = xf.rotation_only().0;
+        let inv = Mat3([[r[0][0], r[1][0], r[2][0]], [r[0][1], r[1][1], r[2][1]], [r[0][2], r[1][2], r[2][2]]]).scaled(1.0 / scale);
+        Some(PlacedBox { bounds, scale, world_min, world_max, inv, t: p.position })
+    }
+
+    /// Largest scaled extent on any axis.
+    fn extent(&self) -> f32 {
+        (0..3).map(|k| (self.bounds[k + 3] - self.bounds[k]) * self.scale).fold(0.0, f32::max)
+    }
+
+    /// Where the model stands: the middle of its world hull at its lowest point.
+    fn foot(&self) -> [f32; 3] {
+        [(self.world_min[0] + self.world_max[0]) * 0.5, (self.world_min[1] + self.world_max[1]) * 0.5, self.world_min[2]]
+    }
+
+    /// Whether world point `w` lies inside the box widened by `margin` world units.
+    fn holds(&self, w: [f32; 3], margin: f32) -> bool {
+        let l = self.inv.apply([w[0] - self.t[0], w[1] - self.t[1], w[2] - self.t[2]]);
+        let m = margin / self.scale;
+        (0..3).all(|k| l[k] >= self.bounds[k] - m && l[k] <= self.bounds[k + 3] + m)
+    }
+
+    /// The cells the world hull covers.
+    fn cells(&self) -> impl Iterator<Item = (i32, i32)> {
+        let c = |v: f32| (v / 4096.0).floor() as i32;
+        let (x0, x1, y0, y1) = (c(self.world_min[0]), c(self.world_max[0]), c(self.world_min[1]), c(self.world_max[1]));
+        (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+    }
+}
+
+/// What a copy may stand on.
+struct Support<'a> {
+    /// Index of the copy this is, `None` for a parent reference.
+    owner: Option<usize>,
+    id: u32,
+    placement: &'a Placement,
+    base: &'a Base,
+    bx: PlacedBox,
+}
+
+/// Leaves the floating copies out of `copies` ([`FloatingRule`]): a small copy that stands
+/// neither on the parent's ground (`ground(x, y)`; `None` where the parent has no land data,
+/// and such a copy is kept) nor on a LOD surface. The supports looked at are the other copies
+/// and the parent's references with LOD (`parent_lod`: reference id and placement) whose
+/// placed OBND box, widened by `margin`, holds the copy's foot (the middle of its hull at its
+/// lowest point); `lod_under(id, placement, base, [x, y])` gives the heights at which that
+/// support's LOD surface crosses the vertical line through the foot, and one between
+/// `clearance` below the foot and `clearance` above the model's top holds the copy (standing
+/// on the surface, sunk into it, or hanging from it like icicles under an eave). A dropped copy
+/// holds nothing (passes repeat until nothing changes). The kept copies are renumbered
+/// (`COPY_ID_BASE | n`); returns them and the dropped ones with their measurements.
+/// `LODFORGE_CHILD_TRACE=<ref id>` prints the decision for one reference.
+pub fn drop_floating(copies: Vec<ChildCopy>, bases: &HashMap<u32, Base>, parent_lod: &[(u32, &Placement)], ground: &dyn Fn(f32, f32) -> Option<f32>, lod_under: &dyn Fn(u32, &Placement, &Base, [f32; 2]) -> Vec<f32>, rule: &FloatingRule) -> (Vec<ChildCopy>, Vec<Floating>) {
+    let boxes: Vec<Option<PlacedBox>> = copies.iter().map(|c| bases.get(&c.placement.base).and_then(|b| PlacedBox::new(&c.placement, b))).collect();
+    let mut supports: Vec<Support<'_>> = Vec::new();
+    for (i, (c, bx)) in copies.iter().zip(&boxes).enumerate() {
+        if let (Some(bx), Some(b)) = (bx, bases.get(&c.placement.base)) {
+            supports.push(Support { owner: Some(i), id: c.ref_id, placement: &c.placement, base: b, bx: bx.clone() });
+        }
+    }
+    for &(id, p) in parent_lod {
+        if let Some((b, bx)) = bases.get(&p.base).and_then(|b| PlacedBox::new(p, b).map(|bx| (b, bx))) {
+            supports.push(Support { owner: None, id, placement: p, base: b, bx });
+        }
+    }
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (j, s) in supports.iter().enumerate() {
+        for c in s.bx.cells() {
+            grid.entry(c).or_default().push(j);
+        }
+    }
+    let trace = std::env::var("LODFORGE_CHILD_TRACE").ok().and_then(|s| u32::from_str_radix(s.trim(), 16).ok());
+    let mut dropped: Vec<Option<Floating>> = vec![None; copies.len()];
+    let mut pass = 0usize;
+    loop {
+        let mut changed = false;
+        // The trace repeats a kept decision only when something changed since.
+        let first = pass == 0;
+        for (i, c) in copies.iter().enumerate() {
+            if dropped[i].is_some() {
+                continue;
+            }
+            let Some(bx) = &boxes[i] else { continue };
+            let Some(b) = bases.get(&c.placement.base) else { continue };
+            if c.large || c.full_model || crate::assign::is_tree(b) {
+                continue;
+            }
+            let extent = bx.extent();
+            if extent >= rule.max_extent {
+                continue;
+            }
+            let foot = bx.foot();
+            let top = bx.world_max[2];
+            let tr = |why: String, always: bool| {
+                if trace == Some(c.ref_id) && (first || always) {
+                    eprintln!("child copy {:08X}: floating rule: extent {extent:.0}, foot ({:.0}, {:.0}, {:.0}), top {top:.0}: {why}", c.ref_id, foot[0], foot[1], foot[2]);
+                }
+            };
+            let Some(level) = ground(foot[0], foot[1]) else {
+                tr("no terrain data, kept".into(), false);
+                continue;
+            };
+            let above = foot[2] - level;
+            if above <= rule.clearance {
+                tr(format!("{above:.0} above the ground, kept"), false);
+                continue;
+            }
+            let (below, over) = (foot[2] - rule.clearance, top + rule.clearance);
+            let cell = ((foot[0] / 4096.0).floor() as i32, (foot[1] / 4096.0).floor() as i32);
+            let mut near = Vec::new();
+            let held_by = grid.get(&cell).into_iter().flatten().copied().find(|&j| {
+                let s = &supports[j];
+                if s.owner == Some(i) || s.owner.is_some_and(|o| dropped[o].is_some()) || !s.bx.holds(foot, rule.margin) {
+                    return false;
+                }
+                let zs = lod_under(s.id, s.placement, s.base, [foot[0], foot[1]]);
+                let hit = zs.iter().any(|&z| z >= below && z <= over);
+                if !hit {
+                    near.push(format!("{} {:08X} (surface at {:?})", s.base.editor_id, s.id, zs.iter().map(|z| z.round()).collect::<Vec<_>>()));
+                }
+                hit
+            });
+            match held_by {
+                Some(j) => tr(format!("{above:.0} above the ground, held by {} {:08X} at ({:.0}, {:.0}, {:.0}), kept", supports[j].base.editor_id, supports[j].id, supports[j].placement.position[0], supports[j].placement.position[1], supports[j].placement.position[2]), false),
+                None => {
+                    tr(format!("{above:.0} above the ground, no LOD surface under it (boxes holding the foot: {}): dropped", if near.is_empty() { "none".to_string() } else { near.join(", ") }), true);
+                    dropped[i] = Some(Floating { copy: c.clone(), extent, above_terrain: above });
+                    changed = true;
+                }
+            }
+        }
+        pass += 1;
+        if !changed {
+            break;
+        }
+    }
+    let mut kept = Vec::with_capacity(copies.len());
+    let mut out = Vec::new();
+    for (c, d) in copies.into_iter().zip(dropped) {
+        match d {
+            Some(f) => out.push(f),
+            None => kept.push(c),
+        }
+    }
+    for (n, c) in kept.iter_mut().enumerate() {
+        c.copy_id = COPY_ID_BASE | n as u32;
+    }
+    (kept, out)
+}
+
+#[cfg(test)]
+mod floating_tests {
+    use super::*;
+
+    fn base(id: u32, edid: &str, bounds: [i16; 6]) -> (u32, Base) {
+        (id, Base { signature: *b"STAT", form_id: id, editor_id: edid.into(), model: format!("{edid}.nif"), bounds, ..Default::default() })
+    }
+
+    fn at(base: u32, x: f32, y: f32, z: f32, yaw_deg: f32, scale: f32) -> Placement {
+        Placement { base, position: [x, y, z], rotation: [0.0, 0.0, yaw_deg.to_radians()], scale, has_scale: scale != 1.0, ..Default::default() }
+    }
+
+    fn copy(n: u32, p: Placement) -> ChildCopy {
+        ChildCopy { child_world: 1, ref_id: 0x1000 + n, placement: p, copy_id: COPY_ID_BASE | n, full_model: false, large: false }
+    }
+
+    /// A LOD model that is its OBND box: the top face as two triangles.
+    fn box_top(b: &Base) -> Vec<[[f32; 3]; 3]> {
+        let [x1, y1, _, x2, y2, z2] = b.bounds.map(f32::from);
+        vec![[[x1, y1, z2], [x2, y1, z2], [x2, y2, z2]], [[x1, y1, z2], [x2, y2, z2], [x1, y2, z2]]]
+    }
+
+    fn top_surface(_: u32, p: &Placement, b: &Base, xy: [f32; 2]) -> Vec<f32> {
+        surface_crossings(&box_top(b), &placed(p), xy[0], xy[1])
+    }
+
+    /// The Whiterun case in miniature: brazier bowls (80 x 80 x 90) on columns without LOD
+    /// float; those on a copied wall, on a parent reference with LOD, on the ground, on the
+    /// roof of a big copy, sunk into a wall or hanging under its top surface stay, one inside
+    /// a big copy's box with no surface near it does not; big and scaled-up models are never
+    /// dropped; no land data or no OBND keeps a copy.
+    #[test]
+    fn floating_small_copies_are_dropped() {
+        let bases: HashMap<u32, Base> = [base(1, "WRBrazierBowl01", [-40, -40, 0, 40, 40, 90]), base(2, "WRCityWall", [-400, -40, 0, 400, 40, 500]), base(3, "Dragonsreach", [-1500, -1500, -100, 1500, 1500, 2000]), base(4, "NoBounds", [0; 6])].into_iter().collect();
+        let ground = |x: f32, y: f32| if x < 100_000.0 { Some(if y > 50_000.0 { 1000.0 } else { 0.0 }) } else { None };
+        let wall = copy(0, at(2, 0.0, 0.0, 0.0, 90.0, 1.0)); // runs along Y after the 90 degree yaw
+        let big = copy(1, at(3, 20_000.0, 0.0, 0.0, 0.0, 1.0));
+        let copies = vec![
+            wall,
+            big,
+            copy(2, at(1, 0.0, 300.0, 500.0, 0.0, 1.0)),      // on the wall's top: kept
+            copy(3, at(1, 300.0, 0.0, 500.0, 0.0, 1.0)),      // beside the wall, 500 up: dropped
+            copy(4, at(1, 5000.0, 0.0, 10.0, 0.0, 1.0)),      // on the ground: kept
+            copy(5, at(1, 5000.0, 0.0, 200.0, 0.0, 1.0)),     // on a column without LOD: dropped
+            copy(6, at(1, 6000.0, 0.0, 200.0, 0.0, 2.0)),     // 180 units: not small, kept
+            copy(7, at(1, 20_000.0, 0.0, 2010.0, 0.0, 1.0)),  // on Dragonsreach's roof: kept
+            copy(8, at(1, 9000.0, 0.0, 500.0, 0.0, 1.0)),     // on a parent reference with LOD: kept
+            copy(9, at(1, 200_000.0, 0.0, 500.0, 0.0, 1.0)),  // no land data there: kept
+            copy(10, at(4, 5000.0, 0.0, 900.0, 0.0, 1.0)),    // no OBND: kept
+            copy(11, at(1, 5000.0, 60_000.0, 1020.0, 0.0, 1.0)), // 20 over higher ground: kept
+            copy(12, at(1, 7000.0, 0.0, 300.0, 0.0, 1.0)),    // on copy 13, which floats: both dropped
+            copy(13, at(1, 7000.0, 0.0, 210.0, 0.0, 1.0)),
+            copy(14, at(1, 20_500.0, 0.0, 800.0, 0.0, 1.0)),  // inside Dragonsreach's box, no surface near: dropped
+            copy(15, at(1, 0.0, -300.0, 440.0, 0.0, 1.0)),    // sunk 60 into the wall's top: kept
+            copy(16, at(1, 0.0, -100.0, 390.0, 0.0, 1.0)),    // hanging 20 under the wall's top surface: kept
+        ];
+        let parent_wall = at(2, 9000.0, 0.0, 0.0, 0.0, 1.0);
+        let (kept, dropped) = drop_floating(copies, &bases, &[(0x2000, &parent_wall)], &ground, &top_surface, &FloatingRule::default());
+        let mut gone: Vec<u32> = dropped.iter().map(|f| f.copy.ref_id - 0x1000).collect();
+        gone.sort_unstable();
+        assert_eq!(gone, vec![3, 5, 12, 13, 14]);
+        let stayed: Vec<u32> = kept.iter().map(|c| c.ref_id - 0x1000).collect();
+        assert_eq!(stayed, vec![0, 1, 2, 4, 6, 7, 8, 9, 10, 11, 15, 16]);
+        // Renumbered without gaps.
+        assert!(kept.iter().enumerate().all(|(n, c)| c.copy_id == COPY_ID_BASE | n as u32));
+        let five = dropped.iter().find(|f| f.copy.ref_id == 0x1005).unwrap();
+        assert_eq!(five.extent, 90.0);
+        assert_eq!(five.above_terrain, 200.0);
+        // A rule nothing matches changes nothing.
+        let none = FloatingRule { max_extent: 0.0, ..Default::default() };
+        let (k, d) = drop_floating(vec![copy(0, at(1, 5000.0, 0.0, 200.0, 0.0, 1.0))], &bases, &[], &ground, &top_surface, &none);
+        assert!(d.is_empty() && k.len() == 1);
+    }
+
+    /// The support's box and surface are placed with its rotation and scale: a yawed wall
+    /// holds what stands on its rotated top, not everything inside its axis-aligned hull.
+    #[test]
+    fn supports_are_placed_like_their_reference() {
+        let bases: HashMap<u32, Base> = [base(1, "WRBrazierBowl01", [-40, -40, 0, 40, 40, 90]), base(2, "WRCityWall", [-400, -40, 0, 400, 40, 500])].into_iter().collect();
+        let ground = |_: f32, _: f32| Some(0.0);
+        let wall = at(2, 0.0, 0.0, 0.0, 45.0, 1.0);
+        // `Xform::reference` turns local +X by -45 degrees: towards (+X, -Y).
+        let d = 300.0 * std::f32::consts::FRAC_1_SQRT_2;
+        let on = at(1, d, -d, 500.0, 0.0, 1.0);
+        let off = at(1, d, d, 500.0, 0.0, 1.0);
+        let (kept, dropped) = drop_floating(vec![copy(0, on), copy(1, off)], &bases, &[(0x2000, &wall)], &ground, &top_surface, &FloatingRule::default());
+        assert_eq!(kept.iter().map(|c| c.ref_id).collect::<Vec<_>>(), vec![0x1000]);
+        assert_eq!(dropped.iter().map(|f| f.copy.ref_id).collect::<Vec<_>>(), vec![0x1001]);
+        let small_wall = at(2, 0.0, 0.0, 0.0, 0.0, 0.5);
+        let on_small = at(1, 150.0, 0.0, 250.0, 0.0, 1.0);
+        let past_small = at(1, 300.0, 0.0, 250.0, 0.0, 1.0);
+        let (kept, dropped) = drop_floating(vec![copy(0, on_small), copy(1, past_small)], &bases, &[(0x2000, &small_wall)], &ground, &top_surface, &FloatingRule::default());
+        assert_eq!((kept.len(), dropped.len()), (1, 1));
+        assert_eq!(kept[0].ref_id, 0x1000);
+        // The surface test itself: a sloped triangle, inside and outside its projection.
+        let tri = [[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [0.0, 100.0, 100.0]]];
+        let z = surface_crossings(&tri, &Xform::IDENTITY, 10.0, 20.0);
+        assert_eq!(z.len(), 1);
+        assert!((z[0] - 20.0).abs() < 1e-3);
+        assert!(surface_crossings(&tri, &Xform::IDENTITY, 60.0, 60.0).is_empty());
+        let moved = Xform::reference([1000.0, 0.0, 50.0], [0.0, 0.0, 90.0], 2.0);
+        // Local (10, 20) scaled by 2 and turned by -90 degrees lands at (1040, -20): z = 50 + 2 * 20.
+        let z = surface_crossings(&tri, &moved, 1040.0, -20.0);
+        assert_eq!(z.len(), 1);
+        assert!((z[0] - 90.0).abs() < 1e-2);
+    }
+}
