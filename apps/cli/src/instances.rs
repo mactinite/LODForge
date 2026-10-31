@@ -64,6 +64,12 @@ pub struct Opts {
     /// ambient occlusion; see `lodforge-detailbake`).
     #[arg(long)]
     pub no_detail_bake: bool,
+    /// Runtime, experimental: PBR detail bakes for PBR full models (albedo as it is plus an RMAOS
+    /// map) drawn on PBR pages through the TruePBR LOD shaders (LODForge Runtime `[Statics]
+    /// bPbrLodSetup`). Off by default: in Community Shaders 1.9.1 they come out about 25% brighter
+    /// than the full rocks, while the default vanilla bake matches them.
+    #[arg(long)]
+    pub pbr_lod_pages: bool,
     /// Runtime far grass: folder with the NGIO grass cache (`<world>x<X>y<Y>[.<season>].cgid`;
     /// default: `Grass\` of the load order).
     #[arg(long)]

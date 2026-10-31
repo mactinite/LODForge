@@ -89,6 +89,9 @@ pub struct Page {
     /// engine LOD material of its class (drawn with the non-HD LOD technique, vertex alpha as the
     /// snow mask, as the full models are); `None`: the class's engine LOD material.
     pub snow: Option<crate::statics::Snow>,
+    /// `MPRM`: the page's RMAOS map (PBR pages: the runtime draws them with a TruePBR material);
+    /// empty for the others.
+    pub rmaos: String,
 }
 
 /// One merged model (`MPMS`).
@@ -149,6 +152,14 @@ impl MeshPack {
             }
             chunks.push(Chunk { tag: *b"MPSN", data: b.0 });
         }
+        if self.pages.iter().any(|p| !p.rmaos.is_empty()) {
+            let mut b = Buf::default();
+            b.u32(self.pages.len() as u32);
+            for p in &self.pages {
+                b.str(&p.rmaos);
+            }
+            chunks.push(Chunk { tag: *b"MPRM", data: b.0 });
+        }
         let mut b = Buf::default();
         b.u32(self.meshes.len() as u32);
         for m in &self.meshes {
@@ -207,7 +218,7 @@ impl MeshPack {
             for _ in 0..r.u32()? {
                 let (width, height, mips, alpha_threshold) = (r.u32()?, r.u32()?, u32::from(r.u16()?), r.u8()?);
                 let class = r.u8()?;
-                pack.pages.push(Page { width, height, mips, alpha_threshold, class, albedo: r.str()?, normal: r.str()?, snow: None });
+                pack.pages.push(Page { width, height, mips, alpha_threshold, class, albedo: r.str()?, normal: r.str()?, snow: None, rmaos: String::new() });
             }
         }
         if let Some(ch) = c.chunk(b"MPSN") {
@@ -217,6 +228,16 @@ impl MeshPack {
                 let sn = if r.u8()? != 0 { Some(crate::statics::Snow::read(&mut r)?) } else { None };
                 if let Some(p) = pack.pages.get_mut(i) {
                     p.snow = sn;
+                }
+            }
+        }
+        if let Some(ch) = c.chunk(b"MPRM") {
+            let mut r = Cur::new(&ch.data);
+            let n = r.u32()? as usize;
+            for i in 0..n {
+                let s = r.str()?;
+                if let Some(p) = pack.pages.get_mut(i) {
+                    p.rmaos = s;
                 }
             }
         }
@@ -357,8 +378,8 @@ mod tests {
     #[test]
     fn clusters_pad_and_round_trip() {
         let mut pack = MeshPack::default();
-        pack.pages.push(Page { width: 4096, height: 4096, mips: 13, alpha_threshold: 128, class: 0, albedo: "a.dds".into(), normal: "a_n.dds".into(), snow: None });
-        pack.pages.push(Page { width: 2048, height: 2048, mips: 12, alpha_threshold: 128, class: 2, albedo: "b.dds".into(), normal: "b_n.dds".into(), snow: Some(crate::statics::Snow { params: [0.4, 0.5, 0.02, 0.5], color: [1.0; 3], flags: 1 }) });
+        pack.pages.push(Page { width: 4096, height: 4096, mips: 13, alpha_threshold: 128, class: 0, albedo: "a.dds".into(), normal: "a_n.dds".into(), snow: None, rmaos: String::new() });
+        pack.pages.push(Page { width: 2048, height: 2048, mips: 12, alpha_threshold: 128, class: 2, albedo: "b.dds".into(), normal: "b_n.dds".into(), snow: Some(crate::statics::Snow { params: [0.4, 0.5, 0.02, 0.5], color: [1.0; 3], flags: 1 }), rmaos: "b_rmaos.dds".into() });
         // 100 triangles on page 0, 30 on page 1 -> clusters 64 + 36 + 30.
         let mut verts = Vec::new();
         let mut tris = Vec::new();

@@ -920,7 +920,7 @@ pub fn run(a: &Args) -> Result<()> {
             eprintln!("detail-bake: {e:#}");
         }
         let full_of = full_models.lock().unwrap().clone();
-        match crate::detail_bake::run(&p, &out, &full_of, a.rt.write_options()) {
+        match crate::detail_bake::run(&p, &out, &full_of, a.rt.write_options(), a.rt.pbr_lod_pages) {
             Ok(r) => {
                 if !a.json {
                     println!("  {}", r.summary());

@@ -54,6 +54,11 @@ pub struct Params {
     pub ao_rays: u32,
     /// 0..1: how much of the AO contrast reaches the albedo.
     pub ao_strength: f32,
+    /// PBR bakes for PBR full models: albedo as it is plus an RMAOS map, for the static pack's
+    /// PBR pages (TruePBR LOD shaders). Off by default: measured 2026-10-31 in Community Shaders
+    /// 1.9.1, the TruePBR LOD path draws them about 25% brighter than the full rocks, while the
+    /// vanilla bake (PBR albedo x PBR_SCALE, AO in the albedo) matches them.
+    pub pbr: bool,
 }
 
 impl Params {
@@ -65,7 +70,7 @@ impl Params {
             5..=8 => 0.08,
             _ => 0.04,
         };
-        Params { density, max_size: 2048, ao_rays: 48, ao_strength: 0.85 }
+        Params { density, max_size: 2048, ao_rays: 48, ao_strength: 0.85, pbr: false }
     }
 }
 
@@ -778,6 +783,10 @@ pub struct Baked {
     /// BC7 DDS with full mips.
     pub diffuse: Vec<u8>,
     pub normal: Vec<u8>,
+    /// PBR full models: BC7 RMAOS (roughness, metallic, AO, specular level; linear) for the
+    /// TruePBR LOD shaders. The albedo is then the full model's own (no PBR_SCALE, no AO: the
+    /// baked self-occlusion goes into the AO channel, which only darkens indirect light).
+    pub rmaos: Option<Vec<u8>>,
     pub width: u32,
     pub height: u32,
     pub density: f32,
@@ -793,7 +802,7 @@ pub struct Baked {
 impl Baked {
     /// Bytes on the GPU at full resolution (BC7 diffuse + normal with mips).
     pub fn gpu_bytes(&self) -> u64 {
-        (self.diffuse.len() + self.normal.len()).saturating_sub(2 * 148) as u64
+        (self.diffuse.len() + self.normal.len() + self.rmaos.as_ref().map_or(0, Vec::len)).saturating_sub(3 * 148) as u64
     }
 }
 
@@ -826,7 +835,13 @@ struct Surf {
     geo: Vec3,
     pos: Vec3,
     mat_ao: f32,
+    /// The full model's RMAOS at the hit ([`DEFAULT_RMAOS`] for shapes without one).
+    rmaos: [f32; 4],
 }
+
+/// RMAOS of a surface without its own: fully rough, not metallic, no occlusion, the usual 0.04
+/// specular level of a dielectric.
+const DEFAULT_RMAOS: [f32; 4] = [1.0, 0.0, 1.0, 0.04];
 
 /// Bakes `lod` (a LOD model of `src`'s full model). The NIF names `out_diffuse` / `out_normal`
 /// (Data-relative) as its textures.
@@ -844,6 +859,10 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
     let ao_radius = (diag * 0.08).clamp(128.0, 1024.0);
     let search = (diag * 0.06).clamp(64.0, 512.0);
     let uw = unwrap(&lod, p.density, p.max_size);
+    // With `pbr` (opt-in), a PBR full model gets a PBR bake (albedo as it is, RMAOS beside it)
+    // for the TruePBR LOD shaders; otherwise the vanilla bake (PBR albedo x PBR_SCALE, AO in the
+    // albedo).
+    let pbr_out = p.pbr && src.is_pbr();
     // Output mesh attributes; the tangent frame in the Bethesda layout.
     let pos: Vec<[f32; 3]> = uw.verts.iter().map(|(s, _)| lod.pos[*s as usize].to_array()).collect();
     let nrm: Vec<[f32; 3]> = uw.verts.iter().map(|(s, _)| lod.nrm[*s as usize].to_array()).collect();
@@ -956,7 +975,7 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
                 albedo[k] *= idx.iter().zip(wt).map(|(&i, w)| cols[i][k] as f32 / 255.0 * w).sum::<f32>();
             }
         }
-        if s.pbr {
+        if s.pbr && !pbr_out {
             for c in &mut albedo {
                 *c *= PBR_SCALE;
             }
@@ -968,8 +987,8 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
             // The game's frame: x along the bitangent field, y along the tangent field.
             normal = (b.normalize_or(Vec3::X) * v.x + t.normalize_or(Vec3::Y) * v.y + ns * v.z).normalize_or(ns);
         }
-        let mat_ao = st.rmaos.as_ref().map_or(1.0, |t| t.sample(uv)[2]);
-        Surf { albedo, normal, geo, pos: o + d * hit.t, mat_ao }
+        let rmaos = st.rmaos.as_ref().map_or(DEFAULT_RMAOS, |t| t.sample(uv));
+        Surf { albedo, normal, geo, pos: o + d * hit.t, mat_ao: rmaos[2], rmaos }
     };
     // The closest hit that is not a hole: texels of alpha-tested / blended shapes below their
     // cut-off are passed through (up to 8 layers).
@@ -1001,15 +1020,17 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
             (None, None) => None,
         }
     };
-    type Row = (Vec<[f32; 4]>, Vec<[f32; 4]>, usize, usize);
+    type Row = (Vec<[f32; 4]>, Vec<[f32; 4]>, Vec<[f32; 4]>, usize, usize);
     let rows: Vec<Row> = (0..h)
         .into_par_iter()
         .map(|y| {
             let mut alb = vec![[0.0; 4]; w];
             let mut nrm_out = vec![[0.0; 4]; w];
+            let mut rm_out = vec![[0.0; 4]; w];
             let (mut misses, mut samples) = (0, 0);
             for x in 0..w {
                 let (mut acc_a, mut acc_n, mut cnt) = ([0.0f32; 3], Vec3::ZERO, 0u32);
+                let mut acc_r = [0.0f32; 4];
                 let mut ao_at: Option<Surf> = None;
                 let mut any_cover = false;
                 for sy in 0..SS as usize {
@@ -1033,6 +1054,9 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
                                     (b * (c[0] * 2.0 - 1.0) + t * (c[1] * 2.0 - 1.0) + n * (c[2] * 2.0 - 1.0)).normalize_or(n)
                                 });
                                 acc_n += enc(wn);
+                                for k in 0..4 {
+                                    acc_r[k] += DEFAULT_RMAOS[k];
+                                }
                                 cnt += 1;
                             }
                             continue;
@@ -1042,6 +1066,9 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
                             acc_a[k] += srgb_to_linear(s.albedo[k]);
                         }
                         acc_n += enc(s.normal);
+                        for k in 0..4 {
+                            acc_r[k] += s.rmaos[k];
+                        }
                         cnt += 1;
                         if ao_at.is_none() {
                             ao_at = Some(s);
@@ -1052,11 +1079,13 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
                     if any_cover {
                         alb[x] = [0.2, 0.2, 0.2, FIXED];
                         nrm_out[x] = [0.0, 0.0, 1.0, 1.0];
+                        rm_out[x] = DEFAULT_RMAOS;
                     }
                     continue;
                 }
                 let n = acc_n.normalize_or(Vec3::Z);
                 nrm_out[x] = [n.x, n.y, n.z, 1.0];
+                rm_out[x] = acc_r.map(|v| v / cnt as f32);
                 let mean = [acc_a[0] / cnt as f32, acc_a[1] / cnt as f32, acc_a[2] / cnt as f32];
                 let Some(s) = ao_at else {
                     // Fallback only: no AO, kept out of the brightness balance.
@@ -1078,19 +1107,28 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
                         None => open += 1.0,
                     }
                 }
+                if pbr_out {
+                    // Self-occlusion joins the material AO (which the texel mean already holds);
+                    // the albedo stays as it is.
+                    rm_out[x][2] *= 1.0 - p.ao_strength + p.ao_strength * (open / p.ao_rays as f32);
+                    alb[x] = [mean[0], mean[1], mean[2], FIXED];
+                    continue;
+                }
                 let total = open / p.ao_rays as f32 * s.mat_ao;
                 // Alpha carries the AO factor until the brightness balance below.
                 alb[x] = [mean[0], mean[1], mean[2], 1.0 - p.ao_strength + p.ao_strength * total];
             }
-            (alb, nrm_out, misses, samples)
+            (alb, nrm_out, rm_out, misses, samples)
         })
         .collect();
     let mut alb: Vec<[f32; 4]> = Vec::with_capacity(w * h);
     let mut nrm_img: Vec<[f32; 4]> = Vec::with_capacity(w * h);
+    let mut rm_img: Vec<[f32; 4]> = Vec::with_capacity(w * h);
     let (mut misses, mut samples) = (0, 0);
-    for (a, n, m, s) in rows {
+    for (a, n, r, m, s) in rows {
         alb.extend(a);
         nrm_img.extend(n);
+        rm_img.extend(r);
         misses += m;
         samples += s;
     }
@@ -1106,12 +1144,16 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
         let f = if q[3] >= FIXED { 1.0 } else { q[3] * balance };
         *q = [q[0] * f, q[1] * f, q[2] * f, 1.0];
     }
-    dilate(&mut alb, &mut nrm_img, w, h);
+    dilate(&mut alb, &mut nrm_img, &mut rm_img, w, h);
     let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     let albedo8: Vec<u8> = alb.iter().flat_map(|q| [to8(linear_to_srgb(q[0])), to8(linear_to_srgb(q[1])), to8(linear_to_srgb(q[2])), 255]).collect();
     let normal8: Vec<u8> = nrm_img.iter().flat_map(|q| [to8(q[0] * 0.5 + 0.5), to8(q[1] * 0.5 + 0.5), to8(q[2] * 0.5 + 0.5), 255]).collect();
     let diffuse = encode_dds(uw.width, uw.height, &albedo8, MipKind::Color);
     let normal = encode_dds(uw.width, uw.height, &normal8, MipKind::Normal);
+    let rmaos = pbr_out.then(|| {
+        let rm8: Vec<u8> = rm_img.iter().flat_map(|q| q.map(to8)).collect();
+        encode_dds(uw.width, uw.height, &rm8, MipKind::Data)
+    });
     let mut shader = lod.shader.clone().unwrap_or_default();
     shader.texture_clamp_mode = 0;
     shader.flags2 |= SLSF2_VERTEX_COLORS;
@@ -1164,11 +1206,11 @@ pub fn bake(src: &Source, lod_mesh: &LodMesh, tex: &Textures<'_>, p: &Params, ou
     }
     let colors: Vec<[u8; 4]> = acc.iter().map(|(s, w)| [255, 255, 255, if *w > 0.0 { (s / w).round().clamp(0.0, 255.0) as u8 } else { 255 }]).collect();
     let nif = write_nif(pos, nrm, tan, bit, uv, colors, tris16.clone(), shader, out_diffuse, out_normal)?;
-    Ok(Baked { nif, diffuse, normal, width: uw.width, height: uw.height, density: uw.density, charts: uw.charts, triangles: tris16.len(), samples, misses, ao_balance: balance, ms: t0.elapsed().as_millis() })
+    Ok(Baked { nif, diffuse, normal, rmaos, width: uw.width, height: uw.height, density: uw.density, charts: uw.charts, triangles: tris16.len(), samples, misses, ao_balance: balance, ms: t0.elapsed().as_millis() })
 }
 
 /// Grows the baked charts outward so mips and filtering never read empty texels.
-fn dilate(alb: &mut [[f32; 4]], nrm: &mut [[f32; 4]], w: usize, h: usize) {
+fn dilate(alb: &mut [[f32; 4]], nrm: &mut [[f32; 4]], rm: &mut [[f32; 4]], w: usize, h: usize) {
     let mut valid: Vec<bool> = alb.iter().map(|q| q[3] > 0.0).collect();
     for _ in 0..64 {
         let mut next = valid.clone();
@@ -1178,7 +1220,7 @@ fn dilate(alb: &mut [[f32; 4]], nrm: &mut [[f32; 4]], w: usize, h: usize) {
                 if valid[y * w + x] {
                     continue;
                 }
-                let (mut a, mut n, mut c) = ([0.0f32; 3], Vec3::ZERO, 0.0f32);
+                let (mut a, mut n, mut c, mut r) = ([0.0f32; 3], Vec3::ZERO, 0.0f32, [0.0f32; 4]);
                 for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
                     let (nx, ny) = (x as i32 + dx, y as i32 + dy);
                     if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
@@ -1190,6 +1232,9 @@ fn dilate(alb: &mut [[f32; 4]], nrm: &mut [[f32; 4]], w: usize, h: usize) {
                             a[k] += alb[j][k];
                         }
                         n += Vec3::new(nrm[j][0], nrm[j][1], nrm[j][2]);
+                        for k in 0..4 {
+                            r[k] += rm[j][k];
+                        }
                         c += 1.0;
                     }
                 }
@@ -1198,6 +1243,7 @@ fn dilate(alb: &mut [[f32; 4]], nrm: &mut [[f32; 4]], w: usize, h: usize) {
                     alb[i] = [a[0] / c, a[1] / c, a[2] / c, 1.0];
                     let nn = n.normalize_or(Vec3::Z);
                     nrm[i] = [nn.x, nn.y, nn.z, 1.0];
+                    rm[i] = r.map(|v| v / c);
                     next[i] = true;
                     grew = true;
                 }
@@ -1216,6 +1262,7 @@ fn dilate(alb: &mut [[f32; 4]], nrm: &mut [[f32; 4]], w: usize, h: usize) {
         if !v {
             alb[i] = [mean[0], mean[1], mean[2], 1.0];
             nrm[i] = [0.0, 0.0, 1.0, 1.0];
+            rm[i] = DEFAULT_RMAOS;
         }
     }
 }
@@ -1325,7 +1372,7 @@ mod tests {
         let exists = |_: &str| false;
         let tex = Textures::new(&read, &exists);
         let src = Source::new(&full).expect("source");
-        let b = bake(&src, &lod, &tex, &Params { density: 0.05, max_size: 256, ao_rays: 8, ao_strength: 0.0 }, "textures\\out.dds", "textures\\out_n.dds").expect("bake");
+        let b = bake(&src, &lod, &tex, &Params { density: 0.05, max_size: 256, ao_rays: 8, ao_strength: 0.0, pbr: false }, "textures\\out.dds", "textures\\out_n.dds").expect("bake");
         let info = lodforge_dds::parse(&b.diffuse).expect("dds");
         let img = lodforge_dds::decode(&b.diffuse, &info, 0).expect("decode");
         let c = &img.rgba[((img.height / 4) * img.width + img.width / 4) as usize * 4..][..3];
@@ -1341,7 +1388,7 @@ mod tests {
         let exists = |_: &str| false;
         let tex = Textures::new(&read, &exists);
         let src = Source::new(&full).expect("source");
-        let b = bake(&src, &lod, &tex, &Params { density: 0.05, max_size: 256, ao_rays: 8, ao_strength: 0.85 }, "textures\\out.dds", "textures\\out_n.dds").expect("bake");
+        let b = bake(&src, &lod, &tex, &Params { density: 0.05, max_size: 256, ao_rays: 8, ao_strength: 0.85, pbr: false }, "textures\\out.dds", "textures\\out_n.dds").expect("bake");
         assert!(b.misses * 50 < b.samples, "{} of {} samples missed", b.misses, b.samples);
         assert!(b.width >= 32 && b.width <= 256, "{}x{}", b.width, b.height);
         let nif = lodforge_nif::parse(&b.nif).expect("nif");

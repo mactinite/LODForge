@@ -38,7 +38,8 @@ pub struct Report {
     /// Statics entries pointed at a baked model, and those kept for their AltTextures.
     pub entries: usize,
     pub kept_alt: usize,
-    /// Snow entries of PBR full models (snow colour scaled, vanilla snow flag off).
+    /// Snow entries of baked PBR models (snow colour scaled and vanilla snow flag off, unless PBR
+    /// bakes are on).
     pub pbr_snow: usize,
     /// Snow entries of LOD models left unbaked whose full models are PBR (snow colour scaled).
     pub pbr_snow_unbaked: usize,
@@ -60,7 +61,7 @@ impl Report {
         let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
         let total: u64 = self.levels.iter().map(|l| l.1).sum();
         format!(
-            "detail bake: {} of {} landscape LOD models baked ({} full models with AltTextures baked as their own variant; {} failed, {} shared by several full models and {} with cut-out parts left alone), {} statics entries ({} kept for AltTextures, {} snow entries of PBR models dimmed, {} more on unbaked LOD models); textures {:.0} MB BC7 at full size (LOD4 {} / {:.0} MB, LOD8 {} / {:.0} MB, LOD16 {} / {:.0} MB; the runtime's iSkipMips=1 shows a quarter); {:.1} s",
+            "detail bake: {} of {} landscape LOD models baked ({} full models with AltTextures baked as their own variant; {} failed, {} shared by several full models and {} with cut-out parts left alone), {} statics entries ({} kept for AltTextures, {} snow entries of baked PBR models, {} of unbaked ones dimmed); textures {:.0} MB BC7 at full size (LOD4 {} / {:.0} MB, LOD8 {} / {:.0} MB, LOD16 {} / {:.0} MB; the runtime's iSkipMips=1 shows a quarter); {:.1} s",
             self.baked,
             self.models,
             self.variants,
@@ -187,8 +188,10 @@ fn variant_of(full_of: &FullModels, s: &StaticsFile, index: usize, model: &str) 
 }
 
 /// Bakes the eligible LOD models of the statics files in `out` and rewrites those files.
-/// `full_of`: which full models (and their AltTextures) each LOD entry stands for.
-pub fn run(p: &Profile, out: &Path, full_of: &FullModels, write: WriteOptions) -> Result<Report> {
+/// `full_of`: which full models (and their AltTextures) each LOD entry stands for. `pbr`: PBR
+/// bakes (RMAOS beside them) for the static pack's PBR pages, opt-in (see
+/// [`lodforge_detailbake::Params::pbr`]).
+pub fn run(p: &Profile, out: &Path, full_of: &FullModels, write: WriteOptions, pbr: bool) -> Result<Report> {
     let t0 = Instant::now();
     let mut rep = Report::default();
     let dir = crate::instances::out_dir(out);
@@ -278,7 +281,7 @@ pub fn run(p: &Profile, out: &Path, full_of: &FullModels, write: WriteOptions) -
                         let id = if v.1.is_empty() { lod.clone() } else { format!("{lod}|{}", v.1) };
                         let name = format!("{stem}_{:08x}", crc32fast::hash(id.as_bytes()));
                         let (d, n) = (format!("{TEXTURE_DIR}\\{name}.dds"), format!("{TEXTURE_DIR}\\{name}_n.dds"));
-                        match lodforge_detailbake::bake(&src, &mesh, &tex, &Params::for_level(level), &d, &n) {
+                        match lodforge_detailbake::bake(&src, &mesh, &tex, &Params { pbr, ..Params::for_level(level) }, &d, &n) {
                             Ok(b) => results.lock().unwrap().push((lod.clone(), v.clone(), format!("{MESH_DIR}\\{name}.nif"), level, b)),
                             Err(e) => failed.lock().unwrap().push((lod.clone(), format!("{e:#}"))),
                         }
@@ -308,6 +311,10 @@ pub fn run(p: &Profile, out: &Path, full_of: &FullModels, write: WriteOptions) -
         write_file(model, &b.nif)?;
         write_file(&format!("{TEXTURE_DIR}\\{name}.dds"), &b.diffuse)?;
         write_file(&format!("{TEXTURE_DIR}\\{name}_n.dds"), &b.normal)?;
+        // PBR bakes: the RMAOS beside them marks their textures for the static pack's PBR pages.
+        if let Some(r) = &b.rmaos {
+            write_file(&format!("{TEXTURE_DIR}\\{name}_rmaos.dds"), r)?;
+        }
         let li = level_index(*level);
         rep.levels[li].0 += 1;
         rep.levels[li].1 += b.gpu_bytes();
@@ -322,8 +329,9 @@ pub fn run(p: &Profile, out: &Path, full_of: &FullModels, write: WriteOptions) -
         lines.push(format!("# kept (cut-out parts) {lod}"));
     }
     // PBR full models: Community Shaders draws their snow through its PBR path, darker and
-    // without the vanilla snow sparkle / rim light. The LOD draw page draws it the vanilla way,
-    // so it gets the PBR albedo scale and no snow flag, baked or not.
+    // without the vanilla snow sparkle / rim light. The vanilla LOD pages draw it the vanilla way,
+    // so their snow gets the PBR albedo scale and no snow flag, baked or not; PBR bakes (opt-in)
+    // sit on PBR pages, which draw it through the PBR path.
     let dim = |sn: &mut lodforge_instances::statics::Snow| {
         sn.color = sn.color.map(|c| c * lodforge_detailbake::PBR_SCALE);
         sn.flags &= !1;
@@ -353,7 +361,9 @@ pub fn run(p: &Profile, out: &Path, full_of: &FullModels, write: WriteOptions) -
                     m.textures.clear();
                     if full_pbr.contains(&v) {
                         if let Some(sn) = &mut m.snow {
-                            dim(sn);
+                            if !pbr {
+                                dim(sn);
+                            }
                             rep.pbr_snow += 1;
                         }
                     }

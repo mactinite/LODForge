@@ -67,6 +67,8 @@ pub struct Report {
     pub pages: usize,
     /// Extra draw pages: atlas pages drawn again with a base's own snow material.
     pub snow_pages: usize,
+    /// Atlas pages of PBR bakes (with an RMAOS map; drawn through the TruePBR LOD shaders).
+    pub pbr_pages: usize,
     pub page_bytes: u64,
     pub vertices: usize,
     pub triangles: usize,
@@ -90,11 +92,12 @@ impl Report {
     pub fn summary(&self) -> String {
         let mb = |b: f64| b / 1e6;
         format!(
-            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({:.1} MB BC7 + mips) + {} snow draw page(s); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128), {} opaque parts; {} instance files linked; {:.1} s",
+            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({} PBR; {:.1} MB BC7 + mips) + {} snow draw page(s); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128), {} opaque parts; {} instance files linked; {:.1} s",
             self.models,
             self.meshes,
             self.textures,
             self.pages,
+            self.pbr_pages,
             mb(self.page_bytes as f64),
             self.snow_pages,
             self.vertices,
@@ -388,9 +391,20 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, PackModel>, s: &S
         }
     }
     let dominant = |class: u8, k: &str| -> String { tex_snow.get(&(class, k.to_string())).and_then(|m| m.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(s, _)| s.clone())).unwrap_or_default() };
+    // PBR bakes (a detail-bake texture with its `_rmaos.dds` beside it) go on PBR pages of their
+    // own, which carry an RMAOS map and draw through the TruePBR LOD shaders.
+    let is_pbr_key = |k: &str| -> bool {
+        let d = k.split('=').next().unwrap_or("").split(',').next().unwrap_or("").to_ascii_lowercase();
+        d.starts_with(crate::detail_bake::TEXTURE_DIR) && p.vfs.exists(&crate::object_atlas::rmaos_name(&d))
+    };
     for class in classes {
         let mut list: Vec<(String, u32, u32)> = sizes.iter().filter(|((c, _), _)| *c == class).map(|((_, k), (w, h))| (k.clone(), *w, *h)).collect();
         list.sort_by(|a, b| (b.1 * b.2).cmp(&(a.1 * a.2)).then(a.0.cmp(&b.0)));
+        let (pbr_list, plain_list): (Vec<_>, Vec<_>) = list.into_iter().partition(|t| is_pbr_key(&t.0));
+        for (pbr, list) in [(false, plain_list), (true, pbr_list)] {
+        if list.is_empty() {
+            continue;
+        }
         for (bin_index, list) in material_bins(list, |k| dominant(class, k), s.page).into_iter().enumerate() {
         let tag = match class {
             lodforge_instances::meshpack::CLASS_SNOW => "_Snow",
@@ -400,6 +414,7 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, PackModel>, s: &S
             lodforge_instances::meshpack::CLASS_GRASS_COMPLEX => "_Complex",
             _ => "",
         };
+        let tag = format!("{tag}{}", if pbr { "_PBR" } else { "" });
         let base = if bin_index == 0 { format!("{page_base}{tag}_Alpha") } else { format!("{page_base}{tag}_M{bin_index:02}_Alpha") };
         let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, &base);
         // Complex grass: pages twice as high, every tile repeated in the bottom half with the
@@ -408,11 +423,23 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, PackModel>, s: &S
         let pages = crate::object_atlas::render(&p.vfs, &render_layout, &gpu, &formats)?;
         crate::object_atlas::write(out, &pages)?;
         rep.pages += pages.len();
-        rep.page_bytes += pages.iter().map(|pg| (pg.diffuse.len() + pg.normal.len()) as u64).sum::<u64>();
+        rep.page_bytes += pages.iter().map(|pg| (pg.diffuse.len() + pg.normal.len() + pg.rmaos.as_ref().map_or(0, Vec::len)) as u64).sum::<u64>();
+        rep.pbr_pages += pages.iter().filter(|pg| pg.rmaos.is_some()).count();
         let first = pack.pages.len() as u16;
-        pack.pages.extend(render_layout.pages.iter().map(|pg| Page { width: pg.width, height: pg.height, mips: pg.width.max(pg.height).ilog2() + 1, alpha_threshold: 128, class, albedo: pg.name.to_ascii_lowercase(), normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase(), snow: None }));
+        pack.pages.extend(render_layout.pages.iter().map(|pg| Page {
+            width: pg.width,
+            height: pg.height,
+            mips: pg.width.max(pg.height).ilog2() + 1,
+            alpha_threshold: 128,
+            class,
+            albedo: pg.name.to_ascii_lowercase(),
+            normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase(),
+            rmaos: if crate::object_atlas::is_pbr_page(&pg.name) { crate::object_atlas::rmaos_name(&pg.name).to_ascii_lowercase() } else { String::new() },
+            snow: None,
+        }));
         for e in layout.entries.into_iter().filter(|e| e.page != usize::MAX) {
             entry.insert((class, e.texture.clone()), (first + e.page as u16, e));
+        }
         }
         }
     }
