@@ -753,7 +753,7 @@ mod parent_tests {
         let mesh_crc = crate::lodmodels::MeshCrcTable::default();
         let resolver = Resolver {
             rules: &rules, index: &index, parallax: &parallax, materials: &materials,
-            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| present, level32: false, mesh_crc: &mesh_crc,
+            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| present, level32: false, model_fallback: false, mesh_crc: &mesh_crc,
         };
         build_dynamic(&ExportInput {
             world: &world, bases: &bases, materials: &materials, resolver: &resolver,
@@ -795,7 +795,7 @@ mod parent_tests {
         let mesh_crc = crate::lodmodels::MeshCrcTable::default();
         let resolver = Resolver {
             rules: &rules, index: &index, parallax: &parallax, materials: &materials,
-            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| true, level32: false, mesh_crc: &mesh_crc,
+            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| true, level32: false, model_fallback: false, mesh_crc: &mesh_crc,
         };
         build_lines(&ExportInput {
             world: &world, bases: &bases, materials: &materials, resolver: &resolver,

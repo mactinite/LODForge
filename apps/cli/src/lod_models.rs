@@ -41,6 +41,22 @@ pub struct Policy {
 
 pub const DEFAULT_MIN_SIZE: [f32; 3] = [256.0, 512.0, 1024.0];
 
+/// Minimum sizes with `keep` level coverage: LOD8 and LOD16 models down to about 3 px where
+/// their level starts (128 units at 57,344, 256 at 147,456 with a 100 degree field of view at
+/// 3440 px), so objects stay in the distance instead of dropping out at the LOD4 or LOD8 edge.
+/// LOD4 keeps 256: a base without any installed LOD model below that size stays without LOD.
+pub const KEEP_MIN_SIZE: [f32; 3] = [256.0, 128.0, 256.0];
+
+/// The generated-model minimum sizes: `--lod-model-min-size` (`v`, missing levels take its last
+/// value), else [`KEEP_MIN_SIZE`] with `keep` level coverage and [`DEFAULT_MIN_SIZE`] without.
+pub fn min_size(v: Option<&[f32]>, keep: bool) -> [f32; 3] {
+    match v {
+        Some(v) if !v.is_empty() => [0, 1, 2].map(|k| v.get(k).or(v.last()).copied().unwrap_or(0.0)),
+        _ if keep => KEEP_MIN_SIZE,
+        _ => DEFAULT_MIN_SIZE,
+    }
+}
+
 #[derive(clap::Args)]
 pub struct Args {
     #[command(flatten)]
@@ -58,9 +74,12 @@ pub struct Args {
     /// Cache folder (default: none).
     #[arg(long)]
     pub cache: Option<PathBuf>,
-    /// Smallest base size for levels 0, 1, 2 (comma separated).
+    /// Smallest base size for levels 0, 1, 2 (comma separated; default as `build`).
     #[arg(long, value_delimiter = ',')]
     pub min_size: Option<Vec<f32>>,
+    /// `build --level-coverage` (`auto`: `keep` with `--preset High`).
+    #[arg(long, value_enum, default_value = "auto")]
+    pub level_coverage: crate::dyndolod_build::LevelCoverage,
     /// Generate every level the rules use, also where a LOD model is installed.
     #[arg(long)]
     pub all: bool,
@@ -163,8 +182,13 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
             let ext = [0, 1, 2].map(|k| f32::from(b.bounds[k + 3]) - f32::from(b.bounds[k]));
             let size = ext.iter().copied().fold(0.0f32, f32::max) * scale;
             let mut need = HashSet::new();
-            for l in &rule.levels[..3] {
-                if let Level::Model(k) = *l
+            // `keep` level coverage: a billboard this (non-tree) base cannot have is its model level.
+            for (l, choice) in rule.levels[..3].iter().enumerate() {
+                let choice = match *choice {
+                    Level::Billboard(_) if c.keep_levels => Level::Model(l as u8),
+                    other => other,
+                };
+                if let Level::Model(k) = choice
                     && k < 3
                     && (policy.all || lod.levels[usize::from(k)].is_none())
                     && size >= policy.min_size[usize::from(k)]
@@ -355,10 +379,11 @@ pub fn run(a: &Args) -> Result<()> {
     let t = Instant::now();
     let p = a.profile.open()?;
     let dir = a.dyndolod_config.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
-    let c = Config::load(&p, &dir, &a.preset, false)?;
+    let mut c = Config::load(&p, &dir, &a.preset, false)?;
+    c.keep_levels = a.level_coverage.keeps(&a.preset);
     let all_worlds = lodforge_esp::scan_worldspaces(&p.load_order)?;
     let worlds: Vec<&Worldspace> = a.worlds.iter().filter_map(|n| all_worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(n))).collect();
-    let min_size = a.min_size.as_ref().map(|v| [0, 1, 2].map(|k| v.get(k).or(v.last()).copied().unwrap_or(0.0))).unwrap_or(DEFAULT_MIN_SIZE);
+    let min_size = min_size(a.min_size.as_deref(), c.keep_levels);
     let policy = Policy { min_size, all: a.all };
     let items = plan(&p, &c, &worlds, &policy);
     let n_levels: usize = items.iter().map(|i| i.levels.len()).sum();
@@ -605,4 +630,25 @@ pub fn far_from_lod0(p: &Profile, exports: &mut crate::dyndolod_build::WorldExpo
         s.text = text.join("\r\n");
     }
     rep
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dyndolod_build::LevelCoverage;
+
+    #[test]
+    fn level_coverage_and_min_sizes() {
+        assert!(LevelCoverage::Auto.keeps("High"));
+        assert!(LevelCoverage::Auto.keeps("high"));
+        assert!(!LevelCoverage::Auto.keeps("Medium"));
+        assert!(LevelCoverage::Keep.keeps("Low"));
+        assert!(!LevelCoverage::Rules.keeps("High"));
+        assert_eq!(min_size(None, false), DEFAULT_MIN_SIZE);
+        assert_eq!(min_size(None, true), KEEP_MIN_SIZE);
+        assert_eq!(min_size(Some(&[]), true), KEEP_MIN_SIZE);
+        // An explicit --lod-model-min-size wins; missing levels take its last value.
+        assert_eq!(min_size(Some(&[100.0, 200.0]), true), [100.0, 200.0, 200.0]);
+        assert_eq!(min_size(Some(&[64.0]), false), [64.0; 3]);
+    }
 }

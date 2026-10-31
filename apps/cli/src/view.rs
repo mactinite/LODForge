@@ -108,6 +108,11 @@ pub struct Args {
     /// Blend three impostor frames (the shader contract) instead of the runtime's nearest frame.
     #[arg(long)]
     pub impostor_blend: bool,
+    /// The runtime's tree settings to draw: `current` (impostors to `fBlockMaximumDistance`, no
+    /// thinning; the plugin's defaults since 2026-10-29) or `legacy` (thinned to 35 % from 60000
+    /// to 200000 units, gone by 240000: the defaults before).
+    #[arg(long, default_value = "current")]
+    pub runtime_trees: String,
     /// MSAA samples for --screenshot.
     #[arg(long, default_value_t = 4)]
     pub samples: u32,
@@ -139,7 +144,16 @@ fn settings(a: &Args) -> Result<ViewSettings> {
         "game" => LodMode::Game { distance_mult: a.lod_distance },
         l => LodMode::Single(l.trim_start_matches("lod").parse().with_context(|| format!("--levels {l}: expected game, 4, 8, 16 or 32"))?),
     };
-    Ok(ViewSettings { mode, lod_distances: lod_distances(a), layers: Layers::parse(&a.layers), shading: Shading::parse(&a.shading).ok_or_else(|| anyhow!("--shading {}: expected textured, unlit, normals, flat, level or kind", a.shading))?, normal_maps: !a.no_normals, lod_source: lodforge_viewer::runtime::LodSource::parse(&a.lod_source).ok_or_else(|| anyhow!("--lod-source {}: expected auto, runtime or classic", a.lod_source))?, runtime: lodforge_viewer::runtime::RuntimeParams { blend_frames: a.impostor_blend, ..Default::default() }, ..ViewSettings::default() })
+    Ok(ViewSettings { mode, lod_distances: lod_distances(a), layers: Layers::parse(&a.layers), shading: Shading::parse(&a.shading).ok_or_else(|| anyhow!("--shading {}: expected textured, unlit, normals, flat, level or kind", a.shading))?, normal_maps: !a.no_normals, lod_source: lodforge_viewer::runtime::LodSource::parse(&a.lod_source).ok_or_else(|| anyhow!("--lod-source {}: expected auto, runtime or classic", a.lod_source))?, runtime: runtime_params(a)?, ..ViewSettings::default() })
+}
+
+fn runtime_params(a: &Args) -> Result<lodforge_viewer::runtime::RuntimeParams> {
+    let p = lodforge_viewer::runtime::RuntimeParams { blend_frames: a.impostor_blend, ..Default::default() };
+    match a.runtime_trees.to_ascii_lowercase().as_str() {
+        "current" => Ok(p),
+        "legacy" => Ok(p.legacy_trees()),
+        t => Err(anyhow!("--runtime-trees {t}: expected current or legacy")),
+    }
 }
 
 /// The game arrangement's switch distances: the profile's SkyrimPrefs.ini (profile-local INIs

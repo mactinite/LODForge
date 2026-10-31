@@ -27,6 +27,10 @@ pub struct Args {
     /// Static instead of dynamic LOD rules (`_all_static`).
     #[arg(long)]
     pub static_lod: bool,
+    /// `build --level-coverage`: `keep` gives non-tree models without a billboard their model
+    /// levels where the rule asks for one (`auto`: with `--preset High`).
+    #[arg(long, value_enum, default_value = "auto")]
+    pub level_coverage: crate::dyndolod_build::LevelCoverage,
     #[arg(long, default_value = "Tamriel")]
     pub world: String,
     /// Golden DynDOLOD run folder (DynDOLOD_SSE_Default.ini, export\).
@@ -58,6 +62,7 @@ pub fn run(a: &Args) -> Result<()> {
     let dir = a.dyndolod_dir.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
     let t = std::time::Instant::now();
     let mut c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, a.static_lod)?;
+    c.keep_levels = a.level_coverage.keeps(&a.preset);
     // This command compares with DynDOLOD's own output: its child-world selection, floating copies included.
     c.child_floating = None;
     let rules = &c.rules;

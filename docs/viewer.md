@@ -95,8 +95,11 @@ from the camera:
   keeps. Types without a mesh draw their impostor near too.
 - **Impostors** (`textures\LODForge\Impostors\<World>\impostors.json` + pages): the nearest
   hemi-octahedral frame on a quad in that frame's capture plane, with the frame switch jittered
-  per tree by 0.35 frames (`fFrameDither`); alpha test 0.5 (`fAlphaRef`); thinned by hash rank
-  from 60000 to 200000 units down to 35 % kept; faded out from 200000 to 240000 (dithered). The
+  per tree by 0.35 frames (`fFrameDither`); alpha test 0.5 (`fAlphaRef`); not thinned, faded out
+  (dithered) over the last 32768 units before `fBlockMaximumDistance`, where the rest of object
+  LOD ends: the plugin's defaults since 2026-10-29. `--runtime-trees legacy` draws the defaults
+  before (thinned by hash rank from 60000 to 200000 units down to 35 % kept, faded out from
+  200000 to 240000), which made trees fill in as the player approached. The
   albedo is pre-lit and lit like a billboard, as CS's DistantTree pixel shader does in game; the
   per-type brightness / tint and the normal pages are not used (the runtime cannot apply them
   yet; "impostor type tint" shows them). "Blend 3 impostor frames" (`--impostor-blend`) draws the

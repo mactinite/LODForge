@@ -99,7 +99,12 @@ export const OPTIONS: Option[] = [
     { value: "High", label: "High", explain: "The shortest ignore list: most city objects get distant copies." },
   ] },
   { key: "lodModels", flag: "--lod-models", kind: "bool", default: true, group: "objects", label: "Generate missing LOD models", explain: "Make LOD models from full models where the rules want LOD and none is installed (meshes\\lod\\lodforge\\)." },
-  { key: "lodModelMinSize", flag: "--lod-model-min-size", kind: "text", default: "", group: "objects", when: (v) => Boolean(v.lodModels), expert: true, label: "Generated model minimum size", placeholder: "256,512,1024", explain: "Smallest object size (game units) that gets a generated LOD4, LOD8, LOD16 model. Empty keeps 256, 512, 1024." },
+  { key: "levelCoverage", flag: "--level-coverage", kind: "choice", default: "auto", group: "objects", label: "Far object coverage", explain: "Whether objects keep their LOD in the farther LOD levels or drop out at the LOD4/LOD8 edge and fill in as you approach.", choices: [
+    { value: "auto", label: "Auto", explain: "Keep with the High preset, DynDOLOD's rules otherwise." },
+    { value: "keep", label: "Keep", explain: "Generated LOD8/16 models down to 128/256 units, and logs or driftwood keep their models where the rules want a billboard they lack. More triangles in the distance, far less popping." },
+    { value: "rules", label: "DynDOLOD rules", explain: "Generated LOD8/16 models only for objects of 512/1024 units and more, as before." },
+  ] },
+  { key: "lodModelMinSize", flag: "--lod-model-min-size", kind: "text", default: "", group: "objects", when: (v) => Boolean(v.lodModels), expert: true, label: "Generated model minimum size", placeholder: "256,512,1024", explain: "Smallest object size (game units) that gets a generated LOD4, LOD8, LOD16 model. Empty keeps 256, 512, 1024 (256, 128, 256 with far object coverage Keep)." },
   { key: "keepFarLodModels", flag: "--keep-far-lod-models", kind: "bool", default: false, group: "objects", expert: true, label: "Keep shipped LOD8/16 models", explain: "By default LOD8/16 models whose texture differs from LOD4 are rebuilt from the LOD4 model." },
   { key: "windows", flag: "--windows", kind: "bool", default: false, group: "objects", label: "Glowing windows", explain: "LOD window overlays that glow at night." },
   { key: "staticLod", flag: "--static-lod", kind: "bool", default: false, group: "objects", expert: true, label: "Static LOD only", explain: "Static rules only; no dynamic LOD (no DynDOLOD.esm/.esp)." },

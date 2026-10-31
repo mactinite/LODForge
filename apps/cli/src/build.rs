@@ -391,20 +391,21 @@ pub fn run(a: &Args) -> Result<()> {
                 // leaves the runtime trees out of the merged shapes.
                 c.ultra = a.dyn_opts.tree_lod == crate::dyndolod_build::TreeLodMode::Ultra || a.rt.on();
                 c.pbr = a.materials.pbr();
+                c.keep_levels = a.dyn_opts.level_coverage.keeps(&a.dyn_opts.preset);
                 for (key, v) in [("ObjectLODMaxTileSize", a.dyn_opts.atlas_max_tile), ("FullTextureMaxTileSize", a.dyn_opts.atlas_full_max_tile)] {
                     if let Some(v) = v {
                         c.ini.set("DynDOLOD", key, &v.next_power_of_two().clamp(64, 4096).to_string());
                     }
                 }
                 if !a.json {
-                    println!("DynDOLOD configuration: {} rules, {} LOD models, preset {}", c.rules.len(), c.index.len(), a.dyn_opts.preset);
+                    println!("DynDOLOD configuration: {} rules, {} LOD models, preset {}, level coverage {}", c.rules.len(), c.index.len(), a.dyn_opts.preset, if c.keep_levels { "keep" } else { "rules" });
                 }
                 dyn_worlds = scan_worldspaces(&p.load_order)?;
                 if a.dyn_opts.lod_models {
                     let t = Instant::now();
                     begin(a.json, "all", "lod-models", None);
                     let selected: Vec<&lodforge_esp::Worldspace> = dyn_worlds.iter().filter(|w| worlds.iter().any(|n| n.eq_ignore_ascii_case(&w.editor_id))).collect();
-                    let min_size = a.dyn_opts.lod_model_min_size.as_ref().map(|v| [0, 1, 2].map(|k| v.get(k).or(v.last()).copied().unwrap_or(0.0))).unwrap_or(crate::lod_models::DEFAULT_MIN_SIZE);
+                    let min_size = crate::lod_models::min_size(a.dyn_opts.lod_model_min_size.as_deref(), c.keep_levels);
                     let items = crate::lod_models::plan(&p, &c, &selected, &crate::lod_models::Policy { min_size, all: false });
                     let cache = a.dyn_opts.lod_model_cache.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(".lodforge-cache"));
                     let rep = crate::lod_models::generate(&p, &items, &out, Some(&cache), &lodforge_lodmodel::LEVELS);

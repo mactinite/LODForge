@@ -11,8 +11,9 @@
 //!   (`textures\LODForge\Impostors\<World>\`, docs/runtime/impostors.md): the nearest frame
 //!   with a per-tree jittered switch angle, alpha test 0.5, lit by the game's DistantTree pixel
 //!   shader as a billboard (the albedo is pre-lit; per-type brightness / tint is not applied in
-//!   game). Impostors thin out by hash rank from 60000 to 200000 units (35 % kept) and fade
-//!   out from 200000 to 240000.
+//!   game). Impostors fade out over the last 32768 units before `fBlockMaximumDistance` and
+//!   are not thinned (the runtime's defaults since 2026-10-29; before: thinned by hash rank from
+//!   60000 to 200000 units to 35 % kept, faded out from 200000 to 240000).
 //! - **Repeated statics** (`<World>[.<SEASON>].statics.bin` + `StaticMeshes.bin`, section 6):
 //!   object LOD models the build instanced instead of merging into the `.bto`; each record is
 //!   drawn inside its level's distance band (LOD4 up to `fBlockLevel0Distance`, LOD8 up to
@@ -123,8 +124,11 @@ pub struct RuntimeParams {
     pub mesh_tier_end: f32,
     /// `fMeshTierBand`: width of the dithered mesh -> impostor hand-over before that distance.
     pub mesh_tier_band: f32,
-    /// `fFadeOutStart`, `fFadeOutEnd` of the impostors.
+    /// `fFadeOutStart`, `fFadeOutEnd` of the impostors; 0 = from `fBlockMaximumDistance` (end
+    /// there, start [`TREE_FADE_BAND`] before it), as the runtime resolves them.
     pub tree_fade_out: [f32; 2],
+    /// `bThinning` of the impostors.
+    pub tree_thinning: bool,
     /// `fThinStart`, `fThinEnd`, `fThinMinKeep` of the impostors.
     pub tree_thin: [f32; 3],
     /// `fFrameDither`: per-tree jitter of the frame-switch angle, in frames.
@@ -146,7 +150,8 @@ impl Default for RuntimeParams {
         RuntimeParams {
             mesh_tier_end: 0.0,
             mesh_tier_band: 4096.0,
-            tree_fade_out: [200_000.0, 240_000.0],
+            tree_fade_out: [0.0, 0.0],
+            tree_thinning: false,
             tree_thin: [60_000.0, 200_000.0, 0.35],
             frame_dither: 0.35,
             alpha_ref: 0.5,
@@ -157,7 +162,24 @@ impl Default for RuntimeParams {
     }
 }
 
+/// Width of the impostors' fade-out band when it follows `fBlockMaximumDistance` (the runtime's
+/// `kTreeFadeBand`, `src/render/TreeFade.h`).
+pub const TREE_FADE_BAND: f32 = 32_768.0;
+
 impl RuntimeParams {
+    /// The runtime's tree settings before 2026-10-29: thinned to 35 % from 60000 to 200000 units,
+    /// faded out from 200000 to 240000 (`--runtime-trees legacy`).
+    pub fn legacy_trees(self) -> RuntimeParams {
+        RuntimeParams { tree_fade_out: [200_000.0, 240_000.0], tree_thinning: true, tree_thin: [60_000.0, 200_000.0, 0.35], ..self }
+    }
+
+    /// The impostors' fade-out band for the switch distances in use (`ResolveTreeFadeOut`).
+    pub fn tree_fade_band(&self, d: &LodDistances, mult: f32) -> [f32; 2] {
+        let end = if self.tree_fade_out[1] > 0.0 { self.tree_fade_out[1] } else { d.maximum * mult };
+        let start = if self.tree_fade_out[0] > 0.0 { self.tree_fade_out[0].min(end) } else { (end - TREE_FADE_BAND).max(0.0) };
+        [start, end]
+    }
+
     /// The mesh tier's end for the switch distances in use.
     pub fn mesh_end(&self, d: &LodDistances, mult: f32) -> f32 {
         if self.mesh_tier_end > 0.0 { self.mesh_tier_end } else { d.level0 * mult }
@@ -168,8 +190,11 @@ impl RuntimeParams {
     pub fn gpu(&self, d: &LodDistances, mult: f32, mesh_tier: bool, rules: bool) -> [[f32; 4]; 3] {
         [
             [if mesh_tier { self.mesh_end(d, mult) } else { 0.0 }, self.mesh_tier_band, self.frame_dither, self.alpha_ref],
-            [self.tree_fade_out[0], self.tree_fade_out[1], self.tree_thin[0], self.tree_thin[1]],
-            [self.tree_thin[2], f32::from(u8::from(self.blend_frames)), f32::from(u8::from(rules)), f32::from(u8::from(self.impostor_tint))],
+            {
+                let f = self.tree_fade_band(d, mult);
+                [f[0], f[1], self.tree_thin[0], self.tree_thin[1]]
+            },
+            [if self.tree_thinning { self.tree_thin[2] } else { 1.0 }, f32::from(u8::from(self.blend_frames)), f32::from(u8::from(rules)), f32::from(u8::from(self.impostor_tint))],
         ]
     }
 }
@@ -442,6 +467,22 @@ pub fn pack_vertices(p: &MeshPack) -> Vec<crate::render::PackVertex> {
 mod tests {
     use super::*;
     use lodforge_instances::meshpack::{Cluster, Mesh};
+
+    /// The tree fade follows fBlockMaximumDistance (and the distance slider) unless set; thinning
+    /// is off unless asked for, and `legacy_trees` restores the old constants.
+    #[test]
+    fn tree_fade_and_thinning() {
+        let d = LodDistances { level0: 57344.0, level1: 147456.0, maximum: 327680.0 };
+        let p = RuntimeParams::default();
+        assert_eq!(p.tree_fade_band(&d, 1.0), [327680.0 - TREE_FADE_BAND, 327680.0]);
+        assert_eq!(p.tree_fade_band(&d, 0.5), [163840.0 - TREE_FADE_BAND, 163840.0]);
+        let g = p.gpu(&d, 1.0, true, true);
+        assert_eq!(g[1][..2], [327680.0 - TREE_FADE_BAND, 327680.0]);
+        assert_eq!(g[2][0], 1.0);
+        let old = p.legacy_trees();
+        assert_eq!(old.tree_fade_band(&d, 1.0), [200_000.0, 240_000.0]);
+        assert_eq!(old.gpu(&d, 1.0, true, true)[2][0], 0.35);
+    }
 
     #[test]
     fn ranks_and_rows() {

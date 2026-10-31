@@ -37,6 +37,25 @@ use lodforge_seasons::{Season, SeasonSwaps};
 
 use crate::profile::Profile;
 
+/// `--level-coverage`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelCoverage {
+    Auto,
+    Rules,
+    Keep,
+}
+
+impl LevelCoverage {
+    /// Whether references keep LOD across levels ([`Opts::level_coverage`]) with this preset.
+    pub fn keeps(self, preset: &str) -> bool {
+        match self {
+            LevelCoverage::Keep => true,
+            LevelCoverage::Rules => false,
+            LevelCoverage::Auto => preset.eq_ignore_ascii_case("High"),
+        }
+    }
+}
+
 /// DynDOLOD options of `lodforge build`.
 #[derive(clap::Args, Clone, Debug)]
 pub struct Opts {
@@ -70,9 +89,19 @@ pub struct Opts {
     /// Cache for generated LOD models (default: `.lodforge-cache` next to the output).
     #[arg(long)]
     pub lod_model_cache: Option<PathBuf>,
-    /// Smallest object size (game units) that gets a generated model level 0, 1, 2.
+    /// Smallest object size (game units) that gets a generated model level 0, 1, 2 (default
+    /// 256,512,1024; 256,128,256 with `--level-coverage keep`).
     #[arg(long, value_delimiter = ',')]
     pub lod_model_min_size: Option<Vec<f32>>,
+    /// How far out objects keep their LOD. `rules`: DynDOLOD's rules as they are, and generated
+    /// LOD8/16 models only for objects of 512/1024 units and more, so smaller rocks, houses and
+    /// logs drop out at the LOD4 or LOD8 edge and fill in as you approach. `keep`: generated
+    /// LOD8/16 models down to 128/256 units (`--lod-model-min-size` still wins), and a non-tree
+    /// model whose rule asks for a billboard it does not have (logs, driftwood, branch piles
+    /// under `landscape\trees\`) takes its LOD models at LOD8/16 instead of nothing. `auto`
+    /// (default): `keep` with `--preset High`, else `rules`.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub level_coverage: LevelCoverage,
     /// Skip DynDOLOD.esm/.esp and the DLL NG data files.
     #[arg(long)]
     pub no_plugins: bool,
@@ -201,6 +230,9 @@ pub struct Config {
     /// Child-world copies left out as floating (`childworld::drop_floating`): small models with
     /// no LOD surface under them; `None` keeps DynDOLOD's own selection (`build --child-keep-floating`).
     pub child_floating: Option<lodforge_dyndolod::childworld::FloatingRule>,
+    /// `keep` level coverage ([`LevelCoverage`]): billboard levels of non-tree bases without a
+    /// billboard take model levels (export and generated LOD models).
+    pub keep_levels: bool,
 }
 
 impl Config {
@@ -224,7 +256,7 @@ impl Config {
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
         let reference_states = lodforge_dyndolod::export::read_reference_states(lo)?;
-        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()) })
+        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()), keep_levels: false })
     }
 
     /// Re-reads LOD model discovery after files were added to the VFS (generated LOD models).
@@ -268,7 +300,7 @@ fn parallax_diff(p: &Profile) -> ParallaxGenDiff {
 pub fn with_resolver<R>(p: &Profile, c: &Config, f: impl FnOnce(&Resolver<'_>) -> R) -> R {
     let read = |path: &str| p.vfs.read(path).ok().flatten();
     let exists = |path: &str| p.vfs.exists(path);
-    let r = Resolver { rules: &c.rules, index: &c.index, parallax: &c.parallax, materials: &c.materials, plugins: &p.plugin_names, owners: &c.owners, read: &read, exists: &exists, level32: false, mesh_crc: &c.mesh_crc };
+    let r = Resolver { rules: &c.rules, index: &c.index, parallax: &c.parallax, materials: &c.materials, plugins: &p.plugin_names, owners: &c.owners, read: &read, exists: &exists, level32: false, model_fallback: c.keep_levels, mesh_crc: &c.mesh_crc };
     f(&r)
 }
 

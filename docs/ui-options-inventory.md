@@ -16,7 +16,10 @@ Sources: `apps/cli/src/main.rs`, `build.rs`, `dyndolod_build.rs`, `profile.rs`; 
   `--lod32 step|golden`, `--terrain-pbr-scale` (0.65..1), `--no-underside`.
 - **Objects / atlas:** `--atlas-max-tile`, `--atlas-full-max-tile` (pow2 64..4096),
   `--lod-texture-tone flat|dyndolod`, `--far-lod-match` (0..1), `--keep-far-lod-models`,
-  `--lod-models`, `--lod-model-cache`, `--lod-model-min-size` (3 sizes).
+  `--lod-models`, `--lod-model-cache`, `--lod-model-min-size` (3 sizes),
+  `--level-coverage auto|rules|keep` (auto = keep with `--preset High`: generated LOD8/16 models
+  down to 128/256 units, billboard levels of non-tree models without a billboard take model
+  levels; docs/runtime/level-coverage.md).
 - **Trees:** `--texgen`, `--tree-lod classic|ultra`, `--tree-models off|generate|all`,
   `--tree-model-levels keep:area:bark:floor[:max_scale]`×3, `--tree-model-crown cloud|prune`,
   global `--billboard-scale`, `--billboard-supersample 1..8`, `--installed-billboards

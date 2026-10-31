@@ -37,6 +37,11 @@ pub struct Resolver<'a> {
     pub read: &'a (dyn Fn(&str) -> Option<Vec<u8>> + Sync),
     pub exists: &'a (dyn Fn(&str) -> bool + Sync),
     pub level32: bool,
+    /// LODForge's `keep` level coverage: a level whose rule asks for a billboard that a non-tree
+    /// base does not have (logs, driftwood and branch piles under `landscape\trees\` match the
+    /// `tree` mask) takes the base's model level of the same index instead of nothing
+    /// ([`level_choice`]).
+    pub model_fallback: bool,
     /// DynDOLOD's vanilla mesh CRCs (replaced meshes only take `<stem>_<crc>` LOD models).
     pub mesh_crc: &'a crate::lodmodels::MeshCrcTable,
 }
@@ -70,6 +75,18 @@ pub fn is_tree(b: &Base) -> bool {
     &b.signature == b"TREE" || (&b.signature == b"STAT" && b.flags & STAT_HAS_TREE_LOD != 0)
 }
 
+/// The rule's choice for export column `l` (LOD4, LOD8, LOD16, LOD32; LOD32 without a choice of
+/// its own takes LOD16's). With `model_fallback`, a billboard choice the base cannot satisfy
+/// (`has_billboard` false, not a tree) becomes the model level of the same index (LOD8 -> level
+/// 1, LOD16 and LOD32 -> level 2), so a log keeps its LOD model past LOD4 instead of vanishing.
+pub fn level_choice(r: &Rule, l: usize, tree: bool, has_billboard: bool, model_fallback: bool) -> Level {
+    let choice = if l == 3 && r.levels[3] == Level::None { r.levels[2] } else { r.levels[l] };
+    match choice {
+        Level::Billboard(_) if model_fallback && !tree && !has_billboard => Level::Model(l.min(2) as u8),
+        c => c,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,13 +102,43 @@ mod tests {
             let materials = HashMap::new();
             let owners = HashMap::new();
             Resolver { rules: &[], index: &index, parallax: &parallax, materials: &materials,
-                plugins: &[], owners: &owners, read: &|_| None, exists: &|p| exists && paths.contains(&p), level32: false, mesh_crc: &crate::lodmodels::MeshCrcTable::default() }.resolve(base)
+                plugins: &[], owners: &owners, read: &|_| None, exists: &|p| exists && paths.contains(&p), level32: false, model_fallback: false, mesh_crc: &crate::lodmodels::MeshCrcTable::default() }.resolve(base)
         };
         assert_eq!(resolve(&base, false, true).levels[0].as_deref(), Some("meshes\\other_lod.nif"));
         assert_eq!(resolve(&base, true, true).levels[0].as_deref(), Some("meshes\\hall_lod_0.nif"));
         assert!(resolve(&base, false, false).levels.iter().all(Option::is_none));
         base.flags = 0;
         assert!(resolve(&base, false, true).levels.iter().all(Option::is_none));
+    }
+
+    /// `keep` level coverage: a log matching the `tree` mask (billboards at LOD8/16) keeps its
+    /// model levels there; without the fallback, a tree, or with a billboard, the rule stands.
+    #[test]
+    fn billboard_levels_fall_back_to_model_levels() {
+        let rule = crate::rules::Rule::parse("tree,Level0,Billboard1,Billboard1,Far LOD,Unchanged,17", "test").unwrap();
+        assert_eq!(level_choice(&rule, 0, false, false, true), Level::Model(0));
+        assert_eq!(level_choice(&rule, 1, false, false, true), Level::Model(1));
+        assert_eq!(level_choice(&rule, 2, false, false, true), Level::Model(2));
+        assert_eq!(level_choice(&rule, 3, false, false, true), Level::Model(2));
+        assert_eq!(level_choice(&rule, 1, false, false, false), Level::Billboard(1));
+        assert_eq!(level_choice(&rule, 1, true, false, true), Level::Billboard(1));
+        assert_eq!(level_choice(&rule, 1, false, true, true), Level::Billboard(1));
+
+        let paths = ["meshes\\lod\\treelog01_lod_0.nif", "meshes\\lod\\treelog01_lod_1.nif", "meshes\\lod\\treelog01_lod_2.nif"];
+        let index = LodIndex::scan(paths.iter().copied(), &["meshes".into()], &[], &Default::default());
+        let parallax = Default::default();
+        let materials = HashMap::new();
+        let owners = HashMap::new();
+        let rules = vec![rule];
+        let log = Base { signature: *b"STAT", model: "landscape\\trees\\treelog01.nif".into(), ..Default::default() };
+        let columns = |fallback: bool| {
+            let r = Resolver { rules: &rules, index: &index, parallax: &parallax, materials: &materials, plugins: &[], owners: &owners, read: &|_| None, exists: &|p| paths.contains(&p), level32: false, model_fallback: fallback, mesh_crc: &crate::lodmodels::MeshCrcTable::default() };
+            let lod = r.resolve(&log);
+            assert_eq!(r.columns(&rules[0], &log, &lod), lod.columns);
+            lod.columns
+        };
+        assert_eq!(columns(false), ["meshes\\lod\\treelog01_lod_0.nif".to_string(), String::new(), String::new(), String::new()]);
+        assert_eq!(columns(true), ["meshes\\lod\\treelog01_lod_0.nif".to_string(), "meshes\\lod\\treelog01_lod_1.nif".into(), "meshes\\lod\\treelog01_lod_2.nif".into(), String::new()]);
     }
 
     /// A reference open by default takes the `_lfopen` models of the levels its columns use; a
@@ -104,7 +151,7 @@ mod tests {
         let materials = HashMap::new();
         let owners = HashMap::new();
         let rules = vec![crate::rules::Rule::parse("gate,Level0,Level1,Level1,Far LOD,Unchanged,0", "test").unwrap()];
-        let r = Resolver { rules: &rules, index: &index, parallax: &parallax, materials: &materials, plugins: &[], owners: &owners, read: &|_| None, exists: &|p| paths.contains(&p), level32: false, mesh_crc: &crate::lodmodels::MeshCrcTable::default() };
+        let r = Resolver { rules: &rules, index: &index, parallax: &parallax, materials: &materials, plugins: &[], owners: &owners, read: &|_| None, exists: &|p| paths.contains(&p), level32: false, model_fallback: false, mesh_crc: &crate::lodmodels::MeshCrcTable::default() };
         let base = Base { signature: *b"DOOR", model: "gate.nif".into(), ..Default::default() };
         let lod = r.resolve(&base);
         assert_eq!(lod.columns[0], "meshes\\lod\\gate_lod_0.nif");
@@ -190,7 +237,7 @@ impl Resolver<'_> {
             let r = &self.rules[ri];
             let full = crate::export::export_model_text(&b.model);
             for (l, col) in columns.iter_mut().enumerate() {
-                let choice = if l == 3 && r.levels[3] == Level::None { r.levels[2] } else { r.levels[l] };
+                let choice = level_choice(r, l, tree, billboard.is_some(), self.model_fallback);
                 if l == 3 && !self.level32 {
                     continue;
                 }
@@ -280,7 +327,7 @@ impl Resolver<'_> {
             if l == 3 && !self.level32 {
                 continue;
             }
-            let choice = if l == 3 && r.levels[3] == Level::None { r.levels[2] } else { r.levels[l] };
+            let choice = level_choice(r, l, is_tree(b), lod.billboard.is_some(), self.model_fallback);
             *col = match choice {
                 Level::None => String::new(),
                 Level::Model(k) => lod.levels[usize::from(k)].clone().unwrap_or_default(),
