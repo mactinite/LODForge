@@ -204,11 +204,16 @@ pub fn face_normals(pos: &[[f32; 3]], tris: &[[u16; 3]]) -> Vec<[f32; 3]> {
     n.into_iter().map(|v| normalize(v, [0.0, 0.0, 1.0])).collect()
 }
 
-/// Per-vertex tangent and bitangent from the UV layout, orthogonal to the normal; the bitangent
-/// is `normal x tangent` flipped to the UV winding.
+/// Per-vertex `(tangent field, bitangent field)` from the UV layout, in the Bethesda convention:
+/// the game's Lighting VS builds its TBN rows as (bitangent field, tangent field, normal), so the
+/// normal map's x runs along the bitangent field and y along the tangent field. The bitangent
+/// field therefore holds dP/du (made orthogonal to the normal) and the tangent field holds
+/// `normal x bitangent` flipped to point along dP/dv. The bitangent is always `±normal x
+/// tangent`, as the runtime packs rebuild it from the tangent and a sign bit.
 pub fn tangents_from_uv(pos: &[[f32; 3]], uv: &[[f32; 2]], nrm: &[[f32; 3]], tris: &[[u16; 3]]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
-    let mut tan = vec![[0f32; 3]; pos.len()];
-    let mut bit = vec![[0f32; 3]; pos.len()];
+    // dP/du and dP/dv summed over each vertex's triangles.
+    let mut du = vec![[0f32; 3]; pos.len()];
+    let mut dv = vec![[0f32; 3]; pos.len()];
     for t in tris {
         let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
         let (e1, e2) = (sub(pos[b], pos[a]), sub(pos[c], pos[a]));
@@ -223,18 +228,20 @@ pub fn tangents_from_uv(pos: &[[f32; 3]], uv: &[[f32; 2]], nrm: &[[f32; 3]], tri
         let bv = [(e2[0] * d1[0] - e1[0] * d2[0]) * inv, (e2[1] * d1[0] - e1[1] * d2[0]) * inv, (e2[2] * d1[0] - e1[2] * d2[0]) * inv];
         for &i in &[a, b, c] {
             for k in 0..3 {
-                tan[i][k] += tv[k];
-                bit[i][k] += bv[k];
+                du[i][k] += tv[k];
+                dv[i][k] += bv[k];
             }
         }
     }
+    let mut tan = vec![[0f32; 3]; pos.len()];
+    let mut bit = vec![[0f32; 3]; pos.len()];
     for i in 0..pos.len() {
         let n = nrm[i];
-        let d = dot(n, tan[i]);
-        let t = normalize([tan[i][0] - n[0] * d, tan[i][1] - n[1] * d, tan[i][2] - n[2] * d], [1.0, 0.0, 0.0]);
-        let mut b = normalize(cross(n, t), [0.0, 1.0, 0.0]);
-        if dot(b, bit[i]) < 0.0 {
-            b = [-b[0], -b[1], -b[2]];
+        let d = dot(n, du[i]);
+        let b = normalize([du[i][0] - n[0] * d, du[i][1] - n[1] * d, du[i][2] - n[2] * d], [1.0, 0.0, 0.0]);
+        let mut t = normalize(cross(n, b), [0.0, 1.0, 0.0]);
+        if dot(t, dv[i]) < 0.0 {
+            t = [-t[0], -t[1], -t[2]];
         }
         tan[i] = t;
         bit[i] = b;
@@ -300,9 +307,67 @@ mod tests {
         assert_eq!(m.parts[1].positions[1], [2.0, 5.0, 20.0]);
         assert!(!p.source_normals && !p.source_tangents);
         assert_eq!(p.normals[0], [0.0, 0.0, 1.0]);
-        assert_eq!(p.tangents[0], [1.0, 0.0, 0.0]);
-        assert_eq!(p.bitangents[0], [0.0, 1.0, 0.0]);
+        // Generated tangents, Bethesda convention: u runs along +x (the bitangent field), v along
+        // +y (the tangent field).
+        assert_eq!(p.tangents[0], [0.0, 1.0, 0.0]);
+        assert_eq!(p.bitangents[0], [1.0, 0.0, 0.0]);
         assert!(p.colors.is_none());
         assert!(matches!(p.shader, ShaderSource::Lighting(_)));
+    }
+
+    /// The pack's sign bit as `tree_pack` computes it: whether `normal x tangent` is the bitangent.
+    fn sign(n: [f32; 3], t: [f32; 3], b: [f32; 3]) -> f32 {
+        dot(cross(n, t), b)
+    }
+
+    #[test]
+    fn generated_tangents_follow_the_game_frame() {
+        // A unit quad in the xy plane facing +z, u along +x and v along +y.
+        let pos = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
+        let nrm = [[0.0, 0.0, 1.0]; 4];
+        let tris = [[0u16, 1, 2], [0, 2, 3]];
+        let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let (t, b) = tangents_from_uv(&pos, &uv, &nrm, &tris);
+        for i in 0..4 {
+            // Tangent field = dP/dv, bitangent field = dP/du.
+            assert_eq!(t[i], [0.0, 1.0, 0.0]);
+            assert_eq!(b[i], [1.0, 0.0, 0.0]);
+            // The game's PS: world normal = x * bitangent + y * tangent + z * normal, so a
+            // normal-map texel tilted towards +u tilts the surface towards +x.
+            let tex = [0.6f32, 0.0, 0.8];
+            let w: Vec<f32> = (0..3).map(|k| tex[0] * b[i][k] + tex[1] * t[i][k] + tex[2] * nrm[i][k]).collect();
+            assert!((w[0] - 0.6).abs() < 1e-6 && w[1].abs() < 1e-6);
+            // b = -(n x t): the pack stores sign bit 0 and the runtime rebuilds b = -(n x t).
+            assert!(sign(nrm[i], t[i], b[i]) < -0.99);
+        }
+        // u mirrored (u along -x): the bitangent field flips, the tangent field stays, and the
+        // sign of the frame flips with it (b = +(n x t)).
+        let uv_m = [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let (t, b) = tangents_from_uv(&pos, &uv_m, &nrm, &tris);
+        for i in 0..4 {
+            assert_eq!(t[i], [0.0, 1.0, 0.0]);
+            assert_eq!(b[i], [-1.0, 0.0, 0.0]);
+            assert!(sign(nrm[i], t[i], b[i]) > 0.99);
+        }
+    }
+
+    #[test]
+    fn source_tangents_are_kept() {
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(Node { av: AvObject { net: ObjectNet::named("Root"), ..Default::default() }, children: vec![Some(1)], ..Default::default() }));
+        let mut s = shape("A", false);
+        s.shader_property = Some(2);
+        s.normals = vec![[0.0, 0.0, 1.0]; 3];
+        s.tangents = vec![[1.0, 0.0, 0.0]; 3];
+        s.bitangents = vec![[0.0, 1.0, 0.0]; 3];
+        s.update_vertex_desc();
+        nif.add_block(Block::TriShape(s));
+        nif.add_block(Block::LightingShader(LightingShader::default()));
+        let m = import("meshes\\x.nif", &nif.to_bytes().unwrap()).unwrap();
+        let p = &m.parts[0];
+        assert!(p.source_tangents);
+        // As stored (byte-quantized by the SSE vertex format), not swapped or regenerated.
+        assert!(dot(p.tangents[0], [1.0, 0.0, 0.0]) > 0.999);
+        assert!(dot(p.bitangents[0], [0.0, 1.0, 0.0]) > 0.999);
     }
 }
