@@ -3,6 +3,11 @@
 //! and LOD model from five views (top, four sides at 30 degrees above the horizon), plus the share
 //! of the full silhouette the LOD misses (lost volume) and adds (bloat).
 //! `lod_coverage <Data folder of the output> <MO2 mods folder> [count]`
+//!
+//! `--generated`: per full model, the installed LOD4 next to `lodforge_lodmodel`'s LOD4 without
+//! the outward fit, with it, and with it plus a tight loss tolerance (lost / added / triangles
+//! each, means at the end). `--models <file>` adds full models (one `meshes\...` path per line)
+//! that have no installed LOD pair, e.g. architecture and clutter.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -26,7 +31,11 @@ fn find(mods: &Path, out: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 fn tris(path: &Path, rel: &str) -> Option<Vec<[Vec3; 3]>> {
-    let m = lodforge_objlod::mesh::import(rel, &std::fs::read(path).ok()?).ok()?;
+    tris_bytes(rel, &std::fs::read(path).ok()?)
+}
+
+fn tris_bytes(rel: &str, bytes: &[u8]) -> Option<Vec<[Vec3; 3]>> {
+    let m = lodforge_objlod::mesh::import(rel, bytes).ok()?;
     let mut t = Vec::new();
     for p in &m.parts {
         for tri in &p.triangles {
@@ -67,7 +76,10 @@ fn mask(t: &[[Vec3; 3]], rot: Mat3, lo: [f32; 2], hi: [f32; 2]) -> Vec<bool> {
 }
 
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let all: Vec<String> = std::env::args().collect();
+    let generated = all.iter().any(|x| x == "--generated");
+    let models_file = all.iter().position(|x| x == "--models").and_then(|i| all.get(i + 1)).cloned();
+    let a: Vec<String> = all.iter().enumerate().filter(|(i, x)| !x.starts_with("--") && !(*i > 0 && all[i - 1] == "--models")).map(|(_, x)| x.clone()).collect();
     let out = PathBuf::from(&a[1]);
     let mods = PathBuf::from(&a[2]);
     let count: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(25);
@@ -94,11 +106,8 @@ fn main() {
             ("W", tilt * Mat3::from_rotation_z(270f32.to_radians())),
         ]
     };
-    println!("{:<52} {:>6} {:>5}  {:>5} {:>5} {:>5}  (IoU mean / worst view, lost, added: share of the full silhouette)", "LOD model", "full", "lod", "IoU", "worst", "lost");
-    let mut rows = Vec::new();
-    for (lod, full) in pairs {
-        let (Some(fp), Some(lp)) = (find(&mods, &out, &full), find(&mods, &out, &lod)) else { continue };
-        let (Some(ft), Some(lt)) = (tris(&fp, &full), tris(&lp, &lod)) else { continue };
+    // (IoU mean, IoU worst view, lost, added) of a result against the full model.
+    let compare = |ft: &[[Vec3; 3]], lt: &[[Vec3; 3]]| -> (f64, f64, f64, f64) {
         let (mut ious, mut lost_sum, mut add_sum) = (Vec::new(), 0.0, 0.0);
         for (_, rot) in &views {
             let pts = ft.iter().chain(lt.iter()).flatten().map(|v| *rot * *v);
@@ -107,7 +116,7 @@ fn main() {
                 lo = [lo[0].min(q.x), lo[1].min(q.y)];
                 hi = [hi[0].max(q.x), hi[1].max(q.y)];
             }
-            let (fm, lm) = (mask(&ft, *rot, lo, hi), mask(&lt, *rot, lo, hi));
+            let (fm, lm) = (mask(ft, *rot, lo, hi), mask(lt, *rot, lo, hi));
             let (mut i, mut u, mut f, mut lost, mut add) = (0usize, 0usize, 0usize, 0usize, 0usize);
             for k in 0..fm.len() {
                 i += usize::from(fm[k] && lm[k]);
@@ -120,9 +129,70 @@ fn main() {
             lost_sum += lost as f64 / f.max(1) as f64;
             add_sum += add as f64 / f.max(1) as f64;
         }
-        let mean = ious.iter().sum::<f64>() / ious.len() as f64;
-        let worst = ious.iter().cloned().fold(1.0, f64::min);
-        rows.push((lod.clone(), ft.len(), lt.len(), mean, worst, lost_sum / views.len() as f64, add_sum / views.len() as f64));
+        (ious.iter().sum::<f64>() / ious.len() as f64, ious.iter().cloned().fold(1.0, f64::min), lost_sum / views.len() as f64, add_sum / views.len() as f64)
+    };
+    if generated {
+        // Our generator's LOD4 next to the installed one: without the outward fit (v6), with
+        // it, and with it plus a tight silhouette loss tolerance.
+        let l0 = lodforge_lodmodel::LEVELS[0];
+        let variants: [(&str, Option<lodforge_lodmodel::LevelParams>); 4] = [
+            ("installed", None),
+            ("gen v6", Some(lodforge_lodmodel::LevelParams { fit_outward: false, loss_tol: 0.2, ..l0 })),
+            ("gen fit", Some(lodforge_lodmodel::LevelParams { loss_tol: 0.2, ..l0 })),
+            ("gen fit+tight", Some(l0)),
+        ];
+        let mut list: Vec<(String, Option<String>)> = pairs.iter().map(|(l, f)| (f.clone(), Some(l.clone()))).collect();
+        if let Some(path) = &models_file {
+            for line in std::fs::read_to_string(path).unwrap().lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                list.push((line.to_ascii_lowercase(), None));
+            }
+        }
+        let mut sums = vec![(0.0f64, 0.0f64, 0.0f64, 0usize, 0usize); variants.len()];
+        println!("{:<44} {:>6}  {}", "full model", "tris", variants.iter().map(|v| format!("{:>22}", format!("{} lost/added/tris", v.0))).collect::<Vec<_>>().join(""));
+        let mut shown = 0;
+        for (full, lod) in &list {
+            let Some(fp) = find(&mods, &out, full) else { continue };
+            let Ok(fb) = std::fs::read(&fp) else { continue };
+            let Some(ft) = tris_bytes(full, &fb) else { continue };
+            let mut cells = Vec::new();
+            let mut ok = true;
+            for (vi, (_, params)) in variants.iter().enumerate() {
+                let lt = match params {
+                    None => lod.as_ref().and_then(|l| find(&mods, &out, l).and_then(|p| tris(&p, l))),
+                    Some(p) => lodforge_lodmodel::generate(&fb, p, "lod").ok().and_then(|(b, _)| tris_bytes("lod.nif", &b)),
+                };
+                match lt {
+                    Some(lt) => {
+                        let c = compare(&ft, &lt);
+                        sums[vi].0 += c.0;
+                        sums[vi].1 += c.2;
+                        sums[vi].2 += c.3;
+                        sums[vi].3 += 1;
+                        sums[vi].4 += lt.len();
+                        cells.push(format!("{:>22}", format!("{:.3}/{:.3}/{}", c.2, c.3, lt.len())));
+                    }
+                    None if params.is_none() => cells.push(format!("{:>22}", "-")),
+                    None => ok = false,
+                }
+            }
+            if ok && shown < count {
+                shown += 1;
+                println!("{:<44} {:>6}  {}", full.rsplit('\\').next().unwrap(), ft.len(), cells.join(""));
+            }
+        }
+        for ((name, _), s) in variants.iter().zip(&sums) {
+            let n = s.3.max(1) as f64;
+            println!("{name:>14}: {} models, mean IoU {:.3}, lost {:.4}, added {:.4}, {} triangles", s.3, s.0 / n, s.1 / n, s.2 / n, s.4);
+        }
+        return;
+    }
+    println!("{:<52} {:>6} {:>5}  {:>5} {:>5} {:>5}  (IoU mean / worst view, lost, added: share of the full silhouette)", "LOD model", "full", "lod", "IoU", "worst", "lost");
+    let mut rows = Vec::new();
+    for (lod, full) in pairs {
+        let (Some(fp), Some(lp)) = (find(&mods, &out, &full), find(&mods, &out, &lod)) else { continue };
+        let (Some(ft), Some(lt)) = (tris(&fp, &full), tris(&lp, &lod)) else { continue };
+        let (mean, worst, lost, add) = compare(&ft, &lt);
+        rows.push((lod.clone(), ft.len(), lt.len(), mean, worst, lost, add));
     }
     rows.sort_by(|a, b| a.3.total_cmp(&b.3));
     for r in rows.iter().take(count) {

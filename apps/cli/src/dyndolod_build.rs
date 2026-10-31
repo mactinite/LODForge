@@ -235,6 +235,22 @@ pub struct Config {
     /// `keep` level coverage ([`LevelCoverage`]): billboard levels of non-tree bases without a
     /// billboard take model levels (export and generated LOD models).
     pub keep_levels: bool,
+    /// `--lod-models`: generated LOD models replace the generic ones, those in the base game's own
+    /// archives ([`is_base_game_archive`]) and in DynDOLOD Resources ([`is_dyndolod_resources`]);
+    /// those become the index's fallback ([`LodIndex::with_fallback`]) and still serve every level
+    /// nothing was generated for (window glow, water effects, passthru models, small pieces).
+    /// Any other mod's LOD model wins as before. Set before [`Config::rescan`].
+    pub prefer_generated_lod: bool,
+}
+
+/// The base game's own archives: Skyrim, Update, the official DLCs, Creation Club content and
+/// the Anniversary resource pack. A mod's archive (a plugin of its own) is not one of them.
+pub fn is_base_game_archive(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    // Creation Club archives: `cc` + author code + `sse` + number (`ccBGSSSE001-Fish.bsa`).
+    let b = name.as_bytes();
+    let creation_club = b.len() > 11 && name.starts_with("cc") && b[2..5].iter().all(u8::is_ascii_alphabetic) && &name[5..8] == "sse" && b[8..11].iter().all(u8::is_ascii_digit);
+    name.starts_with("skyrim - ") || creation_club || matches!(name.as_str(), "update.bsa" | "dawnguard.bsa" | "hearthfires.bsa" | "dragonborn.bsa" | "_resourcepack.bsa")
 }
 
 impl Config {
@@ -270,7 +286,7 @@ impl Config {
         let ini = Ini::read(&ini_path).with_context(|| format!("reading {}", ini_path.display()))?;
         let cfg = |k: &str| ini.get("DynDOLOD", k).unwrap_or("").to_string();
         let list = |k: &str| -> Vec<String> { cfg(k).split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect() };
-        let (index, mesh_paths) = lod_index(p, &ini, dir);
+        let (index, mesh_paths) = lod_index(p, &ini, dir, false);
         let parallax = parallax_diff(p);
         let lo = &p.load_order;
         let bases = lodforge_dyndolod::bases::read_bases(lo)?;
@@ -282,12 +298,12 @@ impl Config {
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
         let reference_states = lodforge_dyndolod::export::read_reference_states(lo)?;
-        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, material_objects, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()), keep_levels: false })
+        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, material_objects, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()), keep_levels: false, prefer_generated_lod: false })
     }
 
     /// Re-reads LOD model discovery after files were added to the VFS (generated LOD models).
     pub fn rescan(&mut self, p: &Profile) {
-        (self.index, self.mesh_paths) = lod_index(p, &self.ini, &self.dir);
+        (self.index, self.mesh_paths) = lod_index(p, &self.ini, &self.dir, self.prefer_generated_lod);
     }
 
     /// `[DynDOLOD]` value, empty when missing.
@@ -300,9 +316,10 @@ impl Config {
     }
 }
 
-/// LOD model discovery over the VFS (`Folder1..5`, `IgnoreLODMesh`, `misnamed.txt`) and the
-/// number of mesh paths seen.
-fn lod_index(p: &Profile, ini: &Ini, dir: &Path) -> (LodIndex, usize) {
+/// LOD model discovery over the VFS (`Folder1..5`, `IgnoreLODMesh`, `misnamed.txt`), the
+/// number of mesh paths seen; with `prefer_generated` the generic LOD models (base game archives,
+/// DynDOLOD Resources) go to the fallback ([`Config::prefer_generated_lod`]).
+fn lod_index(p: &Profile, ini: &Ini, dir: &Path, prefer_generated: bool) -> (LodIndex, usize) {
     let cfg = |k: &str| ini.get("DynDOLOD", k).unwrap_or("").to_string();
     let folders: Vec<String> = (1..=5).map(|i| cfg(&format!("Folder{i}"))).filter(|f| !f.is_empty()).collect();
     let ignore: Vec<String> = cfg("IgnoreLODMesh").split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect();
@@ -310,7 +327,38 @@ fn lod_index(p: &Profile, ini: &Ini, dir: &Path) -> (LodIndex, usize) {
         .map(|b| lodforge_dyndolod::ini::decode(&b).lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty() && !l.starts_with("//")).collect())
         .unwrap_or_default();
     let meshes = p.vfs.list_prefix("meshes\\");
-    (LodIndex::scan(meshes.iter().map(String::as_str), &folders, &ignore, &misnamed), meshes.len())
+    if !prefer_generated {
+        return (LodIndex::scan(meshes.iter().map(String::as_str), &folders, &ignore, &misnamed), meshes.len());
+    }
+    // Per mod folder: whether it is DynDOLOD Resources.
+    let mut resources: HashMap<PathBuf, bool> = HashMap::new();
+    let mut generic = |m: &str| match p.vfs.origin(m) {
+        Some(lodforge_archive::vfs::Origin::Archive(a)) => is_base_game_archive(a),
+        Some(lodforge_archive::vfs::Origin::Loose(path)) => mod_root(path, m).is_some_and(|root| *resources.entry(root.to_path_buf()).or_insert_with(|| is_dyndolod_resources(root))),
+        None => false,
+    };
+    let (fallback, own): (Vec<&String>, Vec<&String>) = meshes.iter().partition(|m| m.contains("_lod") && generic(m));
+    let index = LodIndex::scan(own.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed).with_fallback(LodIndex::scan(fallback.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed));
+    (index, meshes.len())
+}
+
+/// The folder a loose file `rel` (Data-relative) was found in: `path` minus `rel`.
+fn mod_root<'a>(path: &'a Path, rel: &str) -> Option<&'a Path> {
+    let mut root = path;
+    for _ in 0..rel.split('\\').count() {
+        root = root.parent()?;
+    }
+    Some(root)
+}
+
+/// DynDOLOD Resources (the generic LOD model set DynDOLOD ships): its MO2 meta.ini names the
+/// Nexus mod (52897 SE, 59686 LE), or the folder is called so (a manual install).
+pub fn is_dyndolod_resources(root: &Path) -> bool {
+    let name = root.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if name.contains("dyndolod resources") {
+        return true;
+    }
+    std::fs::read_to_string(root.join("meta.ini")).is_ok_and(|t| t.lines().any(|l| matches!(l.trim().to_ascii_lowercase().as_str(), "modid=52897" | "modid=59686")))
 }
 
 /// PGPatcher's `ParallaxGen_Diff.json` from the VFS (loose in Data or in any mod, last winner).
@@ -1555,6 +1603,17 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn base_game_archives() {
+        use std::path::Path;
+        for a in [r"D:\Skyrim\Data\Skyrim - Meshes1.bsa", r"Data\Update.bsa", "Dragonborn.bsa", "ccBGSSSE001-Fish.bsa", "_ResourcePack.bsa"] {
+            assert!(super::is_base_game_archive(Path::new(a)), "{a}");
+        }
+        for a in [r"mods\DynDOLOD Resources SE\DynDOLOD.bsa", "Majestic Mountains.bsa", "Skyrim 3D Rocks.bsa", "ccpatch.bsa", "CCOR.bsa"] {
+            assert!(!super::is_base_game_archive(Path::new(a)), "{a}");
+        }
+    }
 
     #[test]
     fn atlas_tile_sizes() {

@@ -26,7 +26,7 @@ pub const FILE_NAME: &str = "GrassMeshes.bin";
 
 /// Simplification of the decimated tier: grass is small (tens of units), so the error limit is a
 /// few units and at least a third of the triangles stay.
-const DECIMATE: lodforge_lodmodel::LevelParams = lodforge_lodmodel::LevelParams { max_error: 3.0, max_ratio: 0.35, min_triangles: 4, normal_weight: 0.3, uv_weight: 0.1, permissive: true, fill_tol: 1.0, loss_tol: 1.0, min_error: 3.0 };
+const DECIMATE: lodforge_lodmodel::LevelParams = lodforge_lodmodel::LevelParams { max_error: 3.0, max_ratio: 0.35, min_triangles: 4, normal_weight: 0.3, uv_weight: 0.1, permissive: true, fill_tol: 1.0, loss_tol: 1.0, min_error: 3.0, fit_outward: false };
 
 const TIER_SUFFIX: [&str; 3] = ["", "#decimated", "#card"];
 

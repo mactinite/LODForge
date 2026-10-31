@@ -76,6 +76,9 @@ pub struct LevelParams {
     pub loss_tol: f32,
     /// The error limit is halved down to this when the silhouette check fails.
     pub min_error: f32,
+    /// Push the simplified surface back out to the source ([`fit_outward`]): edge collapse keeps
+    /// a subset of the source vertices, so convex parts (peaks, ridges, corners) lose volume.
+    pub fit_outward: bool,
 }
 
 /// Defaults for model levels 0, 1, 2 (object LOD 4, 8, 16). LOD4 starts around 5 cells away
@@ -83,17 +86,19 @@ pub struct LevelParams {
 /// level doubles the distance. The runtime shows LOD4 from the edge of the loaded cells, about
 /// half that distance, so its silhouette tolerances are the tightest.
 pub const LEVELS: [LevelParams; 3] = [
-    LevelParams { max_error: 32.0, max_ratio: 0.3, min_triangles: 12, normal_weight: 0.5, uv_weight: 0.05, permissive: true, fill_tol: 0.2, loss_tol: 0.2, min_error: 4.0 },
-    LevelParams { max_error: 56.0, max_ratio: 0.15, min_triangles: 8, normal_weight: 0.25, uv_weight: 0.02, permissive: true, fill_tol: 0.25, loss_tol: 0.25, min_error: 8.0 },
-    LevelParams { max_error: 140.0, max_ratio: 0.08, min_triangles: 4, normal_weight: 0.1, uv_weight: 0.01, permissive: true, fill_tol: 0.4, loss_tol: 0.4, min_error: 20.0 },
+    LevelParams { max_error: 32.0, max_ratio: 0.3, min_triangles: 12, normal_weight: 0.5, uv_weight: 0.05, permissive: true, fill_tol: 0.2, loss_tol: 0.03, min_error: 4.0, fit_outward: true },
+    LevelParams { max_error: 56.0, max_ratio: 0.15, min_triangles: 8, normal_weight: 0.25, uv_weight: 0.02, permissive: true, fill_tol: 0.25, loss_tol: 0.06, min_error: 8.0, fit_outward: true },
+    LevelParams { max_error: 140.0, max_ratio: 0.08, min_triangles: 4, normal_weight: 0.1, uv_weight: 0.01, permissive: true, fill_tol: 0.4, loss_tol: 0.10, min_error: 20.0, fit_outward: true },
 ];
 
 /// Bumped whenever generation changes the output for the same input (cache key). 2: broken
 /// source UVs repaired ([`repair_uvs`]). 3: parts keep their extent ([`extent_locks`]). 4: a
 /// level that lost an end is redone with a larger goal ([`extent_lost`]). 5: the root node's own
 /// transform is ignored, as the engine does ([`collect`]). 6: the silhouette check ([`coverage`])
-/// lowers the error limit where the result fills or loses too much.
-pub const GENERATOR_VERSION: u32 = 6;
+/// lowers the error limit where the result fills or loses too much. 7: the simplified surface is
+/// pushed back out to the source ([`fit_outward`]), and the silhouette loss tolerances are 0.03 /
+/// 0.06 / 0.10 instead of 0.2 / 0.25 / 0.4.
+pub const GENERATOR_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stats {
@@ -362,7 +367,9 @@ pub fn repair_uvs(uvs: &mut [[f32; 2]], triangles: &[[u16; 3]]) -> usize {
 
 /// Simplifies all meshes together; returns per-mesh index lists (mesh-local) and what the passes
 /// reported.
-fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Simplified) {
+/// Per mesh: the simplified triangles (indices into the mesh's vertices) and the vertex
+/// positions to write (the source's, moved where [`fit_outward`] pushed them).
+fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3]>>, Simplified) {
     // One vertex buffer across meshes. Vertices are never shared between meshes, so material
     // borders are attribute seams for meshoptimizer and stay in place.
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -428,6 +435,7 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Simplified) {
     // never goes below the goal.
     let check = p.fill_tol < 1.0 || p.loss_tol < 1.0;
     let groups = groups(&positions, &indices, p.max_error, check, dbg);
+    let mut moved = positions.clone();
     let mut out: Vec<u32> = Vec::new();
     let mut rep = Simplified { error: 0.0, error_limit: p.max_error, fill: 0.0, loss: 0.0 };
     for g in &groups {
@@ -477,6 +485,24 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Simplified) {
                 break;
             }
         }
+        if p.fit_outward && got.len() < g.indices.len() {
+            let before: Vec<(u32, [f32; 3])> = got.iter().map(|&v| (v, moved[v as usize])).collect();
+            // The fit keeps itself only where it brings the surface closer to the source; it
+            // must also not merge what the silhouette check keeps apart.
+            if fit_outward(&positions, &g.indices, &got, &extent, p.max_error, &mut moved) {
+                let fitted = match (&frames, &source_masks) {
+                    (Some(f), Some(s)) => coverage(s, &f.masks(&moved, &got)),
+                    _ => cov,
+                };
+                if fitted.0 > p.fill_tol.max(cov.0) {
+                    for (v, q) in before {
+                        moved[v as usize] = q;
+                    }
+                } else {
+                    cov = fitted;
+                }
+            }
+        }
         if dbg {
             eprintln!("  group {:?}: {source} -> {} triangles, error {err:.1} (limit {max_error}), fill {:.2} loss {:.2}", g.part, got.len() / 3, cov.0, cov.1);
         }
@@ -496,7 +522,259 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Simplified) {
             per[mi].extend(t.iter().map(|&i| i - starts[mi]));
         }
     }
-    (per, rep)
+    let per_pos: Vec<Vec<[f32; 3]>> = meshes.iter().enumerate().map(|(mi, m)| moved[starts[mi] as usize..starts[mi] as usize + m.positions.len()].to_vec()).collect();
+    (per, per_pos, rep)
+}
+
+/// Triangles in a uniform grid for nearest-triangle queries within a cap distance.
+struct TriGrid {
+    cell: f32,
+    cap: f32,
+    tris: Vec<[[f32; 3]; 3]>,
+    normals: Vec<[f32; 3]>,
+    map: HashMap<[i32; 3], Vec<u32>>,
+}
+
+impl TriGrid {
+    fn new(tris: Vec<[[f32; 3]; 3]>, cap: f32) -> TriGrid {
+        let cell = (cap * 2.0).max(1.0);
+        let mut map: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+        let normals = tris
+            .iter()
+            .map(|q| {
+                let n = cross3(sub3(q[1], q[0]), sub3(q[2], q[0]));
+                let l = dot3(n, n).sqrt();
+                if l > 0.0 { n.map(|x| x / l) } else { [0.0; 3] }
+            })
+            .collect();
+        for (ti, q) in tris.iter().enumerate() {
+            let lo = [0, 1, 2].map(|k| ((q[0][k].min(q[1][k]).min(q[2][k]) - cap) / cell).floor() as i32);
+            let hi = [0, 1, 2].map(|k| ((q[0][k].max(q[1][k]).max(q[2][k]) + cap) / cell).floor() as i32);
+            for x in lo[0]..=hi[0] {
+                for y in lo[1]..=hi[1] {
+                    for z in lo[2]..=hi[2] {
+                        map.entry([x, y, z]).or_default().push(ti as u32);
+                    }
+                }
+            }
+        }
+        TriGrid { cell, cap, tris, normals, map }
+    }
+
+    /// The nearest triangle facing like `facing` (unit normal) within the cap: (distance,
+    /// triangle, barycentrics, whether `p` lies outside it).
+    fn nearest(&self, p: [f32; 3], facing: [f32; 3]) -> Option<(f32, usize, [f32; 3], bool)> {
+        let c = p.map(|x| (x / self.cell).floor() as i32);
+        let mut best: Option<(f32, usize, [f32; 3], bool)> = None;
+        for &ti in self.map.get(&c)? {
+            let n = self.normals[ti as usize];
+            if dot3(n, facing) < 0.5 {
+                continue;
+            }
+            let q = self.tris[ti as usize];
+            let (cp, bary) = closest_on_triangle(p, q[0], q[1], q[2]);
+            let d = sub3(p, cp);
+            let dist = dot3(d, d).sqrt();
+            if dist <= self.cap && best.is_none_or(|b| dist < b.0) {
+                best = Some((dist, ti as usize, bary, dot3(d, n) > 0.0));
+            }
+        }
+        best
+    }
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+/// Points on triangles, about one per `spacing`^2 of area (at least the centroid), each with its
+/// triangle's unit normal.
+fn surface_samples(tris: &[[[f32; 3]; 3]], spacing: f32) -> Vec<([f32; 3], [f32; 3])> {
+    let mut out = Vec::new();
+    for q in tris {
+        let (a, b, c) = (q[0], q[1], q[2]);
+        let n = cross3(sub3(b, a), sub3(c, a));
+        let area = 0.5 * dot3(n, n).sqrt();
+        if area <= 0.0 {
+            continue;
+        }
+        let n = n.map(|x| x / (2.0 * area));
+        let k = ((area / (spacing * spacing)).sqrt().ceil() as usize).clamp(1, 6);
+        for i in 0..k {
+            for j in 0..k - i {
+                let (u, v) = ((i as f32 + 1.0 / 3.0) / k as f32, (j as f32 + 1.0 / 3.0) / k as f32);
+                let w = 1.0 - u - v;
+                out.push(([a[0] * w + b[0] * u + c[0] * v, a[1] * w + b[1] * u + c[1] * v, a[2] * w + b[2] * u + c[2] * v], n));
+            }
+        }
+    }
+    out
+}
+
+/// Pushes a simplified surface back out to its source. Edge collapse keeps a subset of the
+/// source vertices, so wherever the source is convex (peaks, ridges, corners) the result cuts
+/// inside it and the silhouette shrinks. Points sampled on the source triangles (`source`) that
+/// lie outside the simplified surface (`lod`, same vertex space) vote, by their distance and the
+/// barycentric weight of their nearest point, on the three vertices of the nearest simplified
+/// triangle facing the same way (so the far side of a thin part never pushes the near side);
+/// each vertex position (coincident vertices together, so seams stay closed) moves along its
+/// area-weighted surface normal by the weighted 85th percentile of its votes (points inside vote
+/// 0, so one spike cannot inflate a face), at most `max_error`. Two rounds; locked (extent)
+/// vertices stay. The result is kept only if the mismatch both ways (source outside the result
+/// plus result outside the source, mean distance over surface samples) drops; else `moved` is
+/// left as it was. Returns whether it was kept.
+/// Quantile of a vertex's votes it moves to: the median balances cutting inside a convex bump
+/// against overshooting beside it (tuned on 203 landscape and 40 architecture / clutter models with
+/// the `lod_coverage --generated` example: 0.5 / 2 beat 0.7 and 0.85, and weight 1).
+const FIT_QUANTILE: f32 = 0.5;
+/// Weight of the source sticking out of the result against the result sticking out of the source
+/// in [`fit_outward`]'s keep test: a shrunken peak against the sky shows more than a slight bulge.
+const FIT_LOSS_WEIGHT: f32 = 2.0;
+
+fn fit_outward(positions: &[[f32; 3]], source: &[u32], lod: &[u32], locked: &[bool], max_error: f32, moved: &mut [[f32; 3]]) -> bool {
+    let key = |v: u32| positions[v as usize].map(f32::to_bits);
+    let lod_tris: Vec<[u32; 3]> = lod.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+    if lod_tris.is_empty() {
+        return false;
+    }
+    let spacing = (max_error * 0.5).max(1.0);
+    let src_tris: Vec<[[f32; 3]; 3]> = source.chunks_exact(3).map(|t| [0, 1, 2].map(|k| positions[t[k] as usize])).collect();
+    let src_samples = surface_samples(&src_tris, spacing);
+    let src_grid = TriGrid::new(src_tris, max_error);
+    let lod_pos = |m: &[[f32; 3]]| -> Vec<[[f32; 3]; 3]> { lod_tris.iter().map(|t| t.map(|v| m[v as usize])).collect() };
+    // Mean distance of the source outside the result plus of the result outside the source.
+    let mismatch = |m: &[[f32; 3]]| -> f32 {
+        let grid = TriGrid::new(lod_pos(m), max_error);
+        let a = src_samples.iter().filter_map(|&(s, n)| grid.nearest(s, n)).map(|h| if h.3 { h.0 } else { 0.0 }).sum::<f32>() / src_samples.len().max(1) as f32;
+        let lod_samples = surface_samples(&lod_pos(m), spacing);
+        let b = lod_samples.iter().filter_map(|&(s, n)| src_grid.nearest(s, n)).map(|h| if h.3 { h.0 } else { 0.0 }).sum::<f32>() / lod_samples.len().max(1) as f32;
+        FIT_LOSS_WEIGHT * a + b
+    };
+    let before_err = mismatch(moved);
+    let before: Vec<(u32, [f32; 3])> = lod.iter().map(|&v| (v, moved[v as usize])).collect();
+    for _round in 0..2 {
+        let grid = TriGrid::new(lod_pos(moved), max_error);
+        // Votes per position: (distance outside, weight); inside samples vote 0.
+        let mut votes: HashMap<[u32; 3], Vec<(f32, f32)>> = HashMap::new();
+        for &(s, n) in &src_samples {
+            let Some((d, ti, bary, outside)) = grid.nearest(s, n) else { continue };
+            for (k, &v) in lod_tris[ti].iter().enumerate() {
+                if bary[k] > 0.0 {
+                    votes.entry(key(v)).or_default().push((if outside { d } else { 0.0 }, bary[k]));
+                }
+            }
+        }
+        // Area-weighted normals per position, from the simplified surface.
+        // Per position: summed face normals, summed face normal lengths (how much the faces
+        // agree on a direction) and the summed / counted edge lengths around it.
+        let mut normals: HashMap<[u32; 3], ([f32; 3], f32, f32, u32)> = HashMap::new();
+        for t in &lod_tris {
+            let q = t.map(|v| moved[v as usize]);
+            let n = cross3(sub3(q[1], q[0]), sub3(q[2], q[0]));
+            let nl = dot3(n, n).sqrt();
+            for (i, &v) in t.iter().enumerate() {
+                let e = normals.entry(key(v)).or_insert(([0.0; 3], 0.0, 0.0, 0));
+                for k in 0..3 {
+                    e.0[k] += n[k];
+                }
+                e.1 += nl;
+                for j in [(i + 1) % 3, (i + 2) % 3] {
+                    let d = sub3(q[j], q[i]);
+                    e.2 += dot3(d, d).sqrt();
+                    e.3 += 1;
+                }
+            }
+        }
+        let mut shift: HashMap<[u32; 3], [f32; 3]> = HashMap::new();
+        for (k, mut list) in votes {
+            list.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let total: f32 = list.iter().map(|x| x.1).sum();
+            let (mut acc, mut d) = (0.0, 0.0);
+            for (dist, w) in &list {
+                acc += w;
+                if acc >= FIT_QUANTILE * total {
+                    d = *dist;
+                    break;
+                }
+            }
+            let Some(&(n, total, edges, count)) = normals.get(&k) else { continue };
+            let nl = dot3(n, n).sqrt();
+            // Faces that disagree on a direction (a lid meeting the staves, a fold, a seam
+            // between parts) give no direction to move along; a vertex never moves more than
+            // half its mean edge length, so it cannot become a spike.
+            if d > 0.0 && nl > 0.5 * total && count > 0 {
+                let d = d.min(max_error).min(0.5 * edges / count as f32);
+                shift.insert(k, n.map(|x| x / nl * d));
+            }
+        }
+        if shift.is_empty() {
+            break;
+        }
+        let mut done = std::collections::HashSet::new();
+        for &v in lod {
+            if locked[v as usize] || !done.insert(v) {
+                continue;
+            }
+            if let Some(s) = shift.get(&key(v)) {
+                let p = &mut moved[v as usize];
+                for k in 0..3 {
+                    p[k] += s[k];
+                }
+            }
+        }
+    }
+    if mismatch(moved) < before_err * 0.98 {
+        true
+    } else {
+        for (v, q) in before {
+            moved[v as usize] = q;
+        }
+        false
+    }
+}
+
+/// The point of triangle `abc` closest to `p`, and its barycentric weights (Ericson, Real-Time
+/// Collision Detection 5.1.5).
+fn closest_on_triangle(p: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let sub = |x: [f32; 3], y: [f32; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+    let at = |u: f32, v: f32, w: f32| [a[0] * u + b[0] * v + c[0] * w, a[1] * u + b[1] * v + c[1] * w, a[2] * u + b[2] * v + c[2] * w];
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot3(ab, ap), dot3(ac, ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (a, [1.0, 0.0, 0.0]);
+    }
+    let bp = sub(p, b);
+    let (d3, d4) = (dot3(ab, bp), dot3(ac, bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return (b, [0.0, 1.0, 0.0]);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return (at(1.0 - v, v, 0.0), [1.0 - v, v, 0.0]);
+    }
+    let cp = sub(p, c);
+    let (d5, d6) = (dot3(ab, cp), dot3(ac, cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return (c, [0.0, 0.0, 1.0]);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return (at(1.0 - w, 0.0, w), [1.0 - w, 0.0, w]);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (at(0.0, 1.0 - w, w), [0.0, 1.0 - w, w]);
+    }
+    let denom = 1.0 / (va + vb + vc);
+    let (v, w) = (vb * denom, vc * denom);
+    (at(1.0 - v - w, v, w), [1.0 - v - w, v, w])
 }
 
 /// What [`simplify`] reports besides the triangles.
@@ -1001,7 +1279,7 @@ fn generate_impl(nif: &Nif, p: &LevelParams, name: &str, keep_names: bool, pose:
     if meshes.is_empty() {
         return Err(Skip::NoGeometry);
     }
-    let (per, sim) = simplify(&meshes, p);
+    let (per, moved, sim) = simplify(&meshes, p);
     if std::env::var_os("LODFORGE_LODMODEL_DEBUG").is_some() {
         eprintln!("meshes {} tris {:?} -> {:?} err {} (limit {}) fill {:.2} loss {:.2}", meshes.len(), meshes.iter().map(|m| m.triangles.len()).collect::<Vec<_>>(), per.iter().map(|v| v.len() / 3).collect::<Vec<_>>(), sim.error, sim.error_limit, sim.fill, sim.loss);
     }
@@ -1015,7 +1293,7 @@ fn generate_impl(nif: &Nif, p: &LevelParams, name: &str, keep_names: bool, pose:
     out.header.block_type_index = vec![0];
     out.add_block(Block::Node(Node { av: AvObject { net: ObjectNet::named(name), ..Default::default() }, ..Default::default() }));
     let mut children = Vec::new();
-    for (m, idx) in meshes.iter().zip(per) {
+    for ((m, idx), moved) in meshes.iter().zip(per).zip(&moved) {
         if idx.is_empty() {
             continue;
         }
@@ -1039,7 +1317,7 @@ fn generate_impl(nif: &Nif, p: &LevelParams, name: &str, keep_names: bool, pose:
             tris.push(tri);
         }
         let pick3 = |src: &Vec<[f32; 3]>| -> Vec<[f32; 3]> { order.iter().map(|&i| src[i]).collect() };
-        let positions = pick3(&m.positions);
+        let positions = pick3(moved);
         let (center, radius) = bounds(&positions);
         let ts = out.add_block(Block::TextureSet(m.textures.clone()));
         let mut sh = m.shader.clone().unwrap_or_default();
@@ -1151,6 +1429,72 @@ mod tests {
             }
         }
         (lo, hi)
+    }
+
+    /// A bumpy sphere (a boulder): the simplified surface cuts inside the bumps; the outward fit
+    /// pushes it back, so the share of the source outside the result drops.
+    #[test]
+    fn outward_fit_keeps_volume() {
+        let mut s = TriShape::default();
+        let (segs, rings, r) = (48u16, 24u16, 300.0f32);
+        for j in 0..=rings {
+            let t = f32::from(j) / f32::from(rings) * std::f32::consts::PI;
+            for i in 0..=segs {
+                let a = f32::from(i) / f32::from(segs) * std::f32::consts::TAU;
+                // Ridges: radius varies with both angles.
+                let rr = r + 40.0 * ((a * 7.0).sin() * (t * 5.0).sin()).abs();
+                let n = [t.sin() * a.cos(), t.sin() * a.sin(), t.cos()];
+                s.positions.push(n.map(|x| x * rr));
+                s.normals.push(n);
+                s.uvs.push([f32::from(i) / f32::from(segs), f32::from(j) / f32::from(rings)]);
+            }
+        }
+        let w = segs + 1;
+        for j in 0..rings {
+            for i in 0..segs {
+                let p = j * w + i;
+                s.triangles.push([p, p + w, p + 1]);
+                s.triangles.push([p + 1, p + w, p + w + 1]);
+            }
+        }
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(Node::default()));
+        let ts = nif.add_block(Block::TextureSet(vec!["textures\\a.dds".into()]));
+        let sh = nif.add_block(Block::LightingShader(LightingShader { texture_set: Some(ts), ..Default::default() }));
+        s.shader_property = Some(sh);
+        s.vertex_desc = VertexDesc::with_attributes(true, true, true, false, false).0;
+        let src = s.clone();
+        let si = nif.add_block(Block::TriShape(s));
+        if let Block::Node(r) = &mut nif.blocks[0] {
+            r.children = vec![Some(si)];
+        }
+        // Mean distance of source vertices outside the result (nearest triangle, signed).
+        let outside = |out: &Nif| -> f32 {
+            let t = out.blocks.iter().find_map(|b| if let Block::TriShape(t) = b { Some(t.clone()) } else { None }).unwrap();
+            let mut sum = 0.0;
+            for p in &src.positions {
+                let mut best = (f32::MAX, 0.0f32);
+                for tri in &t.triangles {
+                    let q = tri.map(|i| t.positions[i as usize]);
+                    let (cp, _) = closest_on_triangle(*p, q[0], q[1], q[2]);
+                    let d = [p[0] - cp[0], p[1] - cp[1], p[2] - cp[2]];
+                    let dist = dot3(d, d).sqrt();
+                    if dist < best.0 {
+                        let e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
+                        let e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+                        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                        best = (dist, if dot3(d, n) > 0.0 { dist } else { 0.0 });
+                    }
+                }
+                sum += best.1;
+            }
+            sum / src.positions.len() as f32
+        };
+        let no_fit = LevelParams { fit_outward: false, ..LEVELS[0] };
+        let (a, _) = generate_nif(&nif, &no_fit, "t").unwrap();
+        let (b, st) = generate_nif(&nif, &LEVELS[0], "t").unwrap();
+        let (oa, ob) = (outside(&a), outside(&b));
+        assert!(ob < 0.6 * oa, "outside without fit {oa:.2}, with fit {ob:.2} ({st:?})");
     }
 
     /// A deck of thin closed planks (a stockade bridge, a walkway) keeps its length at every
@@ -1425,3 +1769,4 @@ mod file_tests {
         }
     }
 }
+

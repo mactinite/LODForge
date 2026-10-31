@@ -406,6 +406,9 @@ pub fn run(a: &Args) -> Result<()> {
                 if a.dyn_opts.lod_models {
                     let t = Instant::now();
                     begin(a.json, "all", "lod-models", None);
+                    // Generated LOD models replace the base game's own; any mod's still win.
+                    c.prefer_generated_lod = true;
+                    c.rescan(&p);
                     let selected: Vec<&lodforge_esp::Worldspace> = dyn_worlds.iter().filter(|w| worlds.iter().any(|n| n.eq_ignore_ascii_case(&w.editor_id))).collect();
                     let min_size = crate::lod_models::min_size(a.dyn_opts.lod_model_min_size.as_deref(), c.keep_levels);
                     let items = crate::lod_models::plan(&p, &c, &selected, &crate::lod_models::Policy { min_size, all: false });

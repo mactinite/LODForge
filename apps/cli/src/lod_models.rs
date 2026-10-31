@@ -158,6 +158,7 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
     // Per full model: the levels any of its bases needs.
     #[allow(clippy::type_complexity)]
     let mut by_model: BTreeMap<String, (HashSet<u8>, [f32; 3], usize, Vec<String>, usize)> = BTreeMap::new();
+    let own_index = c.prefer_generated_lod.then(|| c.index.without_fallback());
     crate::dyndolod_build::with_resolver(p, c, |r| {
         for (id, (refs, scale, open)) in &used {
             let Some(b) = c.bases.get(id) else { continue };
@@ -175,9 +176,18 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
             let below = model.strip_prefix("meshes\\").unwrap_or(&model).to_string();
             // The rule as it would apply if every model level existed.
             let Some(rule) = select_mask_rule(&c.rules, &below, false, &|l| !matches!(l, Level::Billboard(_) | Level::None)) else { continue };
-            let lod = r.resolve(b);
+            // With generated LOD preferred, the generic models (index fallback) do not count as
+            // installed, and every level they gave this base is generated whatever its size.
+            let lod = match &own_index {
+                Some(own) => lodforge_dyndolod::assign::Resolver { index: own, ..*r }.resolve(b),
+                None => r.resolve(b),
+            };
+            let had = match c.index.fallback().filter(|_| c.prefer_generated_lod) {
+                Some(fb) => lodforge_dyndolod::assign::Resolver { index: fb, ..*r }.resolve(b).levels.map(|l| l.is_some()),
+                None => [false; 4],
+            };
             if std::env::var("LODFORGE_PLAN_TRACE").is_ok_and(|t| edid.contains(&t.to_ascii_lowercase())) {
-                eprintln!("plan-trace {} {model} rule {:?} lod {:?} scale {scale}", b.editor_id, rule.levels, lod.levels);
+                eprintln!("plan-trace {} {model} rule {:?} lod {:?} base game {had:?} scale {scale}", b.editor_id, rule.levels, lod.levels);
             }
             let ext = [0, 1, 2].map(|k| f32::from(b.bounds[k + 3]) - f32::from(b.bounds[k]));
             let size = ext.iter().copied().fold(0.0f32, f32::max) * scale;
@@ -191,7 +201,7 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
                 if let Level::Model(k) = choice
                     && k < 3
                     && (policy.all || lod.levels[usize::from(k)].is_none())
-                    && size >= policy.min_size[usize::from(k)]
+                    && (size >= policy.min_size[usize::from(k)] || had[usize::from(k)])
                 {
                     need.insert(k);
                 }

@@ -16,6 +16,8 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Default, Clone)]
 pub struct LodIndex {
     by_name: HashMap<String, String>,
+    /// Models consulted only where this index has none ([`LodIndex::with_fallback`]).
+    fallback: Option<Box<LodIndex>>,
 }
 
 impl LodIndex {
@@ -35,10 +37,33 @@ impl LodIndex {
                 by_name.insert(name.to_string(), p.to_string());
             }
         }
-        LodIndex { by_name }
+        LodIndex { by_name, fallback: None }
+    }
+
+    /// This index with `fallback` behind it: name lookups ([`LodIndex::get`]) try this index
+    /// first, and [`lod_set_with`] takes the fallback's files only for levels this index leaves
+    /// empty (so a fallback `_lod_0h` snow variant never beats this index's `_lod_0`).
+    pub fn with_fallback(mut self, fallback: LodIndex) -> LodIndex {
+        self.fallback = (!fallback.is_empty()).then(|| Box::new(fallback));
+        self
+    }
+
+    /// This index without its fallback.
+    pub fn without_fallback(&self) -> LodIndex {
+        LodIndex { by_name: self.by_name.clone(), fallback: None }
+    }
+
+    /// The fallback index, if any.
+    pub fn fallback(&self) -> Option<&LodIndex> {
+        self.fallback.as_deref()
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
+        self.get_own(name).or_else(|| self.fallback.as_ref().and_then(|f| f.get(name)))
+    }
+
+    /// [`LodIndex::get`] without the fallback.
+    pub fn get_own(&self, name: &str) -> Option<&str> {
         self.by_name.get(&name.to_ascii_lowercase()).map(String::as_str)
     }
 
@@ -52,7 +77,7 @@ impl LodIndex {
 
     /// True if any indexed name starts with `prefix` (lower-case).
     pub fn any_with_prefix(&self, prefix: &str) -> bool {
-        self.by_name.keys().any(|k| k.starts_with(prefix))
+        self.by_name.keys().any(|k| k.starts_with(prefix)) || self.fallback.as_ref().is_some_and(|f| f.any_with_prefix(prefix))
     }
 }
 
@@ -109,6 +134,22 @@ pub fn lod_set(index: &LodIndex, stem: &str, crc: Option<u32>, snow: [Snow; 4], 
 /// [`lod_set`]; `allow_plain = false` only accepts `<stem>_<crc>` models (a full model that a
 /// replacer mod changed, see [`MeshCrcTable`]).
 pub fn lod_set_with(index: &LodIndex, stem: &str, crc: Option<u32>, snow: [Snow; 4], passthru_first: bool, allow_plain: bool) -> [Option<String>; 4] {
+    let mut levels = lod_set_own(index, stem, crc, snow, passthru_first, allow_plain);
+    if let Some(fb) = index.fallback()
+        && levels.iter().any(Option::is_none)
+    {
+        let more = lod_set_with(fb, stem, crc, snow, passthru_first, allow_plain);
+        for (l, m) in levels.iter_mut().zip(more) {
+            if l.is_none() {
+                *l = m;
+            }
+        }
+    }
+    levels
+}
+
+/// [`lod_set_with`] over one index's own files.
+fn lod_set_own(index: &LodIndex, stem: &str, crc: Option<u32>, snow: [Snow; 4], passthru_first: bool, allow_plain: bool) -> [Option<String>; 4] {
     let stem = stem.to_ascii_lowercase();
     let variants: Vec<String> = {
         let mut v = Vec::new();
@@ -120,7 +161,7 @@ pub fn lod_set_with(index: &LodIndex, stem: &str, crc: Option<u32>, snow: [Snow;
         }
         v
     };
-    let lookup = |name: &str| -> Option<String> { index.get(name).map(str::to_string) };
+    let lookup = |name: &str| -> Option<String> { index.get_own(name).map(str::to_string) };
     let numbered = |base: &str, n: usize| -> Option<String> {
         let suffix = match snow[n.min(3)] {
             Snow::Heavy => Some('h'),
@@ -259,6 +300,22 @@ mod tests {
         assert_eq!(n(&lod_set(&i, "farm", None, [Snow::None; 4], false)), ["farm_lod.nif", "farm_lod.nif", "farm_lod.nif", ""]);
         assert_eq!(n(&lod_set(&i, "mc", None, [Snow::Light; 4], false)), ["mc_lod_0l.nif", "mc_lod_1.nif", "mc_lod_2.nif", ""]);
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    /// The fallback fills only levels the index leaves empty: a generated `_lod_0` keeps level 0
+    /// against the fallback's `_lod_0h` snow variant, the fallback's coarser levels and glow
+    /// models still serve.
+    #[test]
+    fn fallback_fills_empty_levels_only() {
+        let n = |s: &[Option<String>; 4]| s.iter().map(|v| v.as_deref().map(|p| p.rsplit('\\').next().unwrap().to_string()).unwrap_or_default()).collect::<Vec<_>>();
+        let own = index(&["mc_lod_0.nif"]);
+        let i = own.with_fallback(index(&["mc_lod_0h.nif", "mc_lod_1.nif", "mc_lod_2.nif", "mcglow_lod_0.nif"]));
+        assert_eq!(n(&lod_set(&i, "mc", None, [Snow::Heavy; 4], false)), ["mc_lod_0.nif", "mc_lod_1.nif", "mc_lod_2.nif", ""]);
+        assert!(i.get("mcglow_lod_0.nif").is_some() && i.get_own("mcglow_lod_0.nif").is_none());
+        // Nothing generated: the fallback's set as it is.
+        let none = index(&[]).with_fallback(index(&["rock_lod_0h.nif", "rock_lod_1.nif"]));
+        assert_eq!(n(&lod_set(&none, "rock", None, [Snow::Heavy; 4], false)), ["rock_lod_0h.nif", "rock_lod_1.nif", "", ""]);
+        assert_eq!(n(&lod_set(&none.without_fallback(), "rock", None, [Snow::Heavy; 4], false)), ["", "", "", ""]);
     }
 
     #[test]
