@@ -277,13 +277,13 @@ pub fn build(p: &mut Profile, out: &Path, s: &Settings, write: WriteOptions) -> 
     let dir = crate::instances::out_dir(out);
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".lfg")).collect();
     files.sort();
-    let mut models: BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)> = BTreeMap::new();
+    let mut models: BTreeMap<String, crate::tree_pack::PackModel> = BTreeMap::new();
     for f in &files {
         let g = GrassFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for t in &g.types {
             for suffix in TIER_SUFFIX {
                 let key = format!("{}{suffix}", t.model);
-                models.entry(key.clone()).or_insert_with(|| (key, Vec::new(), Vec::new()));
+                models.entry(key.clone()).or_insert_with(|| (key, Vec::new(), Vec::new(), None));
             }
         }
     }
@@ -310,7 +310,7 @@ pub fn build(p: &mut Profile, out: &Path, s: &Settings, write: WriteOptions) -> 
         }
     }
     let complex_textures = complex_diffuses(p, &grass_models);
-    let s = &Settings { tile_cap: s.tile_cap, page: s.page, complex: complex_textures.clone() };
+    let s = &Settings { tile_cap: s.tile_cap, page: s.page, complex: complex_textures.clone(), own_textures: Default::default() };
     let cards = render_cards(p, &grass_models, &work, &complex_textures)?;
     let p: &Profile = p;
     let load = |key: &str| -> Option<LodMesh> {

@@ -72,8 +72,9 @@ pub struct Cluster {
     pub max: [f32; 3],
 }
 
-/// One atlas page (`MPPG`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// One atlas page (`MPPG`). Several pages may name the same textures (draw pages of one atlas
+/// page with different snow materials); the runtime loads each texture once.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Page {
     pub width: u32,
     pub height: u32,
@@ -84,6 +85,10 @@ pub struct Page {
     pub class: u8,
     pub albedo: String,
     pub normal: String,
+    /// `MPSN`: the directional (snow) material the runtime gives the page's proxy instead of the
+    /// engine LOD material of its class (drawn with the non-HD LOD technique, vertex alpha as the
+    /// snow mask, as the full models are); `None`: the class's engine LOD material.
+    pub snow: Option<crate::statics::Snow>,
 }
 
 /// One merged model (`MPMS`).
@@ -133,6 +138,17 @@ impl MeshPack {
             b.str(&p.normal);
         }
         chunks.push(Chunk { tag: *b"MPPG", data: b.0 });
+        if self.pages.iter().any(|p| p.snow.is_some()) {
+            let mut b = Buf::default();
+            b.u32(self.pages.len() as u32);
+            for p in &self.pages {
+                b.u8(u8::from(p.snow.is_some()));
+                if let Some(sn) = &p.snow {
+                    sn.write(&mut b);
+                }
+            }
+            chunks.push(Chunk { tag: *b"MPSN", data: b.0 });
+        }
         let mut b = Buf::default();
         b.u32(self.meshes.len() as u32);
         for m in &self.meshes {
@@ -191,7 +207,17 @@ impl MeshPack {
             for _ in 0..r.u32()? {
                 let (width, height, mips, alpha_threshold) = (r.u32()?, r.u32()?, u32::from(r.u16()?), r.u8()?);
                 let class = r.u8()?;
-                pack.pages.push(Page { width, height, mips, alpha_threshold, class, albedo: r.str()?, normal: r.str()? });
+                pack.pages.push(Page { width, height, mips, alpha_threshold, class, albedo: r.str()?, normal: r.str()?, snow: None });
+            }
+        }
+        if let Some(ch) = c.chunk(b"MPSN") {
+            let mut r = Cur::new(&ch.data);
+            let n = r.u32()? as usize;
+            for i in 0..n {
+                let sn = if r.u8()? != 0 { Some(crate::statics::Snow::read(&mut r)?) } else { None };
+                if let Some(p) = pack.pages.get_mut(i) {
+                    p.snow = sn;
+                }
             }
         }
         if let Some(ch) = c.chunk(b"MPMS") {
@@ -331,8 +357,8 @@ mod tests {
     #[test]
     fn clusters_pad_and_round_trip() {
         let mut pack = MeshPack::default();
-        pack.pages.push(Page { width: 4096, height: 4096, mips: 13, alpha_threshold: 128, class: 0, albedo: "a.dds".into(), normal: "a_n.dds".into() });
-        pack.pages.push(Page { width: 2048, height: 2048, mips: 12, alpha_threshold: 128, class: 2, albedo: "b.dds".into(), normal: "b_n.dds".into() });
+        pack.pages.push(Page { width: 4096, height: 4096, mips: 13, alpha_threshold: 128, class: 0, albedo: "a.dds".into(), normal: "a_n.dds".into(), snow: None });
+        pack.pages.push(Page { width: 2048, height: 2048, mips: 12, alpha_threshold: 128, class: 2, albedo: "b.dds".into(), normal: "b_n.dds".into(), snow: Some(crate::statics::Snow { params: [0.4, 0.5, 0.02, 0.5], color: [1.0; 3], flags: 1 }) });
         // 100 triangles on page 0, 30 on page 1 -> clusters 64 + 36 + 30.
         let mut verts = Vec::new();
         let mut tris = Vec::new();

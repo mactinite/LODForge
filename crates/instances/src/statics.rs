@@ -26,6 +26,39 @@ pub struct Mesh {
     pub textures: Vec<(String, String)>,
     /// `MCLS`: per part, the LOD material class (`meshpack::CLASS_*`); empty = all plain.
     pub classes: Vec<u8>,
+    /// `MSNO`: the directional (snow) material of the entry's base records, as the engine gives
+    /// their full models; `None` for none (or not known).
+    pub snow: Option<Snow>,
+}
+
+/// A base record's single-pass directional material as the engine applies it to the full model
+/// (`BSLightingShaderProperty::projectedUVParams` / `projectedUVColor`, SkyrimSE 1.7.104
+/// `FUN_140277E20`): `params` = (falloff scale, falloff bias, 1 / noise UV scale,
+/// cos(max angle)), `color` the single-pass colour, `flags` bit 0 the MATO snow flag.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Snow {
+    pub params: [f32; 4],
+    pub color: [f32; 3],
+    pub flags: u32,
+}
+
+impl Snow {
+    /// Exact identity (bit patterns), for keys.
+    pub fn key(&self) -> String {
+        let b = |v: f32| format!("{:08x}", v.to_bits());
+        format!("{}{}{}{}{}{}{}{:x}", b(self.params[0]), b(self.params[1]), b(self.params[2]), b(self.params[3]), b(self.color[0]), b(self.color[1]), b(self.color[2]), self.flags)
+    }
+
+    pub fn write(&self, b: &mut Buf) {
+        for v in self.params.iter().chain(&self.color) {
+            b.f32(*v);
+        }
+        b.u32(self.flags);
+    }
+
+    pub fn read(r: &mut Cur<'_>) -> Result<Snow> {
+        Ok(Snow { params: [r.f32()?, r.f32()?, r.f32()?, r.f32()?], color: [r.f32()?, r.f32()?, r.f32()?], flags: r.u32()? })
+    }
 }
 
 /// `MESH.flags`: the entry's instances are large references (hidden while their 3D is loaded).
@@ -158,6 +191,17 @@ impl StaticsFile {
             }
             chunks.push(Chunk { tag: *b"MCLS", data: b.0 });
         }
+        if self.meshes.iter().any(|m| m.snow.is_some()) {
+            let mut b = Buf::default();
+            b.u32(self.meshes.len() as u32);
+            for m in &self.meshes {
+                b.u8(u8::from(m.snow.is_some()));
+                if let Some(sn) = &m.snow {
+                    sn.write(&mut b);
+                }
+            }
+            chunks.push(Chunk { tag: *b"MSNO", data: b.0 });
+        }
         if !self.pack_meshes.is_empty() {
             let mut b = Buf::default();
             b.u32(self.pack_meshes.len() as u32);
@@ -195,7 +239,7 @@ impl StaticsFile {
                 for v in &mut bounds {
                     *v = r.f32()?;
                 }
-                let m = Mesh { bounds, flags: r.u32()?, triangles: r.u32()?, model: r.str()?, textures: Vec::new(), classes: Vec::new() };
+                let m = Mesh { bounds, flags: r.u32()?, triangles: r.u32()?, model: r.str()?, textures: Vec::new(), classes: Vec::new(), snow: None };
                 f.mesh_index.insert(format!("{}#{}", m.model, f.meshes.len()), f.meshes.len() as u16);
                 f.meshes.push(m);
             }
@@ -219,6 +263,16 @@ impl StaticsFile {
                 let v = r.take(k)?.to_vec();
                 if let Some(m) = f.meshes.get_mut(i) {
                     m.classes = v;
+                }
+            }
+        }
+        if let Some(ch) = c.chunk(b"MSNO") {
+            let mut r = Cur::new(&ch.data);
+            let n = r.u32()? as usize;
+            for i in 0..n {
+                let sn = if r.u8()? != 0 { Some(Snow::read(&mut r)?) } else { None };
+                if let Some(m) = f.meshes.get_mut(i) {
+                    m.snow = sn;
                 }
             }
         }

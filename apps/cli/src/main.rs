@@ -7,6 +7,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod btr_compare;
+mod detail_bake;
 mod dyndolod_build;
 mod dyn_export;
 mod runtime_dyn;

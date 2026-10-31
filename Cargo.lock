@@ -2574,10 +2574,12 @@ dependencies = [
  "anyhow",
  "clap",
  "crc32fast",
+ "glam",
  "half",
  "lodforge-archive",
  "lodforge-btr",
  "lodforge-dds",
+ "lodforge-detailbake",
  "lodforge-dyndolod",
  "lodforge-esp",
  "lodforge-gpu",
@@ -2634,6 +2636,19 @@ version = "0.1.0"
 dependencies = [
  "texture2ddecoder",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "lodforge-detailbake"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glam",
+ "lodforge-dds",
+ "lodforge-gpu",
+ "lodforge-nif",
+ "lodforge-objlod",
+ "rayon",
 ]
 
 [[package]]

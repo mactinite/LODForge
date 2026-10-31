@@ -310,6 +310,8 @@ pub fn run(a: &Args) -> Result<()> {
         }
     }
     let mut failed = Vec::new();
+    // Runtime: LOD model -> full model of the instanced statics (for the detail bake).
+    let full_models: std::sync::Arc<std::sync::Mutex<crate::detail_bake::FullModels>> = Default::default();
     // Next to the output (same volume, so grass cache files can be hard-linked).
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
     // Terrain meshes and textures of every worldspace and season run on their own thread from
@@ -486,6 +488,18 @@ pub fn run(a: &Args) -> Result<()> {
     let mut tex_index = crate::instances::TextureIndex::default();
     // Occlusion of each worldspace as soon as its terrain and object LOD are done (Occlusion.esp
     // itself is written at the end).
+    // Base EditorID -> its full model's snow material, for the runtime's per-base LOD snow.
+    let snow_variants: std::sync::Arc<std::collections::HashMap<String, lodforge_instances::statics::Snow>> = std::sync::Arc::new(dyn_cfg.as_ref().map(|c| c.snow_variants()).unwrap_or_default());
+    if !snow_variants.is_empty() && !a.json {
+        let mut distinct: std::collections::BTreeMap<String, (lodforge_instances::statics::Snow, usize)> = std::collections::BTreeMap::new();
+        for v in snow_variants.values() {
+            distinct.entry(v.key()).or_insert((*v, 0)).1 += 1;
+        }
+        println!("snow materials: {} snow bases, {} distinct (falloff, bias, 1/noise, cos angle; colour):", snow_variants.len(), distinct.len());
+        for (v, n) in distinct.values() {
+            println!("  {:.3} {:.3} {:.4} {:.3}; {:.3} {:.3} {:.3} (x{n})", v.params[0], v.params[1], v.params[2], v.params[3], v.color[0], v.color[1], v.color[2]);
+        }
+    }
     let occ_lane = (dyn_mode && !a.no_objects && !a.dyn_opts.no_occlusion && dyn_cfg.is_some()).then(|| crate::occlusion_lane::OcclusionLane::start(prof.clone(), out.clone(), worlds.clone()));
     for world in &worlds {
         let mut step = |stage: &str, season: Option<&str>, f: &mut dyn FnMut() -> Result<()>| {
@@ -783,7 +797,7 @@ pub fn run(a: &Args) -> Result<()> {
             }
             if let Some(names) = &form_names {
                 let child_copy_ids = copy_ids.as_ref().and_then(|ci| ci.world(ws.form_id)).cloned().map(std::sync::Arc::new).unwrap_or_default();
-                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), child_copy_ids, write: a.rt.write_options() });
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), child_copy_ids, write: a.rt.write_options(), full_models: full_models.clone(), snow_variants: snow_variants.clone() });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
             if let Some(l) = &occ_lane {
@@ -891,6 +905,34 @@ pub fn run(a: &Args) -> Result<()> {
             Err(e) => {
                 eprintln!("runtime-dyn: {e:#}");
                 failed.push(format!("runtime-dyn: {e}"));
+            }
+        }
+    }
+    if a.rt.on() && !a.rt.no_detail_bake {
+        // Rock and mountain LOD models get textures baked from their full models; the statics
+        // entries are pointed at the baked models before the static pack reads them.
+        let t = Instant::now();
+        begin(a.json, "all", "detail-bake", None);
+        if let Err(e) = own_output(&mut p, &out, &before) {
+            eprintln!("detail-bake: {e:#}");
+        }
+        let full_of = full_models.lock().unwrap().clone();
+        match crate::detail_bake::run(&p, &out, &full_of, a.rt.write_options()) {
+            Ok(r) => {
+                if !a.json {
+                    println!("  {}", r.summary());
+                    for (m, e) in r.failed.iter().take(8) {
+                        println!("    failed {m}: {e}");
+                    }
+                    for s in &r.shared_examples {
+                        println!("    shared {s}");
+                    }
+                }
+                event(a.json, "all", "detail-bake", None, t.elapsed().as_millis());
+            }
+            Err(e) => {
+                eprintln!("detail-bake: {e:#}");
+                failed.push(format!("detail-bake: {e}"));
             }
         }
     }

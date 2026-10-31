@@ -212,6 +212,8 @@ pub struct Config {
     pub mesh_paths: usize,
     pub bases: HashMap<u32, Base>,
     pub materials: HashMap<u32, String>,
+    /// Winning MATO directional material data (the runtime's per-base LOD snow).
+    pub material_objects: HashMap<u32, lodforge_dyndolod::bases::MaterialObject>,
     pub owners: HashMap<u32, usize>,
     pub ignore_edid: Vec<String>,
     pub xesp_lod: HashSet<u32>,
@@ -236,6 +238,29 @@ pub struct Config {
 }
 
 impl Config {
+    /// Base EditorID (lower case) -> the single-pass directional material the engine gives its
+    /// full model (STAT DNAM: max angle and MATO; `FUN_140277E20`), whatever the MATO is called:
+    /// the export's snow / ash LOD classes decide which parts use it. Multi-pass materials
+    /// (glacier, ice, moss: a second pass with the material's own textures, single-pass colour
+    /// unused) have no single-pass equivalent; their parts keep the engine's LOD material.
+    pub fn snow_variants(&self) -> HashMap<String, lodforge_instances::statics::Snow> {
+        let mut out = HashMap::new();
+        for b in self.bases.values() {
+            if &b.signature != b"STAT" || b.material == 0 || b.editor_id.is_empty() {
+                continue;
+            }
+            let (Some(m), Some(angle)) = (self.material_objects.get(&b.material), b.max_angle()) else { continue };
+            if !m.single_pass {
+                continue;
+            }
+            // No noise (UV scale 0): the noise term drops out instead of an infinite scale.
+            let noise = if m.noise_uv_scale != 0.0 { 1.0 / m.noise_uv_scale } else { 0.0 };
+            let snow = lodforge_instances::statics::Snow { params: [m.falloff_scale, m.falloff_bias, noise, (angle * std::f32::consts::PI / 180.0).cos()], color: m.color, flags: u32::from(m.snow) };
+            out.insert(b.editor_id.to_ascii_lowercase(), snow);
+        }
+        out
+    }
+
     pub fn load(p: &Profile, dir: &Path, preset: &str, static_lod: bool) -> Result<Config> {
         let data_override = |path: &str| p.vfs.read(path).ok().flatten().map(|b| lodforge_dyndolod::ini::decode(&b));
         let src = RuleSource { rules_dir: dir.join("Rules"), data_override: &data_override };
@@ -250,13 +275,14 @@ impl Config {
         let lo = &p.load_order;
         let bases = lodforge_dyndolod::bases::read_bases(lo)?;
         let materials = lodforge_dyndolod::bases::read_materials(lo)?;
+        let material_objects = lodforge_dyndolod::bases::read_material_objects(lo)?;
         let owners = lodforge_dyndolod::bases::owners(lo);
         let xesp_lod = std::fs::read(lodforge_dyndolod::overlay::path(dir, r"Configs\DynDOLOD_SSE_xesplod.txt")).map(|b| lodforge_dyndolod::bases::read_form_list(lo, &lodforge_dyndolod::ini::decode(&b))).unwrap_or_default();
         let edids: HashMap<String, u32> = bases.values().map(|b| (b.editor_id.to_ascii_lowercase(), b.form_id)).collect();
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
         let reference_states = lodforge_dyndolod::export::read_reference_states(lo)?;
-        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()), keep_levels: false })
+        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, material_objects, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()), keep_levels: false })
     }
 
     /// Re-reads LOD model discovery after files were added to the VFS (generated LOD models).

@@ -74,9 +74,9 @@ fn corrupt_crc_is_detected() {
 #[test]
 fn statics_round_trip() {
     let mut f = StaticsFile::new(common("Tamriel", "WIN"));
-    let pine = f.mesh(r"meshes\dyndolod\lod\trees\treepineforest01passthru_lod.nif", || Mesh { bounds: [-1.0, -2.0, 0.0, 1.0, 2.0, 30.0], flags: crate::statics::MESH_TREE | crate::statics::MESH_PASSTHRU, triangles: 120, model: String::new(), textures: Vec::new(), classes: Vec::new() });
+    let pine = f.mesh(r"meshes\dyndolod\lod\trees\treepineforest01passthru_lod.nif", || Mesh { bounds: [-1.0, -2.0, 0.0, 1.0, 2.0, 30.0], flags: crate::statics::MESH_TREE | crate::statics::MESH_PASSTHRU, triangles: 120, model: String::new(), textures: Vec::new(), classes: Vec::new(), snow: None });
     let rock = f.mesh(r"meshes\lod\rocks\rock01_lod.nif", Mesh::default);
-    let snowy = f.mesh_variant("rock-variant", || Mesh { model: r"meshes\lod\rocks\rock01_lod.nif".into(), flags: crate::statics::MESH_LARGE_REF, textures: vec![(r"textures\a.dds".into(), String::new())], classes: vec![1, 2], ..Default::default() });
+    let snowy = f.mesh_variant("rock-variant", || Mesh { model: r"meshes\lod\rocks\rock01_lod.nif".into(), flags: crate::statics::MESH_LARGE_REF, textures: vec![(r"textures\a.dds".into(), String::new())], classes: vec![1, 2], snow: Some(crate::statics::Snow { params: [0.35, 0.2, 0.02, 0.17], color: [0.9, 0.95, 1.0], flags: 1 }), ..Default::default() });
     assert_ne!(snowy, rock);
     assert_eq!(f.mesh_variant("rock-variant", Mesh::default), snowy);
     assert_eq!(f.mesh(r"MESHES\lod\rocks\rock01_lod.nif", Mesh::default), rock);

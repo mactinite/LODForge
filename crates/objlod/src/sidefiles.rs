@@ -57,6 +57,22 @@ impl AltTextures {
         self.refs.contains_key(&ref_id.to_ascii_uppercase())
     }
 
+    /// The reference's entries for full-model shapes (the base's `MODS`; LOD-shape entries,
+    /// whose names carry `_lod`, left out): shape name lower case, nine slots; one per shape,
+    /// sorted.
+    pub fn full_model_entries(&self, ref_id: &str) -> Vec<(String, Vec<String>)> {
+        let Some(entries) = self.refs.get(&ref_id.to_ascii_uppercase()) else { return Vec::new() };
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        for e in entries {
+            let shape = e.shape.to_ascii_lowercase();
+            if !shape.contains("_lod") && !out.iter().any(|(s, _)| *s == shape) {
+                out.push((shape, e.textures.clone()));
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// The texture set for shape `index` (named `shape`) of a reference's LOD model: an entry
     /// whose index and name both match, else one whose name matches (the index then refers to
     /// the full model's shapes, spec 7.3); `None` keeps the model's own textures.

@@ -69,6 +69,13 @@ pub struct Instance {
     /// Per part: the LOD material class the `.bto` would give it ([`PART_PLAIN`], [`PART_SNOW`],
     /// [`PART_SNOW_HD`], [`PART_ASH`], [`PART_ASH_HD`]); empty = all plain.
     pub part_classes: Vec<u8>,
+    /// The reference's full model as the export names it (for the detail bake).
+    pub full_model: String,
+    /// The base record's EditorID (export column 10).
+    pub base_edid: String,
+    /// The reference's AltTextures entries for its full model's own shapes (shape name lower
+    /// case, nine texture slots); the detail bake applies them to the full model it bakes from.
+    pub full_alt: Vec<(String, Vec<String>)>,
 }
 
 pub const PART_PLAIN: u8 = 0;

@@ -59,6 +59,11 @@ pub struct Opts {
     /// Runtime: zstd level for the instance file sections (0 = uncompressed).
     #[arg(long, default_value_t = 0)]
     pub runtime_zstd: i32,
+    /// Runtime: skip the detail bake (by default every instanced LOD model of a full model under
+    /// `meshes\landscape\` gets its own texture baked from the full model: albedo, normals and
+    /// ambient occlusion; see `lodforge-detailbake`).
+    #[arg(long)]
+    pub no_detail_bake: bool,
     /// Runtime far grass: folder with the NGIO grass cache (`<world>x<X>y<Y>[.<season>].cgid`;
     /// default: `Grass\` of the load order).
     #[arg(long)]
@@ -333,6 +338,13 @@ pub struct RuntimeObjects {
     /// missing here is written as a synthetic instance.
     pub child_copy_ids: Arc<HashMap<u32, u32>>,
     pub write: WriteOptions,
+    /// Filled by [`statics_file`]: (LOD model, its AltTextures key) -> the (full model, full-model
+    /// AltTextures key) of its references, shared by every worldspace (the detail bake reads it
+    /// before the static pack; see [`crate::detail_bake::FullModels`]).
+    pub full_models: Arc<std::sync::Mutex<crate::detail_bake::FullModels>>,
+    /// Base EditorID (lower case) -> its full model's snow material
+    /// ([`crate::dyndolod_build::Config::snow_variants`]); snow-class entries carry it (`MSNO`).
+    pub snow_variants: Arc<HashMap<String, lodforge_instances::statics::Snow>>,
 }
 
 /// The plugin the child-world copies' references live in.
@@ -388,12 +400,19 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
         for i in *list {
             // One MESH entry per (model, large reference, AltTextures set).
             let textures = i.alt_textures.clone().unwrap_or_default();
-            let key = format!("{}|{}|{}|{:?}", i.model, u8::from(i.large_ref), textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), i.part_classes);
+            // Snow / ash entries split by the base's own directional material (the static pack
+            // gives their parts draw pages with the full model's material instead of the LOD one).
+            let snowy = i.part_classes.iter().any(|&c| matches!(c & 0x7F, lodforge_objlod::instancing::PART_SNOW | lodforge_objlod::instancing::PART_SNOW_HD | lodforge_objlod::instancing::PART_ASH | lodforge_objlod::instancing::PART_ASH_HD));
+            let snow = if snowy { rt.snow_variants.get(&i.base_edid.to_ascii_lowercase()).copied() } else { None };
+            // ... and by the full model's own AltTextures (the detail bake bakes each variant).
+            let full_alt = crate::detail_bake::alt_key(&i.full_alt);
+            let key = format!("{}|{}|{}|{:?}|{}|{}", i.model, u8::from(i.large_ref), textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), i.part_classes, snow.map(|s| s.key()).unwrap_or_default(), full_alt);
             let m = f.mesh_variant(&key, || {
                 let mut e = mesh_entry(&i.model, mesh(&i.model).as_deref(), i.runtime_ref);
                 e.model = i.model.clone();
                 e.textures = textures.iter().map(|(d, n)| (d.to_ascii_lowercase(), n.to_ascii_lowercase())).collect();
                 e.classes = i.part_classes.clone();
+                e.snow = snow;
                 if i.large_ref {
                     e.flags |= lodforge_instances::statics::MESH_LARGE_REF;
                 }
@@ -401,6 +420,10 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
             });
             if i.runtime_ref {
                 f.meshes[usize::from(m)].flags |= MESH_TREE;
+            }
+            if !i.full_model.is_empty() {
+                let entry = (world.to_string(), season.to_string(), m);
+                rt.full_models.lock().unwrap().entry(entry).or_default().insert((i.full_model.to_ascii_lowercase().replace('/', "\\"), full_alt));
             }
             let id = u32::from_str_radix(&i.ref_id, 16).unwrap_or(0);
             let (plugin, form) = if lodforge_dyndolod::childworld::is_copy(id) {
@@ -426,7 +449,7 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
 }
 
 fn mesh_entry(model: &str, m: Option<&lodforge_objlod::mesh::LodMesh>, tree: bool) -> Mesh {
-    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new(), textures: Vec::new(), classes: Vec::new() };
+    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new(), textures: Vec::new(), classes: Vec::new(), snow: None };
     if tree {
         e.flags |= MESH_TREE;
     }
