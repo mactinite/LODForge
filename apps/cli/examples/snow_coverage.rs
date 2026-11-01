@@ -1,17 +1,19 @@
 //! Snow-class statics entries by treatment: baked with the base's snow material, baked without
 //! one (base material not found), and not baked (old LOD snow), counted per LOD4 reference.
-//! `snow_coverage <LODForgeRuntime dir>`
+//! `snow_coverage <LODForgeRuntime dir> [season, default SUM]`
 use std::collections::BTreeMap;
 
 fn main() {
     let dir = std::path::PathBuf::from(std::env::args().nth(1).unwrap());
+    let season = std::env::args().nth(2).unwrap_or_else(|| "SUM".into());
+    let suffix = format!(".{season}.statics.bin");
     let snowy = |c: &u8| matches!(*c, lodforge_instances::meshpack::CLASS_SNOW | lodforge_instances::meshpack::CLASS_SNOW_HD);
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut unbaked: BTreeMap<String, usize> = BTreeMap::new();
     let mut nosnow: BTreeMap<String, usize> = BTreeMap::new();
     for e in std::fs::read_dir(&dir).unwrap().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if !name.starts_with("Tamriel.") || !name.ends_with(".SUM.statics.bin") {
+        if !name.starts_with("Tamriel.") || !name.ends_with(&suffix) {
             continue;
         }
         let f = lodforge_instances::statics::StaticsFile::from_bytes(&std::fs::read(e.path()).unwrap()).unwrap();
@@ -40,7 +42,7 @@ fn main() {
             }
         }
     }
-    println!("Tamriel SUM LOD4 references with snow parts: {counts:?}");
+    println!("Tamriel {season} LOD4 references with snow parts: {counts:?}");
     let top = |t: &str, m: &BTreeMap<String, usize>| {
         let mut v: Vec<_> = m.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
