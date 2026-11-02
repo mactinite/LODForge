@@ -70,6 +70,15 @@ pub struct Opts {
     /// than the full rocks, while the default vanilla bake matches them.
     #[arg(long)]
     pub pbr_lod_pages: bool,
+    /// Runtime full-model near tier: references that are not engine large references and whose LOD
+    /// model is at least this many units in bounding radius are listed for the runtime, which draws
+    /// their full model between the loaded grid and the large-reference grid (plugin-added cliffs
+    /// and peaks otherwise show their LOD until their cell loads).
+    #[arg(long, default_value_t = 1500.0)]
+    pub near_tier_min_radius: f32,
+    /// Runtime: no full-model near tier list.
+    #[arg(long)]
+    pub no_near_tier: bool,
     /// Runtime far grass: folder with the NGIO grass cache (`<world>x<X>y<Y>[.<season>].cgid`;
     /// default: `Grass\` of the load order).
     #[arg(long)]
@@ -351,6 +360,16 @@ pub struct RuntimeObjects {
     /// Base EditorID (lower case) -> its full model's snow material
     /// ([`crate::dyndolod_build::Config::snow_variants`]); snow-class entries carry it (`MSNO`).
     pub snow_variants: Arc<HashMap<String, lodforge_instances::statics::Snow>>,
+    /// Base EditorID (lower case) -> its alternate textures
+    /// ([`crate::dyndolod_build::Config::alt_variants`]); near-tier entries carry them.
+    pub alt_variants: Arc<HashMap<String, Vec<lodforge_dyndolod::bases::AltTexture>>>,
+    /// Base EditorID (lower case) -> Community Shaders' PBR settings for its directional material
+    /// ([`crate::dyndolod_build::Config::snow_pbr_variants`]); near-tier entries carry them.
+    pub snow_pbr_variants: Arc<HashMap<String, lodforge_instances::statics::SnowPbr>>,
+    /// Full-model near tier: LOD4 instances of references that are not large references and whose
+    /// LOD model's bounding radius (times the reference scale) reaches this many units are listed
+    /// in `NEAR` (0 = none).
+    pub near_min_radius: f32,
 }
 
 /// The plugin the child-world copies' references live in.
@@ -448,6 +467,27 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
             };
             let angles = i.rotation_deg.map(f32::to_radians);
             f.add(q.level as u8, (q.x as i16, q.y as i16), i.position, angles, i.scale, m, plugin.as_deref(), form);
+            // Full-model near tier: a big reference the engine does not load as a large reference
+            // keeps its LOD until its cell enters the loaded grid; the runtime draws its full model
+            // out to the large-reference grid instead (once per reference: its LOD4 record).
+            if rt.near_min_radius > 0.0 && q.level == 4 && !i.large_ref && !i.runtime_ref && !i.full_model.is_empty() && !lodforge_dyndolod::childworld::is_copy(id)
+                && let Some(p) = plugin.as_deref()
+            {
+                let b = f.meshes[usize::from(m)].bounds;
+                let radius = 0.5 * ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt() * i.scale;
+                if radius >= rt.near_min_radius {
+                    let full = i.full_model.to_ascii_lowercase().replace('/', "\\");
+                    let full = if full.starts_with("meshes\\") { full } else { format!("meshes\\{full}") };
+                    // The base's own material, not the MESH entry's (the detail bake dims PBR snow for LOD).
+                    let snow = rt.snow_variants.get(&i.base_edid.to_ascii_lowercase()).copied();
+                    let alt: Vec<(&str, i32, &str, u32)> = rt
+                        .alt_variants
+                        .get(&i.base_edid.to_ascii_lowercase())
+                        .map(|v| v.iter().filter_map(|a| rt.names.split(a.txst).map(|(n, local)| (a.shape.as_str(), a.index, n, local))).collect())
+                        .unwrap_or_default();
+                    f.add_near(p, form, &full, radius, snow, &alt).snow_pbr = rt.snow_pbr_variants.get(&i.base_edid.to_ascii_lowercase()).copied();
+                }
+            }
         }
     }
     f.finish();

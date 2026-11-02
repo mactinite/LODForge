@@ -488,7 +488,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
             if !a.dry_run {
                 let (path, size) = crate::instances::write_statics(&a.out, &f, rt.write)?;
                 let (synthetic, synthetic_large) = crate::instances::synthetic_counts(&f);
-                println!("  runtime instances: {} in {} blocks, {} meshes; {} synthetic ({} on large-reference meshes); {} ({:.1} MB)", f.records(), f.blocks.len(), f.meshes.len(), synthetic, synthetic_large, path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6);
+                println!("  runtime instances: {} in {} blocks, {} meshes; {} synthetic ({} on large-reference meshes); {} near-tier references; {} ({:.1} MB)", f.records(), f.blocks.len(), f.meshes.len(), synthetic, synthetic_large, f.near.len(), path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), size as f64 / 1e6);
             }
             if season_code.is_empty() {
                 for b in &built {

@@ -493,6 +493,11 @@ pub fn run(a: &Args) -> Result<()> {
     // itself is written at the end).
     // Base EditorID -> its full model's snow material, for the runtime's per-base LOD snow.
     let snow_variants: std::sync::Arc<std::collections::HashMap<String, lodforge_instances::statics::Snow>> = std::sync::Arc::new(dyn_cfg.as_ref().map(|c| c.snow_variants()).unwrap_or_default());
+    let alt_variants: std::sync::Arc<std::collections::HashMap<String, Vec<lodforge_dyndolod::bases::AltTexture>>> = std::sync::Arc::new(dyn_cfg.as_ref().map(|c| c.alt_variants()).unwrap_or_default());
+    let snow_pbr_variants: std::sync::Arc<std::collections::HashMap<String, lodforge_instances::statics::SnowPbr>> = std::sync::Arc::new(dyn_cfg.as_ref().map(|c| c.snow_pbr_variants(&p)).unwrap_or_default());
+    if !snow_pbr_variants.is_empty() && !a.json {
+        println!("snow PBR settings (Community Shaders PBRMaterialObjects) for {} snow bases", snow_pbr_variants.len());
+    }
     if !snow_variants.is_empty() && !a.json {
         let mut distinct: std::collections::BTreeMap<String, (lodforge_instances::statics::Snow, usize)> = std::collections::BTreeMap::new();
         for v in snow_variants.values() {
@@ -800,7 +805,7 @@ pub fn run(a: &Args) -> Result<()> {
             }
             if let Some(names) = &form_names {
                 let child_copy_ids = copy_ids.as_ref().and_then(|ci| ci.world(ws.form_id)).cloned().map(std::sync::Arc::new).unwrap_or_default();
-                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), child_copy_ids, write: a.rt.write_options(), full_models: full_models.clone(), snow_variants: snow_variants.clone() });
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), child_copy_ids, write: a.rt.write_options(), full_models: full_models.clone(), snow_variants: snow_variants.clone(), alt_variants: alt_variants.clone(), snow_pbr_variants: snow_pbr_variants.clone(), near_min_radius: if a.rt.no_near_tier { 0.0 } else { a.rt.near_tier_min_radius } });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
             if let Some(l) = &occ_lane {

@@ -277,6 +277,39 @@ impl Config {
         out
     }
 
+    /// Base EditorID (lower case) -> Community Shaders' PBR settings for its single-pass directional
+    /// material (`PBRMaterialObjects\<MATO EditorID>.json`, CS's defaults for missing fields), for
+    /// the near tier's clones: CS gives them to a real reference's PBR shapes in its Clone3D hook.
+    pub fn snow_pbr_variants(&self, p: &Profile) -> HashMap<String, lodforge_instances::statics::SnowPbr> {
+        let edids = lodforge_dyndolod::bases::read_editor_ids(&p.load_order, *b"MATO").unwrap_or_default();
+        let mut configs: HashMap<u32, Option<lodforge_instances::statics::SnowPbr>> = HashMap::new();
+        let mut out = HashMap::new();
+        for b in self.bases.values() {
+            if &b.signature != b"STAT" || b.material == 0 || b.editor_id.is_empty() || !self.material_objects.get(&b.material).is_some_and(|m| m.single_pass) {
+                continue;
+            }
+            let pbr = *configs.entry(b.material).or_insert_with(|| {
+                let edid = edids.get(&b.material)?;
+                let bytes = p.vfs.read(&format!(r"PBRMaterialObjects\{edid}.json")).ok().flatten()?;
+                parse_snow_pbr(&bytes)
+            });
+            if let Some(pbr) = pbr {
+                out.insert(b.editor_id.to_ascii_lowercase(), pbr);
+            }
+        }
+        out
+    }
+
+    /// Base EditorID (lower case) -> its alternate textures (MODS), for STAT bases that have any:
+    /// the full-model near tier gives its clones the textures the engine gives the reference.
+    pub fn alt_variants(&self) -> HashMap<String, Vec<lodforge_dyndolod::bases::AltTexture>> {
+        self.bases
+            .values()
+            .filter(|b| &b.signature == b"STAT" && !b.editor_id.is_empty() && !b.alt_textures.is_empty())
+            .map(|b| (b.editor_id.to_ascii_lowercase(), b.alt_textures.clone()))
+            .collect()
+    }
+
     pub fn load(p: &Profile, dir: &Path, preset: &str, static_lod: bool) -> Result<Config> {
         let data_override = |path: &str| p.vfs.read(path).ok().flatten().map(|b| lodforge_dyndolod::ini::decode(&b));
         let src = RuleSource { rules_dir: dir.join("Rules"), data_override: &data_override };
@@ -1746,5 +1779,50 @@ mod tests {
         let nif = lodforge_nif::parse(&grass_lod1_nif(tex, None, &d).unwrap()).unwrap();
         let s = nif.blocks.iter().find_map(|b| if let Block::TriShape(s) = b { Some(s) } else { None }).unwrap();
         assert_eq!(nif.shape_textures(s)[1], "");
+    }
+}
+
+/// Community Shaders' `PBRMaterialObjectData` JSON (`baseColorScale`, `roughness`,
+/// `specularLevel`, `glintParameters`); missing fields keep CS's struct defaults.
+pub fn parse_snow_pbr(bytes: &[u8]) -> Option<lodforge_instances::statics::SnowPbr> {
+    let text = String::from_utf8_lossy(bytes);
+    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+    let mut p = lodforge_instances::statics::SnowPbr::default();
+    let num = |v: &serde_json::Value, k: &str| v.get(k).and_then(serde_json::Value::as_f64).map(|x| x as f32);
+    if let Some(c) = v.get("baseColorScale").and_then(serde_json::Value::as_array) {
+        for (i, x) in c.iter().take(3).enumerate() {
+            if let Some(x) = x.as_f64() {
+                p.base_color_scale[i] = x as f32;
+            }
+        }
+    }
+    if let Some(x) = num(&v, "roughness") {
+        p.roughness = x;
+    }
+    if let Some(x) = num(&v, "specularLevel") {
+        p.specular_level = x;
+    }
+    if let Some(g) = v.get("glintParameters") {
+        p.glint_enabled = g.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        for (i, k) in ["screenSpaceScale", "logMicrofacetDensity", "microfacetRoughness", "densityRandomization"].into_iter().enumerate() {
+            if let Some(x) = num(g, k) {
+                p.glint[i] = x;
+            }
+        }
+    }
+    Some(p)
+}
+
+#[cfg(test)]
+mod snow_pbr_tests {
+    #[test]
+    fn parses_cs_material_object_config() {
+        let j = br#"{ "baseColorScale": [1.0, 0.9, 0.8], "glintParameters": { "densityRandomization": 5.0, "enabled": true, "logMicrofacetDensity": 13, "microfacetRoughness": 1.0, "screenSpaceScale": 2.0 }, "roughness": 0.7, "specularLevel": 0.02 }"#;
+        let p = super::parse_snow_pbr(j).unwrap();
+        assert_eq!(p.base_color_scale, [1.0, 0.9, 0.8]);
+        assert_eq!((p.roughness, p.specular_level, p.glint_enabled), (0.7, 0.02, true));
+        assert_eq!(p.glint, [2.0, 13.0, 1.0, 5.0]);
+        let d = super::parse_snow_pbr(b"{}").unwrap();
+        assert_eq!(d, lodforge_instances::statics::SnowPbr::default());
     }
 }

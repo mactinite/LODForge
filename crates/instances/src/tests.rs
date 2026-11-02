@@ -85,9 +85,17 @@ fn statics_round_trip() {
     }
     f.add(8, (-8, 8), [98400.0, -237948.0, -7100.0], [0.0; 3], 1.0, rock, None, 0);
     f.pack_meshes = vec![3, crate::meshpack::NO_MESH];
+    f.add_near("Northern Roads.esp", 0x265C80, r"Meshes\Landscape\Mountains\MountainPeak01.nif", 2900.0, Some(crate::statics::Snow { params: [0.46, 0.5, 50.0, 0.0], color: [1.0, 1.0, 1.0], flags: 1 }), &[("MountainCliffSlope:3", 2, "Skyrim.esm", 0x6A1AE), ("MountainCliffSlope:0", 0, "Update.esm", 0x2E34)])
+        .snow_pbr = Some(crate::statics::SnowPbr { roughness: 0.7, specular_level: 0.02, glint_enabled: true, glint: [2.0, 13.0, 1.0, 5.0], ..Default::default() });
+    f.add_near("Skyrim.esm", 0x1234, r"meshes\landscape\rocks\rockcliff01.nif", 1600.0, None, &[]);
     f.finish();
     let bytes = f.to_bytes(WriteOptions { zstd: Some(1), crc: true }).unwrap();
     let back = StaticsFile::from_bytes(&bytes).unwrap();
+    assert_eq!(back.near, f.near);
+    assert_eq!(back.near[0].model, r"meshes\landscape\mountains\mountainpeak01.nif");
+    assert_eq!(back.common.plugins[usize::from(back.near[0].plugin)], "Northern Roads.esp");
+    assert_eq!(back.common.plugins[usize::from(back.near[0].alt[1].plugin)], "Update.esm");
+    assert_eq!((back.near[0].alt[0].index, back.near[0].alt[0].form), (2, 0x6A1AE));
     assert_eq!(back.meshes, f.meshes);
     assert_eq!(back.pack_meshes, f.pack_meshes);
     assert_eq!(back.blocks, f.blocks);

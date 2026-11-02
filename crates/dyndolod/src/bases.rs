@@ -184,6 +184,18 @@ pub fn parse_material_object(d: &[u8]) -> Option<MaterialObject> {
     })
 }
 
+/// The winning records' EditorIDs of one record type (global form id -> EditorID).
+pub fn read_editor_ids(lo: &LoadOrder, sig: [u8; 4]) -> lodforge_esp::Result<HashMap<u32, String>> {
+    let mut out = HashMap::new();
+    for (id, (_, r)) in winning_records(lo, Sig(sig))? {
+        let data = r.data()?;
+        if let Some(f) = fields(&data).find(|f| &f.sig.0 == b"EDID") {
+            out.insert(id, f.zstring());
+        }
+    }
+    Ok(out)
+}
+
 /// The winning MATO records' directional material data.
 pub fn read_material_objects(lo: &LoadOrder) -> lodforge_esp::Result<HashMap<u32, MaterialObject>> {
     let mut out = HashMap::new();
