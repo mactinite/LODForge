@@ -160,7 +160,13 @@ impl Gpu {
         };
         let (level_h, level_v, level_copy) = (level_entry("level_h"), level_entry("level_v"), level_entry("level_copy"));
         let bc7_ispc = bc7_gpu::Bc7Ispc::new(&device);
-        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy, bc7_ispc, bc7_on_gpu: std::sync::atomic::AtomicBool::new(bc7_gpu::default_gpu()), bc7_quality: std::sync::atomic::AtomicU8::new(bc7_cpu::default_quality().as_u8()) })
+        let bc7_on_gpu = std::sync::atomic::AtomicBool::new(bc7_gpu::default_gpu() && adapter_info.device_type != wgpu::DeviceType::Cpu);
+        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy, bc7_ispc, bc7_on_gpu, bc7_quality: std::sync::atomic::AtomicU8::new(bc7_cpu::default_quality().as_u8()) })
+    }
+
+    /// Whether the adapter is a software rasteriser (WARP, llvmpipe) rather than a GPU.
+    pub fn is_software(&self) -> bool {
+        self.adapter_info.device_type == wgpu::DeviceType::Cpu
     }
 
     /// Chooses the BC7 encoder for later [Gpu::encode_bc7] calls (default [Bc7Quality::High]).
@@ -172,9 +178,10 @@ impl Gpu {
         Bc7Quality::from_u8(self.bc7_quality.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    /// Runs the multi-mode encoders of [Gpu::encode_bc7] on the GPU instead of the CPU.
+    /// Runs the multi-mode encoders of [Gpu::encode_bc7] on the GPU instead of the CPU. Ignored on
+    /// a software adapter ([Gpu::is_software]): see [Gpu::encode_bc7_ispc].
     pub fn set_bc7_on_gpu(&self, on: bool) {
-        self.bc7_on_gpu.store(on, std::sync::atomic::Ordering::Relaxed);
+        self.bc7_on_gpu.store(on && !self.is_software(), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn bc7_on_gpu(&self) -> bool {
