@@ -251,7 +251,11 @@ fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     // amount (objSnow*), not opacity.
     let tex_alpha = base.a;
     if ((m.flags & F_VERTEX_COLORS) != 0u) {
-        base = base * in.color;
+        // Vertex colours are gamma-encoded: the game multiplies them onto the gamma-space texture
+        // (vanilla and CS non-PBR shaders) or decodes both to linear first (CS True PBR), which
+        // is the same product. Multiplying linear albedo by the raw byte drew dark vertex
+        // colours too bright.
+        base = vec4<f32>(base.rgb * to_linear(in.color.rgb), base.a * in.color.a);
     }
     var threshold = m.threshold;
     var test = (m.flags & F_ALPHA_TEST) != 0u;
@@ -272,7 +276,10 @@ fn fs_mesh(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     } else if ((m.flags & F_HAS_NORMALS) != 0u) {
         n = normalize(in.normal);
         if (normal_maps && (m.flags & F_HAS_TANGENTS) != 0u) {
-            n = normalize(normalize(in.tangent) * t.x + normalize(in.bitangent) * t.y + n * t.z);
+            // The game's frame (CS Lighting.hlsl VS builds rows bitangent (W slots), tangent,
+            // normal; the LODForge Runtime ClusterVS does the same): the map's x pairs with the
+            // NIF bitangent field and y with the tangent field (Bethesda stores U there).
+            n = normalize(normalize(in.bitangent) * t.x + normalize(in.tangent) * t.y + n * t.z);
         }
     } else {
         // Flat normal from the surface itself.

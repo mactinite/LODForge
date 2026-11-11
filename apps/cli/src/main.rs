@@ -7,6 +7,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod btr_compare;
+mod detail_bake;
 mod dyndolod_build;
 mod dyn_export;
 mod runtime_dyn;
@@ -22,6 +23,7 @@ mod build;
 mod info;
 mod instances;
 mod runtime_trees;
+mod runtime_heightfield;
 mod strip_statics;
 mod tree_pack;
 mod tree_pack_preview;
@@ -222,6 +224,8 @@ enum Command {
     BtoStats(instances::StatsArgs),
     /// Rewrites only the trees files of a `build --runtime lodforge` output (export + existing impostor sets).
     RuntimeTrees(runtime_trees::Args),
+    /// Conservative terrain heightfields (`<World>.hf.bin`) for the LODForge Runtime's occlusion culling.
+    RuntimeHeightfield(runtime_heightfield::Args),
     /// Removes from .statics.bin files the instances of references the matching .trees.bin draws.
     RuntimeStripStatics(strip_statics::Args),
     /// Lists statics instances whose mesh has no pack mesh.
@@ -240,6 +244,8 @@ enum Command {
     TreePackPreview(tree_pack_preview::Args),
     /// Rebuilds only StaticMeshes.bin from the statics files of an output.
     RuntimeStaticsPack(tree_pack::StaticsArgs),
+    /// Rebuilds only TreeMeshes.bin (and its atlas pages) from the trees files of an output.
+    RuntimeTreePack(tree_pack::StaticsArgs),
     /// Projects what static instancing would take out of .bto per copy threshold (export only).
     RuntimeStaticsPlan(runtime_trees::PlanArgs),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
@@ -335,6 +341,7 @@ fn main() -> Result<()> {
         Command::RuntimeGrass(a) => grass_far::run(&a),
         Command::BtoStats(a) => instances::bto_stats(&a),
         Command::RuntimeTrees(a) => runtime_trees::run(&a),
+        Command::RuntimeHeightfield(a) => runtime_heightfield::run(&a),
         Command::RuntimeStripStatics(a) => strip_statics::run(&a),
         Command::RuntimeCheck(a) => strip_statics::check(&a),
         Command::RuntimeDynInfo(a) => dyn_export::info(&a),
@@ -344,6 +351,7 @@ fn main() -> Result<()> {
         Command::RuntimeGrassPack(a) => grass_pack::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
+        Command::RuntimeTreePack(a) => tree_pack::run_trees(&a),
         Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),

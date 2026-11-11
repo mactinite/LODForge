@@ -9,7 +9,10 @@
 //!    A projected leaf then shows and hides with the view angle like the card it stands for.
 //! 2. **Slices.** Per orientation the leaves are split by their distance along the normal into
 //!    [`CloudParams::vertical_slices`] (or horizontal) equal slabs; each non-empty slab is one
-//!    plane through the mean distance of its leaves, so no leaf moves far when projected.
+//!    plane through the mean distance of its leaves, so no leaf moves far when projected. A
+//!    slab's leaves are then grouped by where they lie in the plane ([`split_slab`]): each
+//!    connected run of occupied cells of a coarse grid is a tile of its own, so a sparse crown
+//!    spends its atlas on foliage instead of on the empty space between its clusters.
 //! 3. **Tiles.** [`plan`] returns per plane a small NIF of its leaves in the plane's frame, ready
 //!    for TexGen's billboard camera at yaw 0 (plane right -> view right = -X, plane up -> +Z, plane
 //!    normal -> +Y toward the camera), with the original shaders and textures; the caller renders
@@ -39,14 +42,44 @@ pub struct CloudParams {
     pub horizontal_min: f32,
     /// Render the full bark (branches, roots, twigs) into the slices as well as the leaves.
     pub bark_in_slices: bool,
-    /// Turn the rendered soft coverage into on/off alpha by error diffusion ([dither_alpha]):
-    /// the game alpha-tests the crown, which cuts away foliage thinner than a texel.
+    /// Turn the rendered soft coverage into on/off alpha by error diffusion ([dither_alpha]).
+    /// Off by default: the crown keeps its coverage as alpha, tested at a low threshold
+    /// (`lod-models` crown material), so the bilinear filter traces smooth silhouettes between
+    /// texels and a vertex alpha can thin a plane gradually (the runtime fades planes seen
+    /// edge-on); dithered 0/255 alpha turned every magnified texel into a hard blob.
     pub dither: bool,
+    /// Grid of [`split_slab`]: cells per axis over a slab's leaves (0 or 1 = no split).
+    pub split_cells: usize,
+    /// Most tiles one slab may split into (more fall back to a coarser grid, then to one).
+    pub max_tiles_per_slab: usize,
+    /// Texels the tree's tiles may add up to (before packing): the pixels per unit are lowered
+    /// below `max_tile` / largest tile until the tiles fit the budget, so a crown split into many
+    /// tiles does not grow its atlas; what the split saves goes into finer texels.
+    pub atlas_budget: u32,
+    /// Weight of the leaves' vertex colours in the baked colour (0 = ignored, white; 1 = as the
+    /// full model, which the engine darkens by them). The crown's vertex colours are white in the
+    /// LOD model, and the engine lights the crown without the full tree's soft-light mask (slot 2
+    /// of its leaf shader, far brighter than the diffuse), so the darkening of inner leaves that
+    /// the full tree's backlight makes up for would leave the LOD crown dark.
+    pub vertex_color_weight: f32,
 }
 
 impl Default for CloudParams {
     fn default() -> Self {
-        CloudParams { yaws: vec![0.0, 45.0, 90.0, 135.0], vertical_slices: 3, horizontal_slices: 3, min_tile: 16, max_tile: 256, horizontal_min: 0.85, bark_in_slices: true, dither: true }
+        CloudParams {
+            yaws: vec![0.0, 45.0, 90.0, 135.0],
+            vertical_slices: 3,
+            horizontal_slices: 3,
+            min_tile: 16,
+            max_tile: 256,
+            horizontal_min: 0.85,
+            bark_in_slices: true,
+            dither: false,
+            split_cells: 6,
+            max_tiles_per_slab: 8,
+            atlas_budget: 1024 * 512,
+            vertex_color_weight: 0.0,
+        }
     }
 }
 
@@ -172,19 +205,112 @@ pub fn plan(src: &Nif, shapes: &[SourceShape], crown: &[&LevelPart], p: &CloudPa
                 continue;
             }
             let d = slab.iter().map(|l| l.dist).sum::<f32>() / slab.len() as f32;
-            if let Some(t) = tile(src, shapes, crown, &baked, &slab, (u, v, n, d), p) {
-                tiles.push(t);
+            for group in split_slab(&slab, crown, &baked, (u, v), p) {
+                if let Some(t) = tile(src, shapes, crown, &baked, &group, (u, v, n, d), p) {
+                    tiles.push(t);
+                }
             }
         }
     }
-    // The largest tile side gets `max_tile` pixels; every tile the same pixels per unit.
+    // The largest tile side gets `max_tile` pixels; every tile the same pixels per unit, lowered
+    // until the packed atlas ([`pack`]) fits the budget.
     let largest = tiles.iter().map(|t| (t.a1 - t.a0).max(t.b1 - t.b0)).fold(0.0f32, f32::max).max(1e-3);
-    let ppu = p.max_tile as f32 / largest;
-    for t in &mut tiles {
-        t.width = (((t.a1 - t.a0) * ppu).round() as u32).clamp(p.min_tile, p.max_tile);
-        t.height = (((t.b1 - t.b0) * ppu).round() as u32).clamp(p.min_tile, p.max_tile);
+    let mut ppu = p.max_tile as f32 / largest;
+    for _ in 0..6 {
+        for t in &mut tiles {
+            t.width = (((t.a1 - t.a0) * ppu).round() as u32).clamp(p.min_tile, p.max_tile);
+            t.height = (((t.b1 - t.b0) * ppu).round() as u32).clamp(p.min_tile, p.max_tile);
+        }
+        let sizes: Vec<(u32, u32)> = tiles.iter().map(|t| (t.width, t.height)).collect();
+        let (_, (aw, ah)) = pack(&sizes);
+        let area = u64::from(aw) * u64::from(ah);
+        if area <= u64::from(p.atlas_budget) || ppu * largest <= p.min_tile as f32 * 2.0 {
+            break;
+        }
+        // A power-of-two atlas: shrink by at least a step of root two so the next try lands a size down.
+        ppu *= (p.atlas_budget as f32 / area as f32).sqrt().min(0.7);
     }
     tiles
+}
+
+/// Groups a slab's leaves by where they lie in the plane: an occupancy grid of `split_cells` x
+/// `split_cells` cells over the leaves' projected centroids, each connected run of occupied cells
+/// (4-neighbourhood) one group. A tile then covers one cluster of leaves instead of the whole
+/// crown's extent, so the atlas (whose texels per unit follow the largest tile) holds three to
+/// four times the detail at the same size. More than `max_tiles_per_slab` groups fall back to a
+/// grid half as fine, then to the whole slab. Tiles of one slab are coplanar; a leaf is drawn by
+/// the tile its centroid falls in, whose extent grows to hold it whole.
+fn split_slab<'a>(slab: &[&'a Leaf], crown: &[&LevelPart], baked: &[Baked], (u, v): ([f32; 3], [f32; 3]), p: &CloudParams) -> Vec<Vec<&'a Leaf>> {
+    if slab.len() < 24 || p.split_cells < 2 || p.max_tiles_per_slab < 2 {
+        return vec![slab.to_vec()];
+    }
+    let centroids: Vec<(f32, f32)> = slab
+        .iter()
+        .map(|l| {
+            let pos = &baked[l.part].0;
+            let [a, b, c] = crown[l.part].mesh.triangles[l.tri].map(|i| pos[i as usize]);
+            let m = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0];
+            (dot(m, u), dot(m, v))
+        })
+        .collect();
+    let (a0, a1) = centroids.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), c| (lo.min(c.0), hi.max(c.0)));
+    let (b0, b1) = centroids.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), c| (lo.min(c.1), hi.max(c.1)));
+    let (wa, wb) = ((a1 - a0).max(1e-3), (b1 - b0).max(1e-3));
+    for cells in [p.split_cells, (p.split_cells / 2).max(2)] {
+        let cell_of = |c: &(f32, f32)| -> usize {
+            let x = (((c.0 - a0) / wa) * cells as f32) as usize;
+            let y = (((c.1 - b0) / wb) * cells as f32) as usize;
+            y.min(cells - 1) * cells + x.min(cells - 1)
+        };
+        let cell: Vec<usize> = centroids.iter().map(cell_of).collect();
+        let mut occupied = vec![false; cells * cells];
+        for &c in &cell {
+            occupied[c] = true;
+        }
+        let mut label = vec![usize::MAX; cells * cells];
+        let mut groups = 0usize;
+        for start in 0..cells * cells {
+            if !occupied[start] || label[start] != usize::MAX {
+                continue;
+            }
+            let mut stack = vec![start];
+            label[start] = groups;
+            while let Some(k) = stack.pop() {
+                let (x, y) = (k % cells, k / cells);
+                let mut visit = |nx: usize, ny: usize| {
+                    let j = ny * cells + nx;
+                    if occupied[j] && label[j] == usize::MAX {
+                        label[j] = groups;
+                        stack.push(j);
+                    }
+                };
+                if x > 0 {
+                    visit(x - 1, y);
+                }
+                if x + 1 < cells {
+                    visit(x + 1, y);
+                }
+                if y > 0 {
+                    visit(x, y - 1);
+                }
+                if y + 1 < cells {
+                    visit(x, y + 1);
+                }
+            }
+            groups += 1;
+        }
+        if groups <= 1 {
+            return vec![slab.to_vec()];
+        }
+        if groups <= p.max_tiles_per_slab {
+            let mut out: Vec<Vec<&Leaf>> = vec![Vec::new(); groups];
+            for (l, &c) in slab.iter().zip(&cell) {
+                out[label[c]].push(l);
+            }
+            return out.into_iter().filter(|g| !g.is_empty()).collect();
+        }
+    }
+    vec![slab.to_vec()]
 }
 
 fn tile(src: &Nif, shapes: &[SourceShape], crown: &[&LevelPart], baked: &[Baked], slab: &[&Leaf], (u, v, n, d): ([f32; 3], [f32; 3], [f32; 3], f32), p: &CloudParams) -> Option<Tile> {
@@ -225,7 +351,8 @@ fn tile(src: &Nif, shapes: &[SourceShape], crown: &[&LevelPart], baked: &[Baked]
         shape.positions = m.positions.iter().map(|q| to_frame(*q)).collect();
         shape.normals = if has[1] { m.normals.iter().map(|q| dir(*q)).collect() } else { Vec::new() };
         shape.uvs = m.uvs.clone();
-        shape.colors = if has[2] { m.colors.clone() } else { Vec::new() };
+        // Vertex colours weighted toward white (see CloudParams::vertex_color_weight); alpha kept.
+        shape.colors = if has[2] { m.colors.iter().map(|c| [lerp_white(c[0], p.vertex_color_weight), lerp_white(c[1], p.vertex_color_weight), lerp_white(c[2], p.vertex_color_weight), c[3]]).collect() } else { Vec::new() };
         shape.triangles = m.triangles.iter().map(|t| t.map(|i| i as u16)).collect();
         children.push(Some(out.add_block(Block::TriShape(shape))));
     }
@@ -238,9 +365,13 @@ fn tile(src: &Nif, shapes: &[SourceShape], crown: &[&LevelPart], baked: &[Baked]
     // A small margin so edge texels are not cut.
     let (ma, mb) = ((a1 - a0) * 0.01, (b1 - b0) * 0.01);
     let (a0, a1, b0, b1) = (a0 - ma, a1 + ma, b0 - mb, b1 + mb);
-    let _ = p;
     // Sizes are set by [plan] once every tile's extent is known.
     Some(Tile { u, v, n, d, a0, a1, b0, b1, width: 0, height: 0, nif: out, triangles: count })
+}
+
+/// A vertex colour channel moved toward 255 by weight `w` (1 = unchanged, 0 = white).
+fn lerp_white(c: u8, w: f32) -> u8 {
+    (255.0 - (255.0 - f32::from(c)) * w.clamp(0.0, 1.0)).round() as u8
 }
 
 /// The source shape's shader, texture set and alpha property copied into `out`.

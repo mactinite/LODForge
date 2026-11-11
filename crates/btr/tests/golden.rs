@@ -2,7 +2,10 @@
 //! description and assembling it again reproduces the bytes (so the block layout, names, tables
 //! and field values of docs/re/terrain-lod-spec.md section 1 are the ones we write); the bound
 //! rules of 1.4 / 1.7 / 1.8 reproduce the stored bounds; the UV halves are what `f32_to_half`
-//! produces. Skipped when the golden folder is missing.
+//! produces.
+//!
+//! Golden folder: `LODFORGE_GOLDEN_BTR`, else `golden/meshes/terrain/Tamriel` in the repository
+//! (git-ignored: copy an xLODGen output there). Skipped when the folder is missing.
 
 use std::path::{Path, PathBuf};
 
@@ -10,13 +13,10 @@ use lodforge_btr::bounds::BBox;
 use lodforge_btr::btr::{Btr, parse_file_name, texture_paths};
 use lodforge_nif::{f32_to_half, half_to_f32, parse};
 
-const DEFAULT_DIR: &str =
-    r"D:\Modlists\LODForge-golden\no-seasons-20261017-031139\output\meshes\terrain\Tamriel";
-
 fn golden_files() -> Option<Vec<PathBuf>> {
-    let dir = std::env::var("LODFORGE_GOLDEN_BTR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_DIR));
+    let dir = std::env::var("LODFORGE_GOLDEN_BTR").map(PathBuf::from).unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../golden/meshes/terrain/Tamriel")
+    });
     if !dir.is_dir() {
         eprintln!("golden BTR folder {} missing, skipping", dir.display());
         return None;

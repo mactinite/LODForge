@@ -223,6 +223,103 @@ pub struct WorldDynamic<'a> {
     pub seasonal: Vec<(&'static str, HashMap<u32, (u32, String)>)>,
     /// Child worldspace references copied in, with the model of their base copy.
     pub child_copies: Vec<(crate::childworld::ChildCopy, String)>,
+    /// DynDOLOD.esm object ids the copies were given up front ([`ChildCopyIds::assign`]): copy
+    /// id -> object id. Copies missing here get theirs here, by record key.
+    pub child_copy_ids: HashMap<u32, u32>,
+}
+
+/// EditorID of a child-world copy's DynDOLOD.esm reference: `<plugin tag>&<object id>_DynDOLOD_CHILD`,
+/// the tag being the defining plugin's file name in lower case without punctuation (golden:
+/// `jksskyrimesp&00F6A3_DynDOLOD_CHILD`).
+pub fn child_copy_editor_id(plugin: &str, local: u32) -> String {
+    let tag: String = plugin.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    format!("{tag}&{local:06X}_DynDOLOD_CHILD")
+}
+
+/// The [`record_key`] under which a child-world copy keeps its DynDOLOD.esm form id across
+/// rebuilds.
+pub fn child_copy_key(plugin: &str, local: u32) -> String {
+    record_key(b"REFR", &child_copy_editor_id(plugin, local), "")
+}
+
+/// (local object id, defining plugin file name) of a load-order form id.
+pub fn plugin_name_of(lo: &LoadOrder, owners: &HashMap<u32, usize>, id: u32) -> (u32, String) {
+    let name = owners.get(&crate::bases::owner_key(id)).map(|&i| lo.plugins[i].plugin.name.clone()).unwrap_or_default();
+    let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
+    (local, name)
+}
+
+/// DynDOLOD.esm object ids of the child-world copies, settled before the plugin is built so the
+/// runtime statics export (instance-formats.md section 6) can name a copy's `_DynDOLOD_CHILD`
+/// reference instead of writing it as a synthetic instance. A copy whose [`child_copy_key`] the
+/// earlier DynDOLOD.esm holds keeps that id (as [`PluginBuilder::keyed_id`] would hand it out);
+/// any other gets the next free object id after the earlier plugin's, reserved here, when the
+/// plugin stage will write the plugin (`reserve_new`), else none (the copy stays synthetic:
+/// the DynDOLOD.esm in the output has no reference for it). [`build_worlds`] then emits the
+/// copies with these ids and continues its new ids after [`ChildCopyIds::next_object_id`].
+#[derive(Debug, Default, Clone)]
+pub struct ChildCopyIds {
+    /// Per worldspace form id: copy id ([`crate::childworld::ChildCopy::copy_id`]) -> object id.
+    by_world: HashMap<u32, HashMap<u32, u32>>,
+    /// The earlier plugin's ids by record key, taken as copies claim them.
+    reuse: HashMap<String, std::collections::VecDeque<u32>>,
+    /// First object id the plugin builder may hand out (after the reservations).
+    pub next_object_id: u32,
+    /// Reserve new ids for copies the earlier plugin lacks.
+    pub reserve_new: bool,
+    /// Copies with an earlier plugin's id, with a reserved new id, and without any.
+    pub kept: usize,
+    pub reserved: usize,
+    pub unresolved: usize,
+}
+
+impl ChildCopyIds {
+    /// `prev`: the DynDOLOD.esm the build continues (or, when no plugin is written, the one in
+    /// the output the copies are resolved against); `reserve_new`: the plugin stage will write
+    /// the plugin, so copies without an earlier id get fresh ones.
+    pub fn new(prev: Option<&Previous>, reserve_new: bool) -> ChildCopyIds {
+        ChildCopyIds {
+            by_world: HashMap::new(),
+            reuse: prev.map(|p| p.ids.clone()).unwrap_or_default(),
+            next_object_id: prev.map_or(FIRST_OBJECT_ID, |p| p.next_object_id.max(FIRST_OBJECT_ID)),
+            reserve_new,
+            kept: 0,
+            reserved: 0,
+            unresolved: 0,
+        }
+    }
+
+    /// Settles the ids of `world`'s copies, in copy order as [`build_worlds`] emits them; a copy
+    /// in a cell the worldspace has no record for gets no reference there and so no id.
+    pub fn assign<'c>(&mut self, lo: &LoadOrder, world: &Worldspace, copies: impl IntoIterator<Item = &'c crate::childworld::ChildCopy>) -> &HashMap<u32, u32> {
+        let owners = crate::bases::owners(lo);
+        let map = self.by_world.entry(world.form_id).or_default();
+        for cp in copies {
+            let p = &cp.placement;
+            let grid = ((p.position[0] / 4096.0).floor() as i32, (p.position[1] / 4096.0).floor() as i32);
+            if !world.cell_records.contains_key(&grid) {
+                continue;
+            }
+            let (local, plugin) = plugin_name_of(lo, &owners, cp.ref_id);
+            let key = child_copy_key(&plugin, local);
+            if let Some(id) = self.reuse.get_mut(&key).and_then(std::collections::VecDeque::pop_front) {
+                map.insert(cp.copy_id, id);
+                self.kept += 1;
+            } else if self.reserve_new {
+                map.insert(cp.copy_id, self.next_object_id);
+                self.next_object_id += 1;
+                self.reserved += 1;
+            } else {
+                self.unresolved += 1;
+            }
+        }
+        map
+    }
+
+    /// The settled ids of a worldspace (copy id -> object id), if it was assigned.
+    pub fn world(&self, world: u32) -> Option<&HashMap<u32, u32>> {
+        self.by_world.get(&world)
+    }
 }
 
 /// A child worldspace of a [`WorldDynamic`].
@@ -477,12 +574,15 @@ pub struct MultiOutput {
 pub struct Rolling<'a> {
     pub esm: Option<&'a Previous>,
     pub esp: Option<&'a Previous>,
+    /// Object ids below this are taken in DynDOLOD.esm (reserved up front by
+    /// [`ChildCopyIds`]); new records continue from here. 0 for none.
+    pub esm_next_object_id: u32,
 }
 
 /// Builds both plugins and the data files for one worldspace.
 #[allow(clippy::too_many_arguments)]
 pub fn build(lo: &LoadOrder, world: &Worldspace, bases: &HashMap<u32, Base>, dynamic: &[DynamicRef], south_west: (i32, i32), near_grid: u32, far_grid: u32, token: &str, rolling: &Rolling<'_>) -> Result<Output, String> {
-    let mut m = build_worlds(lo, &[WorldDynamic { world, dynamic, south_west, lod_refs: &[], children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new() }], bases, near_grid, far_grid, token, rolling, None, None)?;
+    let mut m = build_worlds(lo, &[WorldDynamic { world, dynamic, south_west, lod_refs: &[], children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new(), child_copy_ids: HashMap::new() }], bases, near_grid, far_grid, token, rolling, None, None)?;
     let world_txt = m.world_txts.pop().map(|w| w.1).unwrap_or_default();
     Ok(Output { esm: m.esm, esp: m.esp, worlds_txt: m.worlds_txt, world_txt })
 }
@@ -501,6 +601,7 @@ pub fn build_worlds(lo: &LoadOrder, worlds: &[WorldDynamic<'_>], bases: &HashMap
     if let Some(p) = rolling.esm {
         esm.resume(p);
     }
+    esm.next_object_id = esm.next_object_id.max(rolling.esm_next_object_id);
     if workarounds.is_some() {
         // The marker base: an Is Marker STAT with MarkerX.nif, as DynDOLOD writes it.
         esm.add(
@@ -523,11 +624,7 @@ pub fn build_worlds(lo: &LoadOrder, worlds: &[WorldDynamic<'_>], bases: &HashMap
     framework(&mut esp);
     let master_base = NEW | MASTER_ACTIVATOR_ID;
     let owners = crate::bases::owners(lo);
-    let plugin_name = |id: u32| -> (u32, String) {
-        let name = owners.get(&crate::bases::owner_key(id)).map(|&i| lo.plugins[i].plugin.name.clone()).unwrap_or_default();
-        let local = if id >> 24 == 0xFE { id & 0xFFF } else { id & 0x00FF_FFFF };
-        (local, name)
-    };
+    let plugin_name = |id: u32| -> (u32, String) { plugin_name_of(lo, &owners, id) };
     let mut replacement_ids = HashMap::new();
     for wd in worlds {
         for d in wd.dynamic.iter().filter(|d| d.replace) {
@@ -696,7 +793,6 @@ pub fn build_worlds(lo: &LoadOrder, worlds: &[WorldDynamic<'_>], bases: &HashMap
             // `childworldfull.txt` references keep their own base (the full model).
             let base_id = if cp.full_model { p.base } else { base_copy(&mut esm, &mut copies, &mut tex, b, model) };
             let (ol, op) = plugin_name(cp.ref_id);
-            let tag: String = op.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
             let mut data = Vec::with_capacity(24);
             for v in p.position.iter().chain(p.rotation.iter()) {
                 data.extend_from_slice(&v.to_le_bytes());
@@ -704,8 +800,12 @@ pub fn build_worlds(lo: &LoadOrder, worlds: &[WorldDynamic<'_>], bases: &HashMap
             // Visible When Distant on everything but upright trees (golden: STAT copies and
             // tilted trees), unless the base has 0x10000.
             let vwd = (!crate::assign::is_tree(b) || crate::export::tree_tilted(p.rotation, 30.0)) && b.flags & 0x0001_0000 == 0;
-            let edid = format!("{tag}&{ol:06X}_DynDOLOD_CHILD");
-            let id = esm.keyed_id(&record_key(b"REFR", &edid, ""));
+            let edid = child_copy_editor_id(&op, ol);
+            // The id settled up front (the runtime statics export already names it), else by key.
+            let id = match wd.child_copy_ids.get(&cp.copy_id) {
+                Some(&object_id) => NEW | object_id,
+                None => esm.keyed_id(&child_copy_key(&op, ol)),
+            };
             let mut rec = Rec::new(b"REFR", if vwd { 0x8000 } else { 0 }, id).field(b"EDID", zs(&edid)).field(b"NAME", base_id.to_le_bytes().to_vec());
             if p.has_scale && p.scale != 1.0 {
                 rec = rec.field(b"XSCL", p.scale.to_le_bytes().to_vec());
@@ -1024,12 +1124,12 @@ mod tests {
                 WorldDynamic {
                     world: parent, dynamic: &dynamic, south_west: (0, 0), lod_refs: &[],
                     children: vec![ChildWorld { world: &child, revert_refs: selected.clone(), bounds: None, no_navmesh_cells: false }],
-                    underside: None, seasonal: Vec::new(), child_copies: Vec::new(),
+                    underside: None, seasonal: Vec::new(), child_copies: Vec::new(), child_copy_ids: HashMap::new(),
                 },
                 // Also selected independently: the child's existing WRLD must be merged, not duplicated.
                 WorldDynamic {
                     world: &child, dynamic: &[], south_west: (0, 0), lod_refs: &[],
-                    children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new(),
+                    children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new(), child_copy_ids: HashMap::new(),
                 },
             ];
             build_worlds(&lo, &inputs, &bases, 11, 21, "TOKEN", rolling, wa, None)
@@ -1052,7 +1152,7 @@ mod tests {
             assert_eq!(child_after.refs[&0x0100_0921].flags, 0x10400);
             assert!(!after.iter().find(|w| w.editor_id == "TestWorld").unwrap().refs.contains_key(&0x0100_0920));
             let (esm, esp) = (Previous::read(&out.esm).unwrap(), Previous::read(&out.esp).unwrap());
-            let again = build(child, large, wa, &Rolling { esm: Some(&esm), esp: Some(&esp) }).unwrap();
+            let again = build(child, large, wa, &Rolling { esm: Some(&esm), esp: Some(&esp), esm_next_object_id: 0 }).unwrap();
             assert_eq!(out.esm, again.esm);
             assert_eq!(out.esp, again.esp);
             let mut missing = child.clone();
@@ -1101,7 +1201,7 @@ mod tests {
         let world = worlds.iter().find(|w| w.editor_id == "TestWorld").unwrap();
         let mut bases = HashMap::new();
         bases.insert(0x800, Base { signature: *b"STAT", form_id: 0x800, editor_id: "Rock".into(), flags: 0, model: "rock.nif".into(), mnam: None, material: 0, winning_plugin: 0, dnam: Vec::new(), bounds: [0; 6], type_data: Vec::new(), water_type: 0, alt_textures: Vec::new() });
-        build_worlds(lo, &[WorldDynamic { world, dynamic, south_west: (0, 0), lod_refs: &[], children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new() }], &bases, 11, 21, token, rolling, Some(Workarounds { margin: 3 }), None).unwrap()
+        build_worlds(lo, &[WorldDynamic { world, dynamic, south_west: (0, 0), lod_refs: &[], children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new(), child_copy_ids: HashMap::new() }], &bases, 11, 21, token, rolling, Some(Workarounds { margin: 3 }), None).unwrap()
     }
 
     #[test]
@@ -1142,7 +1242,7 @@ mod tests {
         for wa in [None, Some(Workarounds { margin: 3 })] {
             let build = |world: &Worldspace, rolling: &Rolling<'_>| build_worlds(
                 &lo, &[WorldDynamic { world, dynamic: &dynamic, south_west: (0, 0), lod_refs: &[],
-                    children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new() }],
+                    children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: Vec::new(), child_copy_ids: HashMap::new() }],
                 &bases, 11, 21, "TOKEN", rolling, wa, None,
             );
             let out = build(&world, &Rolling::default()).unwrap();
@@ -1182,7 +1282,7 @@ mod tests {
             assert_eq!(copy.position, [1024.0, 2048.0, 100.0]);
             assert_eq!(copy.scale, 1.5);
             let (esm, esp) = (Previous::read(&out.esm).unwrap(), Previous::read(&out.esp).unwrap());
-            let again = build(&world, &Rolling { esm: Some(&esm), esp: Some(&esp) }).unwrap();
+            let again = build(&world, &Rolling { esm: Some(&esm), esp: Some(&esp), esm_next_object_id: 0 }).unwrap();
             assert_eq!(out.esm, again.esm);
             assert_eq!(out.esp, again.esp);
             assert_eq!(out.world_txts, again.world_txts);
@@ -1203,7 +1303,7 @@ mod tests {
         // Same input on top of the first build: identical plugins and data files.
         let (pm, pp) = (Previous::read(&a.esm).unwrap(), Previous::read(&a.esp).unwrap());
         assert_eq!(pp.token.as_deref(), Some("TOKEN"));
-        let b = run(&lo, &first, "TOKEN", &Rolling { esm: Some(&pm), esp: Some(&pp) });
+        let b = run(&lo, &first, "TOKEN", &Rolling { esm: Some(&pm), esp: Some(&pp), esm_next_object_id: 0 });
         assert!(a.esm == b.esm && a.esp == b.esp, "rebuild changed the plugins");
         assert_eq!(a.worlds_txt, b.worlds_txt);
         assert_eq!(a.world_txts, b.world_txts);
@@ -1212,7 +1312,7 @@ mod tests {
         // its id, the new ones continue after the old next object id.
         let mut more = vec![dynamic(0x810, "lod\\rock_c.nif")];
         more.extend(first.iter().map(|d| dynamic(d.ref_id, &d.model)));
-        let c = run(&lo, &more, "TOKEN", &Rolling { esm: Some(&pm), esp: Some(&pp) });
+        let c = run(&lo, &more, "TOKEN", &Rolling { esm: Some(&pm), esp: Some(&pp), esm_next_object_id: 0 });
         // (old, new, added count): the reference in DynDOLOD.esp, its base copy in DynDOLOD.esm.
         for (old, new, n) in [(&pp, Previous::read(&c.esp).unwrap(), 1), (&pm, Previous::read(&c.esm).unwrap(), 1)] {
             for (key, ids) in &old.ids {
@@ -1223,6 +1323,99 @@ mod tests {
             assert_eq!(added, (old.next_object_id..old.next_object_id + n).collect::<Vec<_>>());
             assert_eq!(new.next_object_id, old.next_object_id + n);
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The child-world copies' DynDOLOD.esm ids settled before the plugin is built (for the
+    /// runtime statics) are the ids the plugin then carries: an earlier build's id by record
+    /// key, a reserved new one otherwise, never colliding with the plugin's other new records;
+    /// without a plugin stage only the earlier build's ids resolve.
+    #[test]
+    fn child_copy_ids_settled_up_front_match_the_plugin() {
+        use crate::childworld::{COPY_ID_BASE, ChildCopy};
+        let dir = std::env::temp_dir().join(format!("lodforge-child-ids-{}", std::process::id()));
+        let mut pb = PluginBuilder::new(0x900);
+        pb.esm = true;
+        pb.add(Rec::new(b"STAT", 0, NEW | 0x800).field(b"EDID", zs("Rock")).field(b"OBND", vec![0u8; 12]).field(b"MODL", zs("rock.nif")));
+        let data: Vec<u8> = [1024.0f32, 2048.0, 100.0, 0.0, 0.0, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        pb.worlds.push(WorldContent {
+            world: Rec::new(b"WRLD", 0, NEW | 0x801).field(b"EDID", zs("TestWorld")),
+            persistent_cell: Some(Rec::new(b"CELL", 0, NEW | 0x802).field(b"DATA", vec![2, 0])),
+            persistent: Vec::new(),
+            cells: vec![CellContent {
+                grid: (0, 0),
+                cell: Rec::new(b"CELL", 0, NEW | 0x803).field(b"DATA", vec![0, 0]).field(b"XCLC", vec![0; 12]),
+                temporary: (0..3u32).map(|n| Rec::new(b"REFR", 0, NEW | (0x810 + n)).field(b"NAME", (NEW | 0x800).to_le_bytes().to_vec()).field(b"DATA", data.clone())).collect(),
+            }],
+        });
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = LoadOrder::open(&[], |_| None).unwrap();
+        std::fs::write(dir.join("Test.esm"), pb.write(&empty)).unwrap();
+        let lo = LoadOrder::open(&["Test.esm".to_string()], |n| Some(dir.join(n))).unwrap();
+        let worlds = lodforge_esp::scan_worldspaces(&lo).unwrap();
+        let world = worlds.iter().find(|w| w.editor_id == "TestWorld").unwrap();
+        let mut bases = HashMap::new();
+        bases.insert(0x800, Base { signature: *b"STAT", form_id: 0x800, editor_id: "Rock".into(), model: "rock.nif".into(), ..Default::default() });
+        let copy = |n: u32, ref_id: u32| ChildCopy {
+            child_world: 0x801,
+            ref_id,
+            placement: lodforge_esp::Placement { position: [1024.0 + 10.0 * n as f32, 2048.0, 100.0], base: 0x800, ..Default::default() },
+            copy_id: COPY_ID_BASE | n,
+            full_model: false,
+            large: true,
+        };
+        let model = "lod\\rock_lod.nif".to_string();
+        let build = |copies: Vec<(ChildCopy, String)>, ids: HashMap<u32, u32>, rolling: &Rolling<'_>| {
+            let dynamic = [dynamic(0x812, "lod\\rock_b.nif")];
+            build_worlds(&lo, &[WorldDynamic { world, dynamic: &dynamic, south_west: (0, 0), lod_refs: &[], children: Vec::new(), underside: None, seasonal: Vec::new(), child_copies: copies, child_copy_ids: ids }], &bases, 11, 21, "TOKEN", rolling, Some(Workarounds { margin: 3 }), None).unwrap()
+        };
+        let all_ids = |p: &Previous| -> Vec<u32> {
+            let mut v: Vec<u32> = p.ids.values().flatten().copied().collect();
+            v.sort_unstable();
+            v
+        };
+        // First build: one copy, its id by key.
+        let a = build(vec![(copy(0, 0x810), model.clone())], HashMap::new(), &Rolling::default());
+        let (pm, pp) = (Previous::read(&a.esm).unwrap(), Previous::read(&a.esp).unwrap());
+        let key = |local: u32| child_copy_key("Test.esm", local);
+        assert_eq!(child_copy_editor_id("Test.esm", 0x810), "testesm&000810_DynDOLOD_CHILD");
+        let first = pm.ids[&key(0x810)][0];
+        // Settled up front for a rebuild with a second copy: the old id kept, a new one reserved.
+        let mut ids = ChildCopyIds::new(Some(&pm), true);
+        let map = ids.assign(&lo, world, [copy(0, 0x810), copy(1, 0x811)].iter()).clone();
+        assert_eq!(map[&(COPY_ID_BASE)], first);
+        assert_eq!(map[&(COPY_ID_BASE | 1)], pm.next_object_id);
+        assert_eq!((ids.kept, ids.reserved, ids.unresolved, ids.next_object_id), (1, 1, 0, pm.next_object_id + 1));
+        let rolling = Rolling { esm: Some(&pm), esp: Some(&pp), esm_next_object_id: ids.next_object_id };
+        // A third copy the settlement did not see (a new model: its base copy is new too) gets
+        // its ids from the plugin builder, after the reserved one.
+        let three = |m2: &str| vec![(copy(0, 0x810), model.clone()), (copy(1, 0x811), model.clone()), (copy(2, 0x812), m2.to_string())];
+        let b = build(three("lod\\rock_c.nif"), map.clone(), &rolling);
+        let bm = Previous::read(&b.esm).unwrap();
+        assert_eq!(bm.ids[&key(0x810)][0], first);
+        assert_eq!(bm.ids[&key(0x811)][0], pm.next_object_id);
+        assert!(bm.ids[&key(0x812)][0] > pm.next_object_id, "the plugin's other new records continue after the reserved id");
+        let ids_b = all_ids(&bm);
+        assert!(ids_b.windows(2).all(|w| w[0] != w[1]), "duplicate object ids in DynDOLOD.esm: {ids_b:X?}");
+        assert!(bm.next_object_id >= pm.next_object_id + 3);
+        // The same again on top of that plugin: every copy keeps its id, identical plugin.
+        let mut again = ChildCopyIds::new(Some(&bm), true);
+        let map2 = again.assign(&lo, world, [copy(0, 0x810), copy(1, 0x811), copy(2, 0x812)].iter()).clone();
+        assert_eq!((map2[&COPY_ID_BASE], map2[&(COPY_ID_BASE | 1)], map2[&(COPY_ID_BASE | 2)]), (first, pm.next_object_id, bm.ids[&key(0x812)][0]));
+        assert_eq!((again.kept, again.reserved), (3, 0));
+        let c = build(three("lod\\rock_c.nif"), map2, &Rolling { esm: Some(&bm), esp: Some(&Previous::read(&b.esp).unwrap()), esm_next_object_id: again.next_object_id });
+        assert!(c.esm == b.esm, "rebuild changed DynDOLOD.esm");
+        // No plugin stage: only the copies the plugin in the output has resolve.
+        let mut without = ChildCopyIds::new(Some(&pm), false);
+        let map3 = without.assign(&lo, world, [copy(0, 0x810), copy(1, 0x811)].iter()).clone();
+        assert_eq!(map3.len(), 1);
+        assert_eq!(map3[&COPY_ID_BASE], first);
+        assert_eq!(without.unresolved, 1);
+        // A copy in a cell the worldspace has no record for gets no id (the plugin skips it).
+        let mut off = ChildCopyIds::new(Some(&pm), true);
+        let mut far = copy(2, 0x812);
+        far.placement.position = [9.0 * 4096.0, 0.0, 0.0];
+        assert!(off.assign(&lo, world, [far].iter()).is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -334,6 +334,8 @@ pub fn build_lines(inp: &ExportInput<'_>) -> (Vec<RefLine>, HashMap<u32, Skip>) 
             (cols, inp.rules[ri].flags, &inp.rules[ri])
         };
         let (columns, rule_flags, rule) = columns;
+        // A door or gate open by default shows its open-state LOD models where they exist.
+        let columns = if p.open_by_default { inp.resolver.open_columns(b, lod, &columns).unwrap_or(columns) } else { columns };
         let mut material = String::new();
         let mat = inp.materials.get(&b.material).map(|m| m.to_ascii_lowercase()).unwrap_or_default();
         // NoMATO rules drop the snow/ash material object.
@@ -738,7 +740,7 @@ mod parent_tests {
         let mut world = Worldspace::default();
         world.refs.insert(1, lodforge_esp::Placement {
             base: 100, flags, position: [0.0; 3], rotation: [0.0; 3], scale: 1.0,
-            has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0,
+            has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0, open_by_default: false,
             cell: Some((0, 0)), offset: 0, plugin: 0,
         });
         let bases = HashMap::from([(100, Base { form_id: 100, signature: *b"DOOR", model: model.into(), ..Default::default() })]);
@@ -751,7 +753,7 @@ mod parent_tests {
         let mesh_crc = crate::lodmodels::MeshCrcTable::default();
         let resolver = Resolver {
             rules: &rules, index: &index, parallax: &parallax, materials: &materials,
-            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| present, level32: false, mesh_crc: &mesh_crc,
+            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| present, level32: false, model_fallback: false, mesh_crc: &mesh_crc,
         };
         build_dynamic(&ExportInput {
             world: &world, bases: &bases, materials: &materials, resolver: &resolver,
@@ -780,7 +782,7 @@ mod parent_tests {
         let mut world = Worldspace::default();
         world.refs.insert(0x801, lodforge_esp::Placement {
             base: 0x800, flags: 0, position: [100.0, 100.0, 0.0], rotation: [0.0; 3], scale: 1.0,
-            has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0,
+            has_scale: false, enable_parent: false, enable_parent_id: 0, enable_parent_flags: 0, open_by_default: false,
             cell: Some((0, 0)), offset: 0, plugin: 0,
         });
         let bases = HashMap::from([(0x800, Base { form_id: 0x800, signature: *b"TREE", model: "landscape\\trees\\testtree.nif".into(), ..Default::default() })]);
@@ -793,7 +795,7 @@ mod parent_tests {
         let mesh_crc = crate::lodmodels::MeshCrcTable::default();
         let resolver = Resolver {
             rules: &rules, index: &index, parallax: &parallax, materials: &materials,
-            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| true, level32: false, mesh_crc: &mesh_crc,
+            plugins: &plugins, owners: &owners, read: &|_| None, exists: &|_| true, level32: false, model_fallback: false, mesh_crc: &mesh_crc,
         };
         build_lines(&ExportInput {
             world: &world, bases: &bases, materials: &materials, resolver: &resolver,

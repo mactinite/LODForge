@@ -47,7 +47,11 @@ round-trip tests and the test vectors in section 8 pin the byte layout.
   bits for a full plugin, the low 12 bits for a light plugin; the load-order byte is never stored).
   The runtime resolves it with `TESDataHandler::LookupFormID(form, pluginName)` (or
   `LookupForm`). This survives load-order changes that keep the plugins. Synthetic references
-  (none in v1.0) would use `plugin = 0xFFFF`.
+  (none in v1.0) would use `plugin = 0xFFFF`. A child-world copy (a walled city's reference
+  copied into its parent's LOD, `childworld.rs`) is named by its `_DynDOLOD_CHILD` reference in
+  the build's DynDOLOD.esm (plugin `DynDOLOD.esm`, the record's object id) since 2026-10-27, so
+  the runtime can follow the engine's own large reference of it (section 6); it is synthetic
+  only when that plugin holds no such reference.
 
 ## 2. Versioning
 
@@ -328,6 +332,30 @@ split), so the instances swap together with the merged shapes of the same block.
   instance while the reference's own 3D is loaded, as the engine does for object LOD). References
   with AltTextures entries are eligible: they get their own `MESH` entry carrying the textures
   (`MTEX`). `min_copies=0` disables this rule.
+- **Child-world copies** (a walled city's references copied into the parent worldspace's LOD, as
+  DynDOLOD does it; `childworld.rs`) are instanced like the parent's own references, with the
+  model their copy shows. Their reference is the copy's `<plugin>&<id>_DynDOLOD_CHILD` REFR in
+  the build's DynDOLOD.esm: `plugin` names `DynDOLOD.esm`, `form` is that record's object id,
+  `hash` is `ref_hash("DynDOLOD.esm", form)`. The engine loads the large ones among them (the
+  `WRLD RNAM` entries) across the whole large-reference grid, so this is what the runtime's
+  per-reference hand-off follows; before 2026-10-27 they were synthetic (plugin 0xFFFF) and
+  the engine's copy and the instance drew together between the loaded cells and the grid edge.
+  The ids are settled before the object LOD stage (`dyndolod_build::child_copy_ids`): a copy
+  keeps the id the earlier DynDOLOD.esm in the output gives its record key (as a rolling
+  update does), a new copy takes the next object id after it, and the plugin stage writes the
+  same ids. When the build writes no plugins (`--runtime-no-dyndolod-plugins`) the copies are
+  resolved against whatever DynDOLOD.esm the output holds, LODForge's or DynDOLOD's own (the
+  game loads that one with the statics); a copy it has no record for stays synthetic, and the
+  runtime falls back to hiding such a large instance inside the large-reference grid while
+  DynDOLOD.esm is loaded. `build` prints the counts per worldspace ("runtime statics: N child
+  copies named by their DynDOLOD.esm reference ..."), `runtime-check` the synthetic instances
+  per file, `child-copies --esm` the resolution without a build.
+  The copies are the `childworld.rs` selection less the floating ones (`drop_floating`: a
+  model under 150 units standing more than 48 units above the parent's ground with no LOD
+  surface under, through or just over it, like Whiterun's brazier bowls on interior column
+  pieces; dyndolod-spec.md, child worldspace copies), so a dropped copy has neither a
+  `_DynDOLOD_CHILD` record nor an instance nor an export line; `build --child-keep-floating`
+  keeps them, as DynDOLOD does.
 
 An instanced reference keeps its LOD model as the merged shapes would: the runtime draws the
 entry's pack mesh (`SMPK`) with the record's transform (section 1, full 3-axis rotation). The
@@ -348,8 +376,8 @@ Section payload: `record_count` records of 32 bytes, **sorted by mesh, then hash
 | 16 | u16 | az |
 | 18 | f16 | scale |
 | 20 | u16 | mesh (`MESH` index) |
-| 22 | u16 | plugin (`PLUG` index of the reference; 0xFFFF for synthetic references such as DynDOLOD's `ICLOD`) |
-| 24 | u32 | form (local form id; 0 for synthetic) |
+| 22 | u16 | plugin (`PLUG` index of the reference; for a child-world copy the `DynDOLOD.esm` entry; 0xFFFF for synthetic references: DynDOLOD's `ICLOD`, a child-world copy without a `_DynDOLOD_CHILD` record) |
+| 24 | u32 | form (local form id; for a child-world copy its `_DynDOLOD_CHILD` record's object id; 0 for synthetic) |
 | 28 | u32 | hash (`ref_hash`; for synthetic references `fmix32` of the record's position bits) |
 
 ## 7. Far grass (`LFGR`, `.lfg`)
@@ -688,6 +716,41 @@ reorders types) invalidates every file that holds such an index. Rules:
 - `runtime-check --types` validates an output: every offset-46 type must hold the item's base
   in `impostors.json`, and `impostor_set` must match the current list.
 
+## 7c. Occlusion heightfield (`LFHF`, `<World>.hf.bin`, since 1.7 of 2026-10-27)
+
+A conservative terrain heightfield per worldspace for the LODForge Runtime's occlusion culling
+(`lodforge runtime-heightfield`, also written by `build --runtime lodforge` after each world's
+terrain meshes). The plugin draws it as one depth-only grid around the camera into its terrain
+depth target and builds the Hi-Z pyramid from that, instead of replaying every landscape draw of
+the engine (1,200+ a frame at long terrain LOD block distances: 4 ms of frame time at Whiterun,
+2026-10-27). Not a container file (section 3): a fixed little-endian header and one `i16` array.
+
+| offset | type | field |
+|---|---|---|
+| 0 | char[4] | `LFHF` |
+| 4 | u16 | version (1) |
+| 6 | u16 | spacing in LAND grid steps of 128 units (2 = 256 units) |
+| 8 | i32 | `x0`: cell x of sample column 0 |
+| 12 | i32 | `y0`: cell y of sample row 0 |
+| 16 | u32 | `nx` samples per row |
+| 20 | u32 | `ny` rows |
+| 24 | f32 | `unit`: game units per stored step (2.0) |
+| 28 | f32 | `margin`: units every sample was lowered by |
+| 32 | u32 | flags (0) |
+| 36 | u32 | byte offset of the samples |
+| 40 | u8 len + bytes | worldspace editor id |
+| | u8 len + bytes | build token (`BTOK` / `Build.txt`) |
+| | pad to 4 | |
+| samples | i16[nx * ny] | row-major from the south-west; `height = v * unit`; `-32768` = no terrain (a hole) |
+
+Sample `(i, j)` sits at world `(x0 * 4096 + i * spacing * 128, y0 * 4096 + j * spacing * 128)`.
+Its value is the lowest LAND height within `spacing` grid steps of it (a 5 x 5 window of the
+128-unit heights at spacing 2), minus `margin` (48 units by default), so a grid interpolating the
+samples never rises above the real terrain nor above the terrain LOD meshes made from the same
+heights; their simplification error is what the margin covers. Any point of the window whose
+owner cell has no LAND makes the sample a hole. A mismatched token only warns in the plugin (the
+terrain of a worldspace rarely changes between builds).
+
 ## 8. Test vectors
 
 ```
@@ -717,6 +780,17 @@ kinds, raw and zstd.
 
 ## History
 
+- **1.7, 2026-10-27 (generator only, no format change)**: floating child-world copies (small
+  models standing on pieces without LOD, like Whiterun's brazier bowls) are left out of the
+  export, the statics and DynDOLOD.esm alike (section 6; `build --child-keep-floating` keeps
+  them, as DynDOLOD does).
+- **1.7, 2026-10-27 (generator only, no format change)**: `.statics.bin` names child-world
+  copies by their `_DynDOLOD_CHILD` reference in DynDOLOD.esm (section 6) instead of writing
+  them as synthetic instances; the ids match the plugin the build writes or, without the plugin
+  stage, the DynDOLOD.esm already in the output.
+- **1.7, 2026-10-27**: `<World>.hf.bin` (`LFHF`, section 7c): the occlusion heightfield per
+  worldspace, written by `build --runtime lodforge` and `runtime-heightfield`. Its own header
+  version; no container chunk changed, so the container minor and `Build.txt` stay 1.7.
 - **1.7** (2026-10-24, extended the same evening: `<Child>.dyn.bin` parent copies, flags 17-18, `DCHW` bit 2): `<World>.dyn.bin` (`LFDY`, section 7b): dynamic LOD items, models with
   pack meshes in `StaticMeshes.bin`, seasonal models, reset / disabled / base lists, child worlds,
   underside and large references (`DLRG`); `BTOK` build token chunk in every file and

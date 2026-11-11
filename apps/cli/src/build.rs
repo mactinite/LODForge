@@ -310,11 +310,13 @@ pub fn run(a: &Args) -> Result<()> {
         }
     }
     let mut failed = Vec::new();
+    // Runtime: LOD model -> full model of the instanced statics (for the detail bake).
+    let full_models: std::sync::Arc<std::sync::Mutex<crate::detail_bake::FullModels>> = Default::default();
     // Next to the output (same volume, so grass cache files can be hard-linked).
     let work = a.dyn_opts.work_dir.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(format!(".lodforge-work-{}", std::process::id())));
     // Terrain meshes and textures of every worldspace and season run on their own thread from
     // here on; the object stages below wait per worldspace for its meshes.
-    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, filter: a.terrain_filter, lod32: a.lod32, pbr_scale: a.terrain_pbr_scale, json: a.json, lod_fill: !a.no_lod_fill }));
+    let lane = (!a.no_terrain).then(|| crate::terrain_lane::TerrainLane::start(crate::terrain_lane::LaneArgs { profile: a.profile.clone(), out: out.clone(), worlds: worlds.clone(), seasons: a.seasons.clone(), mips: a.terrain_mips, filter: a.terrain_filter, lod32: a.lod32, pbr_scale: a.terrain_pbr_scale, json: a.json, lod_fill: !a.no_lod_fill, heightfield: a.rt.on() }));
     if a.texgen {
         let t = Instant::now();
         begin(a.json, "all", "texgen", None);
@@ -384,24 +386,31 @@ pub fn run(a: &Args) -> Result<()> {
         match crate::dyndolod_build::Config::load(&p, &dir, &a.dyn_opts.preset, a.dyn_opts.static_lod) {
             Ok(mut c) => {
                 c.windows = a.dyn_opts.windows;
+                if a.dyn_opts.child_keep_floating {
+                    c.child_floating = None;
+                }
                 // Runtime mode keeps every tree in the export (as Ultra does); the object LOD stage then
                 // leaves the runtime trees out of the merged shapes.
                 c.ultra = a.dyn_opts.tree_lod == crate::dyndolod_build::TreeLodMode::Ultra || a.rt.on();
                 c.pbr = a.materials.pbr();
+                c.keep_levels = a.dyn_opts.level_coverage.keeps(&a.dyn_opts.preset);
                 for (key, v) in [("ObjectLODMaxTileSize", a.dyn_opts.atlas_max_tile), ("FullTextureMaxTileSize", a.dyn_opts.atlas_full_max_tile)] {
                     if let Some(v) = v {
                         c.ini.set("DynDOLOD", key, &v.next_power_of_two().clamp(64, 4096).to_string());
                     }
                 }
                 if !a.json {
-                    println!("DynDOLOD configuration: {} rules, {} LOD models, preset {}", c.rules.len(), c.index.len(), a.dyn_opts.preset);
+                    println!("DynDOLOD configuration: {} rules, {} LOD models, preset {}, level coverage {}", c.rules.len(), c.index.len(), a.dyn_opts.preset, if c.keep_levels { "keep" } else { "rules" });
                 }
                 dyn_worlds = scan_worldspaces(&p.load_order)?;
                 if a.dyn_opts.lod_models {
                     let t = Instant::now();
                     begin(a.json, "all", "lod-models", None);
+                    // Generated LOD models replace the base game's own; any mod's still win.
+                    c.prefer_generated_lod = true;
+                    c.rescan(&p);
                     let selected: Vec<&lodforge_esp::Worldspace> = dyn_worlds.iter().filter(|w| worlds.iter().any(|n| n.eq_ignore_ascii_case(&w.editor_id))).collect();
-                    let min_size = a.dyn_opts.lod_model_min_size.as_ref().map(|v| [0, 1, 2].map(|k| v.get(k).or(v.last()).copied().unwrap_or(0.0))).unwrap_or(crate::lod_models::DEFAULT_MIN_SIZE);
+                    let min_size = crate::lod_models::min_size(a.dyn_opts.lod_model_min_size.as_deref(), c.keep_levels);
                     let items = crate::lod_models::plan(&p, &c, &selected, &crate::lod_models::Policy { min_size, all: false });
                     let cache = a.dyn_opts.lod_model_cache.clone().unwrap_or_else(|| out.parent().unwrap_or(&out).join(".lodforge-cache"));
                     let rep = crate::lod_models::generate(&p, &items, &out, Some(&cache), &lodforge_lodmodel::LEVELS);
@@ -409,7 +418,15 @@ pub fn run(a: &Args) -> Result<()> {
                     own_output(&mut p, &out, &before)?;
                     c.rescan(&p);
                     if !a.json {
-                        println!("LOD models: {} generated for {} full models ({} from cache, {} without geometry), {} LOD models now", rep.made.len(), items.len(), rep.made.iter().filter(|(_, m)| m.cached).count(), rep.failed.len(), c.index.len());
+                        println!(
+                            "LOD models: {} generated for {} full models ({} from cache, {} open-state, {} without geometry), {} LOD models now",
+                            rep.made.len(),
+                            items.len(),
+                            rep.made.iter().filter(|(_, m)| m.cached).count(),
+                            rep.made.iter().filter(|(_, m)| m.open).count(),
+                            rep.failed.len(),
+                            c.index.len()
+                        );
                     }
                     event(a.json, "all", "lod-models", None, t.elapsed().as_millis());
                 }
@@ -460,6 +477,10 @@ pub fn run(a: &Args) -> Result<()> {
     if a.rt.on() {
         crate::instances::init_build_token(&out);
     }
+    // Runtime mode: the DynDOLOD.esm reference ids of the child-world copies, settled before the
+    // object LOD stage writes the statics (the plugin stage below keeps them).
+    let writes_plugins = dyn_mode && !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod && !(a.rt.on() && a.rt.runtime_no_dyndolod_plugins);
+    let mut copy_ids = (a.rt.on() && dyn_mode && !a.no_objects).then(|| crate::dyndolod_build::child_copy_ids(&a.dyn_opts, writes_plugins, &out));
     // Runtime mode: per worldspace, the export's large references -> `.bto` levels with a column.
     let mut large_columns: std::collections::HashMap<String, std::collections::HashMap<u32, u16>> = std::collections::HashMap::new();
     // Runtime mode: per worldspace, its export lines inside the bounds of a child worldspace that
@@ -470,6 +491,23 @@ pub fn run(a: &Args) -> Result<()> {
     let mut tex_index = crate::instances::TextureIndex::default();
     // Occlusion of each worldspace as soon as its terrain and object LOD are done (Occlusion.esp
     // itself is written at the end).
+    // Base EditorID -> its full model's snow material, for the runtime's per-base LOD snow.
+    let snow_variants: std::sync::Arc<std::collections::HashMap<String, lodforge_instances::statics::Snow>> = std::sync::Arc::new(dyn_cfg.as_ref().map(|c| c.snow_variants()).unwrap_or_default());
+    let alt_variants: std::sync::Arc<std::collections::HashMap<String, Vec<lodforge_dyndolod::bases::AltTexture>>> = std::sync::Arc::new(dyn_cfg.as_ref().map(|c| c.alt_variants()).unwrap_or_default());
+    let snow_pbr_variants: std::sync::Arc<std::collections::HashMap<String, lodforge_instances::statics::SnowPbr>> = std::sync::Arc::new(dyn_cfg.as_ref().map(|c| c.snow_pbr_variants(&p)).unwrap_or_default());
+    if !snow_pbr_variants.is_empty() && !a.json {
+        println!("snow PBR settings (Community Shaders PBRMaterialObjects) for {} snow bases", snow_pbr_variants.len());
+    }
+    if !snow_variants.is_empty() && !a.json {
+        let mut distinct: std::collections::BTreeMap<String, (lodforge_instances::statics::Snow, usize)> = std::collections::BTreeMap::new();
+        for v in snow_variants.values() {
+            distinct.entry(v.key()).or_insert((*v, 0)).1 += 1;
+        }
+        println!("snow materials: {} snow bases, {} distinct (falloff, bias, 1/noise, cos angle; colour):", snow_variants.len(), distinct.len());
+        for (v, n) in distinct.values() {
+            println!("  {:.3} {:.3} {:.4} {:.3}; {:.3} {:.3} {:.3} (x{n})", v.params[0], v.params[1], v.params[2], v.params[3], v.color[0], v.color[1], v.color[2]);
+        }
+    }
     let occ_lane = (dyn_mode && !a.no_objects && !a.dyn_opts.no_occlusion && dyn_cfg.is_some()).then(|| crate::occlusion_lane::OcclusionLane::start(prof.clone(), out.clone(), worlds.clone()));
     for world in &worlds {
         let mut step = |stage: &str, season: Option<&str>, f: &mut dyn FnMut() -> Result<()>| {
@@ -513,8 +551,8 @@ pub fn run(a: &Args) -> Result<()> {
                 let export_text = format!("{}\\", export_dir.display()).replace('/', "\\");
                 let path_output = format!("{}\\", out.join("meshes").join("terrain").join(world).join("Objects").display()).replace('/', "\\");
                 let h = crate::dyndolod_build::header(&p, c, ws, &export_text, &a.profile.game_dir().join("Data"), &path_output);
-                let (mut we, tree_rows) = crate::dyndolod_build::with_resolver(&p, c, |r| -> Result<_> {
-                    let copies = crate::child_copies::for_world(&p, c, r, &dyn_worlds, ws, &a.dyn_opts.child_parent);
+                let (mut we, tree_rows, floating) = crate::dyndolod_build::with_resolver(&p, c, |r| -> Result<_> {
+                    let (copies, floating) = crate::child_copies::for_world_report(&p, c, r, &dyn_worlds, ws, &a.dyn_opts.child_parent);
                     let we = crate::dyndolod_build::export_world(&p, c, r, ws, &seasons, &h, &copies)?;
                     // What every tree got (docs: tree_report.rs), from the default season.
                     let with = lodforge_dyndolod::childworld::with_copies(ws, &copies);
@@ -524,7 +562,7 @@ pub fn run(a: &Args) -> Result<()> {
                     }
                     let s = &we.seasons[0];
                     let rows = crate::tree_report::rows(&p, c, r, &with, &s.lines, &s.skipped, &a.profile.instance.join("mods"), "DynDOLOD Resources SE 3", &std::collections::HashMap::new());
-                    Ok((we, rows))
+                    Ok((we, rows, floating.len()))
                 })?;
                 if a.rt.on() {
                     // Written by `runtime-trees` with the runtime column.
@@ -537,6 +575,26 @@ pub fn run(a: &Args) -> Result<()> {
                 }
                 if !a.json && !we.child_copies.is_empty() {
                     println!("  {} child worldspace references copied in", we.child_copies.len());
+                }
+                if !a.json && floating > 0 {
+                    println!("  {floating} floating child-world copies left out (small models with no LOD surface under them; --child-keep-floating keeps them)");
+                }
+                // Runtime mode: the copies' DynDOLOD.esm reference ids, for the statics the
+                // object LOD stage writes below (and for the plugin stage, which keeps them).
+                if let Some(ci) = copy_ids.as_mut()
+                    && !we.child_copies.is_empty()
+                {
+                    let before = (ci.kept, ci.reserved, ci.unresolved);
+                    ci.assign(&p.load_order, ws, we.child_copies.iter().map(|(cp, _)| cp));
+                    if !a.json {
+                        println!(
+                            "  runtime statics: {} child copies named by their DynDOLOD.esm reference ({} kept, {} new), {} without one (synthetic)",
+                            ci.kept + ci.reserved - before.0 - before.1,
+                            ci.kept - before.0,
+                            ci.reserved - before.1,
+                            ci.unresolved - before.2
+                        );
+                    }
                 }
                 if a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Bto {
                     let keys = crate::dyndolod_build::grass_header(c);
@@ -746,7 +804,8 @@ pub fn run(a: &Args) -> Result<()> {
                 l.wait_meshes(world);
             }
             if let Some(names) = &form_names {
-                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), write: a.rt.write_options() });
+                let child_copy_ids = copy_ids.as_ref().and_then(|ci| ci.world(ws.form_id)).cloned().map(std::sync::Arc::new).unwrap_or_default();
+                args.runtime = Some(crate::instances::RuntimeObjects { refs: std::mem::take(&mut rt_refs), tree_models: a.rt.runtime_tree_statics, snow: !a.rt.runtime_no_static_snow, min_copies: a.rt.runtime_min_copies, large_refs_always: !a.rt.runtime_no_large_refs, model_masks: a.rt.runtime_model_masks.clone(), names: names.clone(), child_copy_ids, write: a.rt.write_options(), full_models: full_models.clone(), snow_variants: snow_variants.clone(), alt_variants: alt_variants.clone(), snow_pbr_variants: snow_pbr_variants.clone(), near_min_radius: if a.rt.no_near_tier { 0.0 } else { a.rt.near_tier_min_radius } });
             }
             step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
             if let Some(l) = &occ_lane {
@@ -857,6 +916,34 @@ pub fn run(a: &Args) -> Result<()> {
             }
         }
     }
+    if a.rt.on() && !a.rt.no_detail_bake {
+        // Rock and mountain LOD models get textures baked from their full models; the statics
+        // entries are pointed at the baked models before the static pack reads them.
+        let t = Instant::now();
+        begin(a.json, "all", "detail-bake", None);
+        if let Err(e) = own_output(&mut p, &out, &before) {
+            eprintln!("detail-bake: {e:#}");
+        }
+        let full_of = full_models.lock().unwrap().clone();
+        match crate::detail_bake::run(&p, &out, &full_of, a.rt.write_options(), a.rt.pbr_lod_pages) {
+            Ok(r) => {
+                if !a.json {
+                    println!("  {}", r.summary());
+                    for (m, e) in r.failed.iter().take(8) {
+                        println!("    failed {m}: {e}");
+                    }
+                    for s in &r.shared_examples {
+                        println!("    shared {s}");
+                    }
+                }
+                event(a.json, "all", "detail-bake", None, t.elapsed().as_millis());
+            }
+            Err(e) => {
+                eprintln!("detail-bake: {e:#}");
+                failed.push(format!("detail-bake: {e}"));
+            }
+        }
+    }
     if a.rt.on() {
         // The near-tier mesh pack of every worldspace's trees files (shared atlas + clusters).
         let t = Instant::now();
@@ -931,7 +1018,7 @@ pub fn run(a: &Args) -> Result<()> {
                 .drain(..)
                 .filter_map(|(w, dynamic, seasonal, child_copies, lod_refs, lod_bases)| dyn_worlds.iter().find(|x| x.editor_id.eq_ignore_ascii_case(&w)).map(|world| crate::dyndolod_build::PluginWorld { world, dynamic, seasonal, child_copies, lod_refs, lod_bases }))
                 .collect();
-            match crate::dyndolod_build::write_plugins(&p, c, &a.dyn_opts, &refs, &dyn_worlds, &undersides, crate::dyndolod_build::large_ref_margin(&a.profile), &out) {
+            match crate::dyndolod_build::write_plugins(&p, c, &a.dyn_opts, &refs, &dyn_worlds, &undersides, crate::dyndolod_build::large_ref_margin(&a.profile), &out, copy_ids.as_ref()) {
                 Ok((n, w, mut used)) => {
                     if !a.json {
                         println!("  DynDOLOD.esm/.esp: {n} dynamic LOD references in {w} worldspace(s)");

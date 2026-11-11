@@ -19,6 +19,23 @@ use lodforge_terrain::image::{Image, compare};
 
 use crate::object_export::normal_for;
 
+/// A page whose tiles are PBR materials (static mesh pack PBR pages, `..._PBR_Alpha[NN].dds`):
+/// rendered with an RMAOS map beside the diffuse and normal.
+pub fn is_pbr_page(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("_pbr")
+}
+
+/// RMAOS of a tile without its own: fully rough, not metallic, no occlusion, specular 0.04.
+pub const DEFAULT_RMAOS: [u8; 4] = [255, 0, 255, 10];
+
+/// `textures\...\X.dds` -> `X_rmaos.dds` path.
+pub fn rmaos_name(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((a, b)) => format!("{a}_rmaos.{b}"),
+        None => format!("{name}_rmaos"),
+    }
+}
+
 /// One rendered page: game path, diffuse and normal DDS bytes, and the top mips (RGBA8). Glow
 /// pages (DynDOLOD `_Glow.dds`) also have a glow map (`_g.dds`).
 pub struct Page {
@@ -26,6 +43,9 @@ pub struct Page {
     pub diffuse: Vec<u8>,
     pub normal: Vec<u8>,
     pub glow: Option<Vec<u8>>,
+    /// PBR pages ([`is_pbr_page`]): the RMAOS map (`_rmaos.dds`), each tile's
+    /// `<diffuse>_rmaos.dds` ([`DEFAULT_RMAOS`] where a tile has none).
+    pub rmaos: Option<Vec<u8>>,
     pub top: (Vec<u8>, Vec<u8>),
     pub width: u32,
     pub height: u32,
@@ -514,7 +534,8 @@ fn load_half(vfs: &Vfs, path: &str, w: u32, h: u32, kind: MipKind, top: bool) ->
 /// are assembled from them, so distant LOD shows no colour from neighbouring tiles. A tile
 /// whose normal map is missing gets a flat normal.
 pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> Result<Vec<Page>> {
-    type Composed = (usize, Vec<(u32, u32, Vec<u8>)>, Vec<(u32, u32, Vec<u8>)>, Option<Vec<(u32, u32, Vec<u8>)>>);
+    type Levels = Vec<(u32, u32, Vec<u8>)>;
+    type Composed = (usize, Levels, Levels, Option<Levels>, Option<Levels>);
     let composed: Vec<Composed> = (0..layout.pages.len())
         .into_par_iter()
         .map(|pi| {
@@ -609,11 +630,23 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
             let d = assemble(p.width, p.height, levels, [0, 0, 0, 0], &d_tiles);
             let n = assemble(p.width, p.height, levels, FLAT_NORMAL, &n_tiles);
             let g = glow_page.then(|| assemble(p.width, p.height, levels, [0, 0, 0, 255], &g_tiles));
-            (pi, d, n, g)
+            // PBR pages: each tile's `<diffuse>_rmaos.dds`, mipped as plain data.
+            let r = is_pbr_page(&p.name).then(|| {
+                let tiles: Vec<TileChain> = entries
+                    .par_iter()
+                    .map(|e| {
+                        let d = e.texture.split('=').next().unwrap_or("").split(',').next().unwrap_or("");
+                        let px = load_tile(vfs, &rmaos_name(d), e.width, e.height, MipKind::Data).unwrap_or_else(|| DEFAULT_RMAOS.repeat((e.width * e.height) as usize));
+                        TileChain::new(e.x, e.y, e.width, e.height, &px, levels, MipKind::Data, Edge::Wrap)
+                    })
+                    .collect();
+                assemble(p.width, p.height, levels, DEFAULT_RMAOS, &tiles)
+            });
+            (pi, d, n, g, r)
         })
         .collect();
     let mut pages = Vec::new();
-    for (pi, mut d_levels, n_levels, g_levels) in composed {
+    for (pi, mut d_levels, n_levels, g_levels, r_levels) in composed {
         let p = &layout.pages[pi];
         let alpha_page = is_alpha_page(&p.name);
         let glow_page = g_levels.is_some();
@@ -631,7 +664,11 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
             Some(g) => Some(encode(gpu, g)?),
             None => None,
         };
-        pages.push(Page { name: p.name.clone(), diffuse: d_dds, normal: n_dds, glow: g_dds, top: (d_levels.into_iter().next().unwrap().2, n_levels.into_iter().next().unwrap().2), width: p.width, height: p.height });
+        let r_dds = match &r_levels {
+            Some(r) => Some(encode(gpu, r)?),
+            None => None,
+        };
+        pages.push(Page { name: p.name.clone(), diffuse: d_dds, normal: n_dds, glow: g_dds, rmaos: r_dds, top: (d_levels.into_iter().next().unwrap().2, n_levels.into_iter().next().unwrap().2), width: p.width, height: p.height });
     }
     Ok(pages)
 }
@@ -656,7 +693,8 @@ pub fn glow_name(name: &str) -> String {
 pub fn write(out: &Path, pages: &[Page]) -> Result<()> {
     for p in pages {
         let glow = p.glow.as_ref().map(|g| (glow_name(&p.name), g));
-        for (name, bytes) in [(p.name.clone(), &p.diffuse), (normal_name(&p.name), &p.normal)].into_iter().chain(glow) {
+        let rmaos = p.rmaos.as_ref().map(|r| (rmaos_name(&p.name), r));
+        for (name, bytes) in [(p.name.clone(), &p.diffuse), (normal_name(&p.name), &p.normal)].into_iter().chain(glow).chain(rmaos) {
             let path = out.join(&name);
             std::fs::create_dir_all(path.parent().unwrap())?;
             std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;

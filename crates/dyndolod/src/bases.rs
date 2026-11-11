@@ -150,6 +150,71 @@ pub fn read_materials(lo: &LoadOrder) -> lodforge_esp::Result<HashMap<u32, Strin
     Ok(out)
 }
 
+/// A MATO directional material (`DATA`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MaterialObject {
+    pub falloff_scale: f32,
+    pub falloff_bias: f32,
+    pub noise_uv_scale: f32,
+    pub material_uv_scale: f32,
+    pub projection: [f32; 3],
+    pub normal_dampener: f32,
+    /// Single-pass colour, 0..1.
+    pub color: [f32; 3],
+    /// Flags bit 0: single pass.
+    pub single_pass: bool,
+    pub snow: bool,
+}
+
+/// `DATA` of a MATO: eleven floats, the flags (bit 0 single pass) and, in later form versions,
+/// the has-snow value.
+pub fn parse_material_object(d: &[u8]) -> Option<MaterialObject> {
+    let f = |i: usize| d.get(i * 4..i * 4 + 4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let u = |p: usize| d.get(p..p + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    Some(MaterialObject {
+        falloff_scale: f(0)?,
+        falloff_bias: f(1)?,
+        noise_uv_scale: f(2)?,
+        material_uv_scale: f(3)?,
+        projection: [f(4)?, f(5)?, f(6)?],
+        normal_dampener: f(7)?,
+        color: [f(8)?, f(9)?, f(10)?],
+        single_pass: u(44).is_some_and(|v| v & 1 != 0),
+        snow: d.get(48).is_some_and(|&b| b != 0),
+    })
+}
+
+/// The winning records' EditorIDs of one record type (global form id -> EditorID).
+pub fn read_editor_ids(lo: &LoadOrder, sig: [u8; 4]) -> lodforge_esp::Result<HashMap<u32, String>> {
+    let mut out = HashMap::new();
+    for (id, (_, r)) in winning_records(lo, Sig(sig))? {
+        let data = r.data()?;
+        if let Some(f) = fields(&data).find(|f| &f.sig.0 == b"EDID") {
+            out.insert(id, f.zstring());
+        }
+    }
+    Ok(out)
+}
+
+/// The winning MATO records' directional material data.
+pub fn read_material_objects(lo: &LoadOrder) -> lodforge_esp::Result<HashMap<u32, MaterialObject>> {
+    let mut out = HashMap::new();
+    for (id, (_, r)) in winning_records(lo, Sig(*b"MATO"))? {
+        let data = r.data()?;
+        if let Some(m) = fields(&data).find(|f| &f.sig.0 == b"DATA").and_then(|f| parse_material_object(f.data)) {
+            out.insert(id, m);
+        }
+    }
+    Ok(out)
+}
+
+impl Base {
+    /// STAT DNAM max angle (degrees) of the directional material.
+    pub fn max_angle(&self) -> Option<f32> {
+        self.dnam.get(0..4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+}
+
 /// Data-relative model path with a `meshes\` prefix (lower-case). A leading `...\meshes\` is cut
 /// back to `meshes\` only where `meshes` is a whole folder name: mod folders that merely end in
 /// "meshes" (JK's College of Winterhold's `XJKCoWMeshes\`) are part of the path.

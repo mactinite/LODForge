@@ -37,6 +37,25 @@ use lodforge_seasons::{Season, SeasonSwaps};
 
 use crate::profile::Profile;
 
+/// `--level-coverage`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelCoverage {
+    Auto,
+    Rules,
+    Keep,
+}
+
+impl LevelCoverage {
+    /// Whether references keep LOD across levels ([`Opts::level_coverage`]) with this preset.
+    pub fn keeps(self, preset: &str) -> bool {
+        match self {
+            LevelCoverage::Keep => true,
+            LevelCoverage::Rules => false,
+            LevelCoverage::Auto => preset.eq_ignore_ascii_case("High"),
+        }
+    }
+}
+
 /// DynDOLOD options of `lodforge build`.
 #[derive(clap::Args, Clone, Debug)]
 pub struct Opts {
@@ -49,6 +68,12 @@ pub struct Opts {
     /// still ignored `stonewall` / `treepine` bases, which only the Low list names).
     #[arg(long, default_value = "Low")]
     pub child_parent: String,
+    /// Keep the child-world copies the floating rule leaves out: models under 150 units standing
+    /// above the parent's ground with no LOD surface under them (Whiterun's brazier bowls on
+    /// interior column pieces hang in the air seen from Tamriel; docs/re/dyndolod-spec.md, child
+    /// worldspace copies).
+    #[arg(long)]
+    pub child_keep_floating: bool,
     /// DynDOLOD's `Edit Scripts\DynDOLOD` folder (configuration only; default:
     /// `<instance>\tools\DynDOLOD\Edit Scripts\DynDOLOD`).
     #[arg(long)]
@@ -64,9 +89,19 @@ pub struct Opts {
     /// Cache for generated LOD models (default: `.lodforge-cache` next to the output).
     #[arg(long)]
     pub lod_model_cache: Option<PathBuf>,
-    /// Smallest object size (game units) that gets a generated model level 0, 1, 2.
+    /// Smallest object size (game units) that gets a generated model level 0, 1, 2 (default
+    /// 256,512,1024; 256,128,256 with `--level-coverage keep`).
     #[arg(long, value_delimiter = ',')]
     pub lod_model_min_size: Option<Vec<f32>>,
+    /// How far out objects keep their LOD. `rules`: DynDOLOD's rules as they are, and generated
+    /// LOD8/16 models only for objects of 512/1024 units and more, so smaller rocks, houses and
+    /// logs drop out at the LOD4 or LOD8 edge and fill in as you approach. `keep`: generated
+    /// LOD8/16 models down to 128/256 units (`--lod-model-min-size` still wins), and a non-tree
+    /// model whose rule asks for a billboard it does not have (logs, driftwood, branch piles
+    /// under `landscape\trees\`) takes its LOD models at LOD8/16 instead of nothing. `auto`
+    /// (default): `keep` with `--preset High`, else `rules`.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub level_coverage: LevelCoverage,
     /// Skip DynDOLOD.esm/.esp and the DLL NG data files.
     #[arg(long)]
     pub no_plugins: bool,
@@ -177,6 +212,8 @@ pub struct Config {
     pub mesh_paths: usize,
     pub bases: HashMap<u32, Base>,
     pub materials: HashMap<u32, String>,
+    /// Winning MATO directional material data (the runtime's per-base LOD snow).
+    pub material_objects: HashMap<u32, lodforge_dyndolod::bases::MaterialObject>,
     pub owners: HashMap<u32, usize>,
     pub ignore_edid: Vec<String>,
     pub xesp_lod: HashSet<u32>,
@@ -192,9 +229,87 @@ pub struct Config {
     /// Winning TXST texture sets (MODS alternate textures).
     pub texture_sets: HashMap<u32, Vec<String>>,
     pub reference_states: HashMap<u32, lodforge_dyndolod::export::ReferenceState>,
+    /// Child-world copies left out as floating (`childworld::drop_floating`): small models with
+    /// no LOD surface under them; `None` keeps DynDOLOD's own selection (`build --child-keep-floating`).
+    pub child_floating: Option<lodforge_dyndolod::childworld::FloatingRule>,
+    /// `keep` level coverage ([`LevelCoverage`]): billboard levels of non-tree bases without a
+    /// billboard take model levels (export and generated LOD models).
+    pub keep_levels: bool,
+    /// `--lod-models`: generated LOD models replace the generic ones, those in the base game's own
+    /// archives ([`is_base_game_archive`]) and in DynDOLOD Resources ([`is_dyndolod_resources`]);
+    /// those become the index's fallback ([`LodIndex::with_fallback`]) and still serve every level
+    /// nothing was generated for (window glow, water effects, passthru models, small pieces).
+    /// Any other mod's LOD model wins as before. Set before [`Config::rescan`].
+    pub prefer_generated_lod: bool,
+}
+
+/// The base game's own archives: Skyrim, Update, the official DLCs, Creation Club content and
+/// the Anniversary resource pack. A mod's archive (a plugin of its own) is not one of them.
+pub fn is_base_game_archive(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    // Creation Club archives: `cc` + author code + `sse` + number (`ccBGSSSE001-Fish.bsa`).
+    let b = name.as_bytes();
+    let creation_club = b.len() > 11 && name.starts_with("cc") && b[2..5].iter().all(u8::is_ascii_alphabetic) && &name[5..8] == "sse" && b[8..11].iter().all(u8::is_ascii_digit);
+    name.starts_with("skyrim - ") || creation_club || matches!(name.as_str(), "update.bsa" | "dawnguard.bsa" | "hearthfires.bsa" | "dragonborn.bsa" | "_resourcepack.bsa")
 }
 
 impl Config {
+    /// Base EditorID (lower case) -> the single-pass directional material the engine gives its
+    /// full model (STAT DNAM: max angle and MATO; `FUN_140277E20`), whatever the MATO is called:
+    /// the export's snow / ash LOD classes decide which parts use it. Multi-pass materials
+    /// (glacier, ice, moss: a second pass with the material's own textures, single-pass colour
+    /// unused) have no single-pass equivalent; their parts keep the engine's LOD material.
+    pub fn snow_variants(&self) -> HashMap<String, lodforge_instances::statics::Snow> {
+        let mut out = HashMap::new();
+        for b in self.bases.values() {
+            if &b.signature != b"STAT" || b.material == 0 || b.editor_id.is_empty() {
+                continue;
+            }
+            let (Some(m), Some(angle)) = (self.material_objects.get(&b.material), b.max_angle()) else { continue };
+            if !m.single_pass {
+                continue;
+            }
+            // No noise (UV scale 0): the noise term drops out instead of an infinite scale.
+            let noise = if m.noise_uv_scale != 0.0 { 1.0 / m.noise_uv_scale } else { 0.0 };
+            let snow = lodforge_instances::statics::Snow { params: [m.falloff_scale, m.falloff_bias, noise, (angle * std::f32::consts::PI / 180.0).cos()], color: m.color, flags: u32::from(m.snow) };
+            out.insert(b.editor_id.to_ascii_lowercase(), snow);
+        }
+        out
+    }
+
+    /// Base EditorID (lower case) -> Community Shaders' PBR settings for its single-pass directional
+    /// material (`PBRMaterialObjects\<MATO EditorID>.json`, CS's defaults for missing fields), for
+    /// the near tier's clones: CS gives them to a real reference's PBR shapes in its Clone3D hook.
+    pub fn snow_pbr_variants(&self, p: &Profile) -> HashMap<String, lodforge_instances::statics::SnowPbr> {
+        let edids = lodforge_dyndolod::bases::read_editor_ids(&p.load_order, *b"MATO").unwrap_or_default();
+        let mut configs: HashMap<u32, Option<lodforge_instances::statics::SnowPbr>> = HashMap::new();
+        let mut out = HashMap::new();
+        for b in self.bases.values() {
+            if &b.signature != b"STAT" || b.material == 0 || b.editor_id.is_empty() || !self.material_objects.get(&b.material).is_some_and(|m| m.single_pass) {
+                continue;
+            }
+            let pbr = *configs.entry(b.material).or_insert_with(|| {
+                let edid = edids.get(&b.material)?;
+                let bytes = p.vfs.read(&format!(r"PBRMaterialObjects\{edid}.json")).ok().flatten()?;
+                parse_snow_pbr(&bytes)
+            });
+            if let Some(pbr) = pbr {
+                out.insert(b.editor_id.to_ascii_lowercase(), pbr);
+            }
+        }
+        out
+    }
+
+    /// Base EditorID (lower case) -> its alternate textures (MODS), for STAT bases that have any:
+    /// the full-model near tier gives its clones the textures the engine gives the reference.
+    pub fn alt_variants(&self) -> HashMap<String, Vec<lodforge_dyndolod::bases::AltTexture>> {
+        self.bases
+            .values()
+            .filter(|b| &b.signature == b"STAT" && !b.editor_id.is_empty() && !b.alt_textures.is_empty())
+            .map(|b| (b.editor_id.to_ascii_lowercase(), b.alt_textures.clone()))
+            .collect()
+    }
+
     pub fn load(p: &Profile, dir: &Path, preset: &str, static_lod: bool) -> Result<Config> {
         let data_override = |path: &str| p.vfs.read(path).ok().flatten().map(|b| lodforge_dyndolod::ini::decode(&b));
         let src = RuleSource { rules_dir: dir.join("Rules"), data_override: &data_override };
@@ -204,23 +319,24 @@ impl Config {
         let ini = Ini::read(&ini_path).with_context(|| format!("reading {}", ini_path.display()))?;
         let cfg = |k: &str| ini.get("DynDOLOD", k).unwrap_or("").to_string();
         let list = |k: &str| -> Vec<String> { cfg(k).split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect() };
-        let (index, mesh_paths) = lod_index(p, &ini, dir);
+        let (index, mesh_paths) = lod_index(p, &ini, dir, false);
         let parallax = parallax_diff(p);
         let lo = &p.load_order;
         let bases = lodforge_dyndolod::bases::read_bases(lo)?;
         let materials = lodforge_dyndolod::bases::read_materials(lo)?;
+        let material_objects = lodforge_dyndolod::bases::read_material_objects(lo)?;
         let owners = lodforge_dyndolod::bases::owners(lo);
         let xesp_lod = std::fs::read(lodforge_dyndolod::overlay::path(dir, r"Configs\DynDOLOD_SSE_xesplod.txt")).map(|b| lodforge_dyndolod::bases::read_form_list(lo, &lodforge_dyndolod::ini::decode(&b))).unwrap_or_default();
         let edids: HashMap<String, u32> = bases.values().map(|b| (b.editor_id.to_ascii_lowercase(), b.form_id)).collect();
         let swaps = lodforge_seasons::load_swaps(&p.vfs, lo, &edids)?;
         let texture_sets = lodforge_dyndolod::sidefiles::read_texture_sets(lo)?;
         let reference_states = lodforge_dyndolod::export::read_reference_states(lo)?;
-        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states })
+        Ok(Config { dir: dir.to_path_buf(), rules, index, parallax, mesh_paths, bases, materials, material_objects, owners, ignore_edid: list("IgnoreBaseEDID"), xesp_lod, swaps, ini, windows: false, ultra: false, mesh_crc, pbr: true, texture_sets, reference_states, child_floating: Some(Default::default()), keep_levels: false, prefer_generated_lod: false })
     }
 
     /// Re-reads LOD model discovery after files were added to the VFS (generated LOD models).
     pub fn rescan(&mut self, p: &Profile) {
-        (self.index, self.mesh_paths) = lod_index(p, &self.ini, &self.dir);
+        (self.index, self.mesh_paths) = lod_index(p, &self.ini, &self.dir, self.prefer_generated_lod);
     }
 
     /// `[DynDOLOD]` value, empty when missing.
@@ -233,9 +349,10 @@ impl Config {
     }
 }
 
-/// LOD model discovery over the VFS (`Folder1..5`, `IgnoreLODMesh`, `misnamed.txt`) and the
-/// number of mesh paths seen.
-fn lod_index(p: &Profile, ini: &Ini, dir: &Path) -> (LodIndex, usize) {
+/// LOD model discovery over the VFS (`Folder1..5`, `IgnoreLODMesh`, `misnamed.txt`), the
+/// number of mesh paths seen; with `prefer_generated` the generic LOD models (base game archives,
+/// DynDOLOD Resources) go to the fallback ([`Config::prefer_generated_lod`]).
+fn lod_index(p: &Profile, ini: &Ini, dir: &Path, prefer_generated: bool) -> (LodIndex, usize) {
     let cfg = |k: &str| ini.get("DynDOLOD", k).unwrap_or("").to_string();
     let folders: Vec<String> = (1..=5).map(|i| cfg(&format!("Folder{i}"))).filter(|f| !f.is_empty()).collect();
     let ignore: Vec<String> = cfg("IgnoreLODMesh").split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect();
@@ -243,7 +360,38 @@ fn lod_index(p: &Profile, ini: &Ini, dir: &Path) -> (LodIndex, usize) {
         .map(|b| lodforge_dyndolod::ini::decode(&b).lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty() && !l.starts_with("//")).collect())
         .unwrap_or_default();
     let meshes = p.vfs.list_prefix("meshes\\");
-    (LodIndex::scan(meshes.iter().map(String::as_str), &folders, &ignore, &misnamed), meshes.len())
+    if !prefer_generated {
+        return (LodIndex::scan(meshes.iter().map(String::as_str), &folders, &ignore, &misnamed), meshes.len());
+    }
+    // Per mod folder: whether it is DynDOLOD Resources.
+    let mut resources: HashMap<PathBuf, bool> = HashMap::new();
+    let mut generic = |m: &str| match p.vfs.origin(m) {
+        Some(lodforge_archive::vfs::Origin::Archive(a)) => is_base_game_archive(a),
+        Some(lodforge_archive::vfs::Origin::Loose(path)) => mod_root(path, m).is_some_and(|root| *resources.entry(root.to_path_buf()).or_insert_with(|| is_dyndolod_resources(root))),
+        None => false,
+    };
+    let (fallback, own): (Vec<&String>, Vec<&String>) = meshes.iter().partition(|m| m.contains("_lod") && generic(m));
+    let index = LodIndex::scan(own.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed).with_fallback(LodIndex::scan(fallback.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed));
+    (index, meshes.len())
+}
+
+/// The folder a loose file `rel` (Data-relative) was found in: `path` minus `rel`.
+fn mod_root<'a>(path: &'a Path, rel: &str) -> Option<&'a Path> {
+    let mut root = path;
+    for _ in 0..rel.split('\\').count() {
+        root = root.parent()?;
+    }
+    Some(root)
+}
+
+/// DynDOLOD Resources (the generic LOD model set DynDOLOD ships): its MO2 meta.ini names the
+/// Nexus mod (52897 SE, 59686 LE), or the folder is called so (a manual install).
+pub fn is_dyndolod_resources(root: &Path) -> bool {
+    let name = root.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if name.contains("dyndolod resources") {
+        return true;
+    }
+    std::fs::read_to_string(root.join("meta.ini")).is_ok_and(|t| t.lines().any(|l| matches!(l.trim().to_ascii_lowercase().as_str(), "modid=52897" | "modid=59686")))
 }
 
 /// PGPatcher's `ParallaxGen_Diff.json` from the VFS (loose in Data or in any mod, last winner).
@@ -259,7 +407,7 @@ fn parallax_diff(p: &Profile) -> ParallaxGenDiff {
 pub fn with_resolver<R>(p: &Profile, c: &Config, f: impl FnOnce(&Resolver<'_>) -> R) -> R {
     let read = |path: &str| p.vfs.read(path).ok().flatten();
     let exists = |path: &str| p.vfs.exists(path);
-    let r = Resolver { rules: &c.rules, index: &c.index, parallax: &c.parallax, materials: &c.materials, plugins: &p.plugin_names, owners: &c.owners, read: &read, exists: &exists, level32: false, mesh_crc: &c.mesh_crc };
+    let r = Resolver { rules: &c.rules, index: &c.index, parallax: &c.parallax, materials: &c.materials, plugins: &p.plugin_names, owners: &c.owners, read: &read, exists: &exists, level32: false, model_fallback: c.keep_levels, mesh_crc: &c.mesh_crc };
     f(&r)
 }
 
@@ -759,6 +907,27 @@ pub fn previous_plugins(out: &Path) -> (Option<Previous>, Option<Previous>) {
     (read("DynDOLOD.esm"), read("DynDOLOD.esp"))
 }
 
+/// The DynDOLOD.esm form ids of the child-world copies, settled before the object LOD stage
+/// writes the runtime statics (instance-formats.md section 6): from the earlier LODForge build's
+/// plugin that [`write_plugins`] continues (copies it lacks get ids reserved after its last), or,
+/// when this build writes no plugins (`--runtime-no-dyndolod-plugins`, `--no-plugins`), from
+/// whatever DynDOLOD.esm the output holds, LODForge's or DynDOLOD's own, since that is the one
+/// the game loads with the statics; copies it lacks stay synthetic instances.
+pub fn child_copy_ids(opts: &Opts, writes_plugins: bool, out: &Path) -> lodforge_dyndolod::dynplugins::ChildCopyIds {
+    let path = out.join("DynDOLOD.esm");
+    let prev = if writes_plugins {
+        if opts.renumber { None } else { previous_plugins(out).0 }
+    } else {
+        std::fs::read(&path).ok().and_then(|b| Previous::read(&b))
+    };
+    match &prev {
+        Some(p) => println!("  child-world copies take their reference ids from {} ({} records, author {}, next object id {:X}){}", path.display(), p.records, p.author, p.next_object_id, if writes_plugins { "; new copies get ids after it" } else { "; copies it lacks stay synthetic" }),
+        None if writes_plugins => println!("  child-world copies get new DynDOLOD.esm reference ids{}", if opts.renumber { " (--renumber)" } else { " (no earlier LODForge DynDOLOD.esm in the output)" }),
+        None => println!("  no DynDOLOD.esm in {}: child-world copies stay synthetic in the runtime statics", out.display()),
+    }
+    lodforge_dyndolod::dynplugins::ChildCopyIds::new(prev.as_ref(), writes_plugins)
+}
+
 /// One worldspace's input to [`write_plugins`], from its export.
 pub struct PluginWorld<'a> {
     pub world: &'a Worldspace,
@@ -795,7 +964,8 @@ pub fn workarounds_on(c: &Config, opts: &Opts) -> bool {
 /// Returns (dynamic references, worldspaces).
 /// Returns (dynamic references, worldspaces, the `...linear.dds` copies the base copies' texture
 /// sets point at, lower-case).
-pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, margin: i32, out: &Path) -> Result<(usize, usize, std::collections::BTreeSet<String>)> {
+#[allow(clippy::too_many_arguments)]
+pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld<'_>], all_worlds: &[Worldspace], undersides: &HashSet<String>, margin: i32, out: &Path, copy_ids: Option<&lodforge_dyndolod::dynplugins::ChildCopyIds>) -> Result<(usize, usize, std::collections::BTreeSet<String>)> {
     let (prev_esm, prev_esp) = if opts.renumber { (None, None) } else { previous_plugins(out) };
     for (name, prev) in [("DynDOLOD.esm", &prev_esm), ("DynDOLOD.esp", &prev_esp)] {
         if let Some(pr) = prev {
@@ -809,7 +979,9 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
             lodforge_dyndolod::dynplugins::bunch_of_numbers(seed)
         }
     };
-    let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref() };
+    // The child-world copies' ids were settled before the object LOD stage (`child_copy_ids`),
+    // from the same earlier plugin; the new ones among them are taken.
+    let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref(), esm_next_object_id: copy_ids.map_or(0, |ci| ci.next_object_id) };
     let height: f32 = c.num("TerrainUndersideHeight", 500.0);
     // The underside is enabled in the worldspace and in the child worldspaces that use its land.
     let underside = |w: &Worldspace| -> Option<(f32, Vec<u32>)> {
@@ -832,7 +1004,8 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
                     lodforge_dyndolod::dynplugins::ChildWorld { world: x, revert_refs, bounds, no_navmesh_cells }
                 })
                 .collect();
-            lodforge_dyndolod::dynplugins::WorldDynamic { world: w, dynamic: &pw.dynamic, south_west: south_west(p, &w.editor_id), lod_refs: &pw.lod_refs, children, underside: underside(w), seasonal: pw.seasonal.clone(), child_copies: pw.child_copies.clone() }
+            let child_copy_ids = copy_ids.and_then(|ci| ci.world(w.form_id)).cloned().unwrap_or_default();
+            lodforge_dyndolod::dynplugins::WorldDynamic { world: w, dynamic: &pw.dynamic, south_west: south_west(p, &w.editor_id), lod_refs: &pw.lod_refs, children, underside: underside(w), seasonal: pw.seasonal.clone(), child_copies: pw.child_copies.clone(), child_copy_ids }
         })
         .collect();
     // WorkaroundLargeReferencesBugs (on with DLL NG) unless large references are not used.
@@ -1465,6 +1638,17 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 mod tests {
 
     #[test]
+    fn base_game_archives() {
+        use std::path::Path;
+        for a in [r"D:\Skyrim\Data\Skyrim - Meshes1.bsa", r"Data\Update.bsa", "Dragonborn.bsa", "ccBGSSSE001-Fish.bsa", "_ResourcePack.bsa"] {
+            assert!(super::is_base_game_archive(Path::new(a)), "{a}");
+        }
+        for a in [r"mods\DynDOLOD Resources SE\DynDOLOD.bsa", "Majestic Mountains.bsa", "Skyrim 3D Rocks.bsa", "ccpatch.bsa", "CCOR.bsa"] {
+            assert!(!super::is_base_game_archive(Path::new(a)), "{a}");
+        }
+    }
+
+    #[test]
     fn atlas_tile_sizes() {
         // DynDOLOD 3 Tamriel: full textures to 256, LOD textures and billboards up to 1024.
         assert!(!is_lod_texture("textures\\architecture\\highhrothgar\\hhcol01.dds"));
@@ -1595,5 +1779,50 @@ mod tests {
         let nif = lodforge_nif::parse(&grass_lod1_nif(tex, None, &d).unwrap()).unwrap();
         let s = nif.blocks.iter().find_map(|b| if let Block::TriShape(s) = b { Some(s) } else { None }).unwrap();
         assert_eq!(nif.shape_textures(s)[1], "");
+    }
+}
+
+/// Community Shaders' `PBRMaterialObjectData` JSON (`baseColorScale`, `roughness`,
+/// `specularLevel`, `glintParameters`); missing fields keep CS's struct defaults.
+pub fn parse_snow_pbr(bytes: &[u8]) -> Option<lodforge_instances::statics::SnowPbr> {
+    let text = String::from_utf8_lossy(bytes);
+    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+    let mut p = lodforge_instances::statics::SnowPbr::default();
+    let num = |v: &serde_json::Value, k: &str| v.get(k).and_then(serde_json::Value::as_f64).map(|x| x as f32);
+    if let Some(c) = v.get("baseColorScale").and_then(serde_json::Value::as_array) {
+        for (i, x) in c.iter().take(3).enumerate() {
+            if let Some(x) = x.as_f64() {
+                p.base_color_scale[i] = x as f32;
+            }
+        }
+    }
+    if let Some(x) = num(&v, "roughness") {
+        p.roughness = x;
+    }
+    if let Some(x) = num(&v, "specularLevel") {
+        p.specular_level = x;
+    }
+    if let Some(g) = v.get("glintParameters") {
+        p.glint_enabled = g.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        for (i, k) in ["screenSpaceScale", "logMicrofacetDensity", "microfacetRoughness", "densityRandomization"].into_iter().enumerate() {
+            if let Some(x) = num(g, k) {
+                p.glint[i] = x;
+            }
+        }
+    }
+    Some(p)
+}
+
+#[cfg(test)]
+mod snow_pbr_tests {
+    #[test]
+    fn parses_cs_material_object_config() {
+        let j = br#"{ "baseColorScale": [1.0, 0.9, 0.8], "glintParameters": { "densityRandomization": 5.0, "enabled": true, "logMicrofacetDensity": 13, "microfacetRoughness": 1.0, "screenSpaceScale": 2.0 }, "roughness": 0.7, "specularLevel": 0.02 }"#;
+        let p = super::parse_snow_pbr(j).unwrap();
+        assert_eq!(p.base_color_scale, [1.0, 0.9, 0.8]);
+        assert_eq!((p.roughness, p.specular_level, p.glint_enabled), (0.7, 0.02, true));
+        assert_eq!(p.glint, [2.0, 13.0, 1.0, 5.0]);
+        let d = super::parse_snow_pbr(b"{}").unwrap();
+        assert_eq!(d, lodforge_instances::statics::SnowPbr::default());
     }
 }

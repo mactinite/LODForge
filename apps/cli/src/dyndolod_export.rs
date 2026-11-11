@@ -27,6 +27,10 @@ pub struct Args {
     /// Static instead of dynamic LOD rules (`_all_static`).
     #[arg(long)]
     pub static_lod: bool,
+    /// `build --level-coverage`: `keep` gives non-tree models without a billboard their model
+    /// levels where the rule asks for one (`auto`: with `--preset High`).
+    #[arg(long, value_enum, default_value = "auto")]
+    pub level_coverage: crate::dyndolod_build::LevelCoverage,
     #[arg(long, default_value = "Tamriel")]
     pub world: String,
     /// Golden DynDOLOD run folder (DynDOLOD_SSE_Default.ini, export\).
@@ -57,7 +61,10 @@ pub fn run(a: &Args) -> Result<()> {
     let p = a.profile.open()?;
     let dir = a.dyndolod_dir.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
     let t = std::time::Instant::now();
-    let c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, a.static_lod)?;
+    let mut c = crate::dyndolod_build::Config::load(&p, &dir, &a.preset, a.static_lod)?;
+    c.keep_levels = a.level_coverage.keeps(&a.preset);
+    // This command compares with DynDOLOD's own output: its child-world selection, floating copies included.
+    c.child_floating = None;
     let rules = &c.rules;
     println!("rules: {} from the rule files", rules.len());
     if let Some(g) = &a.golden {
@@ -192,7 +199,7 @@ pub fn run(a: &Args) -> Result<()> {
             let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
             let (prev_esm, prev_esp) = crate::dyndolod_build::previous_plugins(dir);
             let token = prev_esp.as_ref().and_then(|pr| pr.token.clone()).unwrap_or_else(|| lodforge_dyndolod::dynplugins::bunch_of_numbers(seed));
-            let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref() };
+            let rolling = lodforge_dyndolod::dynplugins::Rolling { esm: prev_esm.as_ref(), esp: prev_esp.as_ref(), esm_next_object_id: 0 };
             let base_data = crate::dyndolod_build::base_lod_data(&p, &c, we.lod_bases.iter().copied())?;
             let mut out = lodforge_dyndolod::dynplugins::build(lo, &world, bases, dynamic, sw, near, far, &token, &rolling).map_err(anyhow::Error::msg)?;
             out.worlds_txt.push_str(&base_data);

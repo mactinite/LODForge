@@ -22,13 +22,15 @@
   check for a run that wants it. Needs no MO2 or game; reads the instance's load order.
 
 .EXAMPLE
-  pwsh -File scripts\golden\dyndolod\Test-OcclusionParity.ps1
-  pwsh -File scripts\golden\dyndolod\Test-OcclusionParity.ps1 -MaxHiddenPercent 6
+  pwsh -File scripts\golden\dyndolod\Test-OcclusionParity.ps1 -Golden <golden DynDOLOD run> -Instance <MO2 instance>
+  pwsh -File scripts\golden\dyndolod\Test-OcclusionParity.ps1 -Golden <run> -Instance <instance> -MaxHiddenPercent 6
 #>
 [CmdletBinding()]
 param(
-    [string] $Golden = 'D:\Modlists\LODForge-golden\dyndolod-20261017-medium-tamriel',
-    [string] $Instance = 'D:\Modlists\skyrim-cs',
+    # A golden DynDOLOD run folder: its output\ (DynDOLOD.esm/.esp, Occlusion.esp) and saved export\.
+    [Parameter(Mandatory)] [string] $Golden,
+    # The MO2 instance whose load order the golden was generated from.
+    [Parameter(Mandatory)] [string] $Instance,
     [string] $Mo2Profile = 'LODForge-DynDOLOD',
     [string] $World = 'Tamriel',
     [string] $Lodforge = (Join-Path $PSScriptRoot '..\..\..\target\release\lodforge.exe'),

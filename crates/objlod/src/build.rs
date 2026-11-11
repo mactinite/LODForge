@@ -378,7 +378,7 @@ impl<'a> ObjectLod<'a> {
                         Stats::add(&self.stats.instanced, 1);
                         let runtime_ref = self.opts.instancing.as_ref().is_some_and(|i| i.is_runtime_ref(r));
                         let (alt_textures, part_classes) = self.opts.instance_variant(r, q.level, &model_l, mesh);
-                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures, part_classes });
+                        instances.push(crate::instancing::Instance { ref_id: r.ref_id.clone(), model: model_l, position: [r.x, r.y, r.z], rotation_deg: [r.rot_x, r.rot_y, r.rot_z], scale: r.scale, runtime_ref, large_ref: r.is_large_ref(), alt_textures, part_classes, full_model: r.full_model.clone(), base_edid: r.static_name.clone(), full_alt: self.opts.alt_textures.full_model_entries(&r.ref_id) });
                         placed += 1;
                     } else {
                         missing += 1;

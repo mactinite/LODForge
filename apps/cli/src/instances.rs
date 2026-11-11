@@ -59,6 +59,26 @@ pub struct Opts {
     /// Runtime: zstd level for the instance file sections (0 = uncompressed).
     #[arg(long, default_value_t = 0)]
     pub runtime_zstd: i32,
+    /// Runtime: skip the detail bake (by default every instanced LOD model of a full model under
+    /// `meshes\landscape\` gets its own texture baked from the full model: albedo, normals and
+    /// ambient occlusion; see `lodforge-detailbake`).
+    #[arg(long)]
+    pub no_detail_bake: bool,
+    /// Runtime, experimental: PBR detail bakes for PBR full models (albedo as it is plus an RMAOS
+    /// map) drawn on PBR pages through the TruePBR LOD shaders (LODForge Runtime `[Statics]
+    /// bPbrLodSetup`). Off by default: in Community Shaders 1.9.1 they come out about 25% brighter
+    /// than the full rocks, while the default vanilla bake matches them.
+    #[arg(long)]
+    pub pbr_lod_pages: bool,
+    /// Runtime full-model near tier: references that are not engine large references and whose LOD
+    /// model is at least this many units in bounding radius are listed for the runtime, which draws
+    /// their full model between the loaded grid and the large-reference grid (plugin-added cliffs
+    /// and peaks otherwise show their LOD until their cell loads).
+    #[arg(long, default_value_t = 1500.0)]
+    pub near_tier_min_radius: f32,
+    /// Runtime: no full-model near tier list.
+    #[arg(long)]
+    pub no_near_tier: bool,
     /// Runtime far grass: folder with the NGIO grass cache (`<world>x<X>y<Y>[.<season>].cgid`;
     /// default: `Grass\` of the load order).
     #[arg(long)]
@@ -328,7 +348,47 @@ pub struct RuntimeObjects {
     pub large_refs_always: bool,
     pub model_masks: Vec<String>,
     pub names: Arc<FormNames>,
+    /// This worldspace's child-world copies: copy id -> object id of the copy's
+    /// `_DynDOLOD_CHILD` reference in DynDOLOD.esm (`dyndolod_build::child_copy_ids`). A copy
+    /// missing here is written as a synthetic instance.
+    pub child_copy_ids: Arc<HashMap<u32, u32>>,
     pub write: WriteOptions,
+    /// Filled by [`statics_file`]: (LOD model, its AltTextures key) -> the (full model, full-model
+    /// AltTextures key) of its references, shared by every worldspace (the detail bake reads it
+    /// before the static pack; see [`crate::detail_bake::FullModels`]).
+    pub full_models: Arc<std::sync::Mutex<crate::detail_bake::FullModels>>,
+    /// Base EditorID (lower case) -> its full model's snow material
+    /// ([`crate::dyndolod_build::Config::snow_variants`]); snow-class entries carry it (`MSNO`).
+    pub snow_variants: Arc<HashMap<String, lodforge_instances::statics::Snow>>,
+    /// Base EditorID (lower case) -> its alternate textures
+    /// ([`crate::dyndolod_build::Config::alt_variants`]); near-tier entries carry them.
+    pub alt_variants: Arc<HashMap<String, Vec<lodforge_dyndolod::bases::AltTexture>>>,
+    /// Base EditorID (lower case) -> Community Shaders' PBR settings for its directional material
+    /// ([`crate::dyndolod_build::Config::snow_pbr_variants`]); near-tier entries carry them.
+    pub snow_pbr_variants: Arc<HashMap<String, lodforge_instances::statics::SnowPbr>>,
+    /// Full-model near tier: LOD4 instances of references that are not large references and whose
+    /// LOD model's bounding radius (times the reference scale) reaches this many units are listed
+    /// in `NEAR` (0 = none).
+    pub near_min_radius: f32,
+}
+
+/// The plugin the child-world copies' references live in.
+pub const DYNDOLOD_ESM: &str = "DynDOLOD.esm";
+
+/// (synthetic instances, those on large-reference `MESH` entries) of a statics file: records
+/// with plugin `NO_PLUGIN`, which the runtime's per-reference large-reference hand-off cannot
+/// follow (it falls back to hiding them inside the large-reference grid).
+pub fn synthetic_counts(f: &StaticsFile) -> (usize, usize) {
+    let mut n = (0, 0);
+    for recs in f.blocks.values() {
+        for r in recs.iter().filter(|r| r.plugin == lodforge_instances::statics::NO_PLUGIN) {
+            n.0 += 1;
+            if f.meshes.get(usize::from(r.mesh)).is_some_and(|m| m.flags & lodforge_instances::statics::MESH_LARGE_REF != 0) {
+                n.1 += 1;
+            }
+        }
+    }
+    n
 }
 
 impl std::fmt::Debug for RuntimeObjects {
@@ -365,12 +425,19 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
         for i in *list {
             // One MESH entry per (model, large reference, AltTextures set).
             let textures = i.alt_textures.clone().unwrap_or_default();
-            let key = format!("{}|{}|{}|{:?}", i.model, u8::from(i.large_ref), textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), i.part_classes);
+            // Snow / ash entries split by the base's own directional material (the static pack
+            // gives their parts draw pages with the full model's material instead of the LOD one).
+            let snowy = i.part_classes.iter().any(|&c| matches!(c & 0x7F, lodforge_objlod::instancing::PART_SNOW | lodforge_objlod::instancing::PART_SNOW_HD | lodforge_objlod::instancing::PART_ASH | lodforge_objlod::instancing::PART_ASH_HD));
+            let snow = if snowy { rt.snow_variants.get(&i.base_edid.to_ascii_lowercase()).copied() } else { None };
+            // ... and by the full model's own AltTextures (the detail bake bakes each variant).
+            let full_alt = crate::detail_bake::alt_key(&i.full_alt);
+            let key = format!("{}|{}|{}|{:?}|{}|{}", i.model, u8::from(i.large_ref), textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), i.part_classes, snow.map(|s| s.key()).unwrap_or_default(), full_alt);
             let m = f.mesh_variant(&key, || {
                 let mut e = mesh_entry(&i.model, mesh(&i.model).as_deref(), i.runtime_ref);
                 e.model = i.model.clone();
                 e.textures = textures.iter().map(|(d, n)| (d.to_ascii_lowercase(), n.to_ascii_lowercase())).collect();
                 e.classes = i.part_classes.clone();
+                e.snow = snow;
                 if i.large_ref {
                     e.flags |= lodforge_instances::statics::MESH_LARGE_REF;
                 }
@@ -379,13 +446,48 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
             if i.runtime_ref {
                 f.meshes[usize::from(m)].flags |= MESH_TREE;
             }
+            if !i.full_model.is_empty() {
+                let entry = (world.to_string(), season.to_string(), m);
+                rt.full_models.lock().unwrap().entry(entry).or_default().insert((i.full_model.to_ascii_lowercase().replace('/', "\\"), full_alt));
+            }
             let id = u32::from_str_radix(&i.ref_id, 16).unwrap_or(0);
-            let (plugin, form) = match rt.names.split(id) {
-                Some((n, local)) => (Some(n.to_string()), local),
-                None => (None, 0),
+            let (plugin, form) = if lodforge_dyndolod::childworld::is_copy(id) {
+                // A child-world copy is named by its `_DynDOLOD_CHILD` reference in DynDOLOD.esm
+                // (the engine's own large reference of it), so the runtime's per-reference
+                // hand-off can follow it; synthetic when that plugin has none for it.
+                match rt.child_copy_ids.get(&id) {
+                    Some(&object_id) => (Some(DYNDOLOD_ESM.to_string()), object_id),
+                    None => (None, 0),
+                }
+            } else {
+                match rt.names.split(id) {
+                    Some((n, local)) => (Some(n.to_string()), local),
+                    None => (None, 0),
+                }
             };
             let angles = i.rotation_deg.map(f32::to_radians);
             f.add(q.level as u8, (q.x as i16, q.y as i16), i.position, angles, i.scale, m, plugin.as_deref(), form);
+            // Full-model near tier: a big reference the engine does not load as a large reference
+            // keeps its LOD until its cell enters the loaded grid; the runtime draws its full model
+            // out to the large-reference grid instead (once per reference: its LOD4 record).
+            if rt.near_min_radius > 0.0 && q.level == 4 && !i.large_ref && !i.runtime_ref && !i.full_model.is_empty() && !lodforge_dyndolod::childworld::is_copy(id)
+                && let Some(p) = plugin.as_deref()
+            {
+                let b = f.meshes[usize::from(m)].bounds;
+                let radius = 0.5 * ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt() * i.scale;
+                if radius >= rt.near_min_radius {
+                    let full = i.full_model.to_ascii_lowercase().replace('/', "\\");
+                    let full = if full.starts_with("meshes\\") { full } else { format!("meshes\\{full}") };
+                    // The base's own material, not the MESH entry's (the detail bake dims PBR snow for LOD).
+                    let snow = rt.snow_variants.get(&i.base_edid.to_ascii_lowercase()).copied();
+                    let alt: Vec<(&str, i32, &str, u32)> = rt
+                        .alt_variants
+                        .get(&i.base_edid.to_ascii_lowercase())
+                        .map(|v| v.iter().filter_map(|a| rt.names.split(a.txst).map(|(n, local)| (a.shape.as_str(), a.index, n, local))).collect())
+                        .unwrap_or_default();
+                    f.add_near(p, form, &full, radius, snow, &alt).snow_pbr = rt.snow_pbr_variants.get(&i.base_edid.to_ascii_lowercase()).copied();
+                }
+            }
         }
     }
     f.finish();
@@ -393,7 +495,7 @@ pub fn statics_file(world: &str, season: &str, rt: &RuntimeObjects, quads: &[(lo
 }
 
 fn mesh_entry(model: &str, m: Option<&lodforge_objlod::mesh::LodMesh>, tree: bool) -> Mesh {
-    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new(), textures: Vec::new(), classes: Vec::new() };
+    let mut e = Mesh { bounds: [0.0; 6], flags: 0, triangles: 0, model: String::new(), textures: Vec::new(), classes: Vec::new(), snow: None };
     if tree {
         e.flags |= MESH_TREE;
     }

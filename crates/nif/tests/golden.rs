@@ -2,20 +2,18 @@
 //! The reader and writer are both written from the NIF format specification; agreeing with real
 //! files byte for byte shows the encoding is the same.
 //!
-//! Golden folder: `LODFORGE_GOLDEN_BTR` or the default below. Skipped (passes with a note) when
-//! the folder does not exist.
+//! Golden folder: `LODFORGE_GOLDEN_BTR`, else `golden/meshes/terrain/Tamriel` in the repository
+//! (git-ignored: copy an xLODGen output there; object BTOs in its `Objects` subfolder). Skipped
+//! (passes with a note) when the folder does not exist.
 
 use std::path::{Path, PathBuf};
 
 use lodforge_nif::parse;
 
-const DEFAULT_DIR: &str =
-    r"D:\Modlists\LODForge-golden\no-seasons-20261017-031139\output\meshes\terrain\Tamriel";
-
 fn golden_dir() -> PathBuf {
-    std::env::var("LODFORGE_GOLDEN_BTR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_DIR))
+    std::env::var("LODFORGE_GOLDEN_BTR").map(PathBuf::from).unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../golden/meshes/terrain/Tamriel")
+    })
 }
 
 fn files_with(dir: &Path, ext: &str) -> Option<Vec<PathBuf>> {

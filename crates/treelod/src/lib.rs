@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn types_over_the_limit_drop_the_smallest_and_renumber() {
-        let tree = |index: i32, height: f32| Tree { index, form_id: 0x800 + index as u32, billboard: String::new(), crc: index as u32, width: 100.0, height, shift: [0.0; 3], scale: 1.0, image: (64, 64) };
+        let tree = |index: i32, height: f32| Tree { index, form_id: (0x800 + index) as u32, billboard: String::new(), crc: index as u32, width: 100.0, height, shift: [0.0; 3], scale: 1.0, image: (64, 64) };
         let r = TreeRef { pos: [0.0; 3], rotation: 0.0, scale: 1.0, form_id: 1 };
         let mut out = TreeLod {
             trees: vec![tree(0, 900.0), tree(1, 50.0), tree(2, 1200.0), tree(-1, 2000.0)],
@@ -613,7 +613,7 @@ mod tests {
         let tree = |x: f32, parent: Option<(u32, u8)>| lodforge_esp::Placement {
             base: 0x100, flags: 0, position: [x, 0.0, 0.0], rotation: [0.0; 3], scale: 1.0, has_scale: false,
             enable_parent: parent.is_some(), enable_parent_id: parent.map_or(0, |p| p.0), enable_parent_flags: parent.map_or(0, |p| p.1),
-            cell: Some(((x / 4096.0).floor() as i32, 0)), offset: 0, plugin: 0,
+            cell: Some(((x / 4096.0).floor() as i32, 0)), offset: 0, plugin: 0, open_by_default: false,
         };
         world.refs.insert(0x200, tree(100.0, None));
         world.refs.insert(0x201, tree(200.0, Some((PLAYER_REF, 1))));

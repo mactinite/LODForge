@@ -1,0 +1,15 @@
+[package]
+name = "lodforge-detailbake"
+version = "0.1.0"
+edition.workspace = true
+license = "GPL-3.0-only"
+description = "Hi-to-lo detail bake for rock and mountain LOD models: unique UVs on the LOD model, rays to the full model for albedo, normals and ambient occlusion, BC7 textures and the baked NIF"
+
+[dependencies]
+anyhow.workspace = true
+glam.workspace = true
+rayon.workspace = true
+lodforge-nif.workspace = true
+lodforge-dds.workspace = true
+lodforge-gpu.workspace = true
+lodforge-objlod.workspace = true

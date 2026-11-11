@@ -20,6 +20,14 @@ use crate::profile::Profile;
 /// Game path stem of the pages (`<stem>_Alpha[NN].dds`: the `_Alpha` suffix makes the page renderer treat them as alpha-tested
 /// pages: average colour under the cut-out, coverage-preserving mips).
 pub const PAGE_BASE: &str = r"textures\LODForge\TreeAtlas\TreeAtlas";
+
+/// Largest atlas tile of a generated crown atlas (see `make`).
+pub const CROWN_TILE_CAP: u32 = 1024;
+
+/// Shape name of a generated crown cloud (`tree_models::crown_material`): its vertices get alpha
+/// 255 in the pack and every other vertex at most 254, so the runtime's vertex shader can tell
+/// crown planes (which it fades when seen edge-on) from trunks.
+pub const CROWN_SHAPE: &str = "Crown Cloud";
 /// UV slack before a part is re-cut (half a texel of a 512 tile).
 const UV_SLACK: f32 = 0.001;
 
@@ -31,13 +39,25 @@ pub struct Settings {
     /// Community Shaders complex grass diffuses (lower-case resolved paths): their parts go onto
     /// `CLASS_GRASS_COMPLEX` pages.
     pub complex: std::collections::HashSet<String>,
+    /// Models (lower-case `meshes\...`) drawn with their own textures even where the statics
+    /// entry names others (AltTextures): replacement models from `runtime-statics-pack
+    /// --substitute`, such as baked detail LOD models.
+    pub own_textures: std::collections::HashSet<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { tile_cap: 512, page: 4096, complex: Default::default() }
+        Settings { tile_cap: 512, page: 4096, complex: Default::default(), own_textures: Default::default() }
     }
 }
+
+/// Largest atlas tile of a baked detail LOD texture (`textures\lodforge\bake\`): it is one
+/// model's own unwrapped surface, not a tiling texture, so its size is its texel density.
+pub const BAKED_TILE_CAP: u32 = 2048;
+
+/// A pack model: model path, per-part resolved (diffuse, normal) (empty = the model's own),
+/// per-part LOD material classes, and the snow material of its snow-class parts' draw pages.
+pub type PackModel = (String, Vec<(String, String)>, Vec<u8>, Option<lodforge_instances::statics::Snow>);
 
 #[derive(Default, Debug)]
 pub struct Report {
@@ -45,6 +65,10 @@ pub struct Report {
     pub meshes: usize,
     pub textures: usize,
     pub pages: usize,
+    /// Extra draw pages: atlas pages drawn again with a base's own snow material.
+    pub snow_pages: usize,
+    /// Atlas pages of PBR bakes (with an RMAOS map; drawn through the TruePBR LOD shaders).
+    pub pbr_pages: usize,
     pub page_bytes: u64,
     pub vertices: usize,
     pub triangles: usize,
@@ -68,12 +92,14 @@ impl Report {
     pub fn summary(&self) -> String {
         let mb = |b: f64| b / 1e6;
         format!(
-            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({:.1} MB BC7 + mips); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128), {} opaque parts; {} instance files linked; {:.1} s",
+            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({} PBR; {:.1} MB BC7 + mips) + {} snow draw page(s); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128), {} opaque parts; {} instance files linked; {:.1} s",
             self.models,
             self.meshes,
             self.textures,
             self.pages,
+            self.pbr_pages,
             mb(self.page_bytes as f64),
+            self.snow_pages,
             self.vertices,
             self.triangles,
             self.clusters,
@@ -102,12 +128,12 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
     let dir = crate::instances::out_dir(out);
     let files = trees_files(&dir)?;
     // Every model (sorted, so the pack is deterministic) with its resolved textures.
-    let mut models: BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)> = BTreeMap::new();
+    let mut models: BTreeMap<String, PackModel> = BTreeMap::new();
     for f in &files {
         let t = TreeFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for m in t.meshes {
             if !m.model.is_empty() {
-                models.entry(m.model.clone()).or_insert_with(|| (m.model.clone(), m.shapes.iter().map(|s| (s.diffuse.clone(), s.normal.clone())).collect(), Vec::new()));
+                models.entry(m.model.clone()).or_insert_with(|| (m.model.clone(), m.shapes.iter().map(|s| (s.diffuse.clone(), s.normal.clone())).collect(), Vec::new(), None));
             }
         }
     }
@@ -125,6 +151,46 @@ pub fn build(p: &Profile, out: &Path, s: &Settings, write: WriteOptions) -> Resu
 /// Game path of the static mesh pack's pages.
 pub const STATIC_PAGE_BASE: &str = r"textures\LODForge\StaticAtlas\StaticAtlas";
 pub const STATIC_FILE_NAME: &str = "StaticMeshes.bin";
+/// Page size of the static mesh pack (see `build_statics`).
+pub const STATIC_PAGE: u32 = 8192;
+/// Atlas pages one cluster draw set of the LODForge Runtime covers (its `Batch.h kClusterPages`).
+pub const RUNTIME_CLUSTER_PAGES: usize = 512;
+
+/// Splits an atlas texture list (name, width, height) into lists laid out separately: textures
+/// grouped by `group_of`, groups packed whole (largest first, first fit) into bins of about one
+/// `page` x `page` page each; a group larger than a page gets its own bin. One group: the list
+/// unchanged.
+fn material_bins(list: Vec<(String, u32, u32)>, group_of: impl Fn(&str) -> String, page: u32) -> Vec<Vec<(String, u32, u32)>> {
+    let mut groups: BTreeMap<String, Vec<(String, u32, u32)>> = BTreeMap::new();
+    for t in list {
+        groups.entry(group_of(&t.0)).or_default().push(t);
+    }
+    if groups.len() <= 1 {
+        return groups.into_values().collect();
+    }
+    let area = |v: &[(String, u32, u32)]| v.iter().map(|t| u64::from(t.1) * u64::from(t.2)).sum::<u64>();
+    // Some headroom: tiles do not pack a page perfectly.
+    let cap = u64::from(page) * u64::from(page) * 85 / 100;
+    let mut groups: Vec<Vec<(String, u32, u32)>> = groups.into_values().collect();
+    groups.sort_by(|a, b| area(b).cmp(&area(a)).then(a[0].0.cmp(&b[0].0)));
+    let mut bins: Vec<(u64, Vec<(String, u32, u32)>)> = Vec::new();
+    for g in groups {
+        let a = area(&g);
+        match bins.iter_mut().find(|(used, _)| a <= cap && *used + a <= cap) {
+            Some((used, items)) => {
+                *used += a;
+                items.extend(g);
+            }
+            None => bins.push((a, g)),
+        }
+    }
+    bins.into_iter()
+        .map(|(_, mut v)| {
+            v.sort_by(|a, b| (b.1 * b.2).cmp(&(a.1 * a.2)).then(a.0.cmp(&b.0)));
+            v
+        })
+        .collect()
+}
 
 /// Builds the static pack from the `.statics.bin` files in `out` (every `MESH` model) and links
 /// them to it (`SMPK`).
@@ -135,13 +201,17 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_ascii_lowercase().ends_with(".statics.bin")).collect();
     files.sort();
     // One pack mesh per (model, texture set); large-reference entries share it.
-    let key_of = |m: &lodforge_instances::statics::Mesh| format!("{}|{}|{:?}", m.model, m.textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), m.classes);
+    // Snow / ash parts of entries whose base has a directional material (`MSNO`) draw with that
+    // material, baked or not; entries without one keep their class's engine LOD material.
+    let snow_of = |m: &lodforge_instances::statics::Mesh| m.snow;
+    let key_of = |m: &lodforge_instances::statics::Mesh| format!("{}|{}|{:?}|{}", m.model, m.textures.iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), m.classes, snow_of(m).map(|s| s.key()).unwrap_or_default());
     let mut textures = crate::instances::TextureIndex::default();
-    let mut models: BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)> = BTreeMap::new();
+    let mut models: BTreeMap<String, PackModel> = BTreeMap::new();
     for f in &files {
         let t = StaticsFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for m in &t.meshes {
-            models.entry(key_of(m)).or_insert_with(|| (m.model.clone(), m.textures.iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect(), m.classes.clone()));
+            let own = s.own_textures.contains(&m.model.to_ascii_lowercase());
+            models.entry(key_of(m)).or_insert_with(|| (m.model.clone(), if own { Vec::new() } else { m.textures.iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect() }, m.classes.clone(), snow_of(m)));
         }
     }
     // Dynamic LOD models (`.dyn.bin` `DMDL`): the dynamic model (not animated / glow ones, which
@@ -151,7 +221,7 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
     dyn_files.sort();
     // Same key as `key_of` for a statics entry with these textures and classes, so a `.dyn.bin` slot
     // and a statics variant of the same model share a pack mesh.
-    let slot_key = |m: &lodforge_instances::dynlod::DynModel, i: usize, s: &str| format!("{s}|{}|{:?}", m.textures[i].iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), m.classes[i]);
+    let slot_key = |m: &lodforge_instances::dynlod::DynModel, i: usize, s: &str| format!("{s}|{}|{:?}|", m.textures[i].iter().map(|(d, n)| format!("{d},{n}")).collect::<Vec<_>>().join(";"), m.classes[i]);
     let dyn_slots = |m: &lodforge_instances::dynlod::DynModel| -> [String; 4] {
         let first = if m.flags & (MODEL_ANIMATED | MODEL_GLOW) != 0 { String::new() } else { m.model.clone() };
         [first, m.lod[0].clone(), m.lod[1].clone(), m.lod[2].clone()].map(|s| if s.ends_with(".nif") { s } else { String::new() })
@@ -160,11 +230,19 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
         let d = DynFile::from_bytes(&std::fs::read(f)?).with_context(|| format!("reading {}", f.display()))?;
         for m in &d.models {
             for (i, s) in dyn_slots(m).into_iter().enumerate().filter(|(_, s)| !s.is_empty()) {
-                models.entry(slot_key(m, i, &s)).or_insert_with(|| (s.clone(), m.textures[i].iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect(), m.classes[i].clone()));
+                models.entry(slot_key(m, i, &s)).or_insert_with(|| (s.clone(), m.textures[i].iter().map(|(d, n)| (textures.resolve(p, d), textures.resolve(p, n))).collect(), m.classes[i].clone(), None));
             }
         }
     }
+    // The runtime draws clusters of at most `RUNTIME_CLUSTER_PAGES` pages (Batch.h
+    // kClusterPages; pages beyond it are drawn with the last page's texture), and the static
+    // pack (thousands of models, baked detail textures) outgrows 32 pages of 4096 px: its pages
+    // are 8192 px, a quarter of the count for the same texels.
+    let s = &Settings { tile_cap: s.tile_cap, page: s.page.max(STATIC_PAGE), complex: s.complex.clone(), own_textures: s.own_textures.clone() };
     let (mut rep, mesh_of) = make(p, out, &models, s, write, STATIC_PAGE_BASE, STATIC_FILE_NAME, &|m| vfs_mesh(p, m))?;
+    if rep.pages + rep.snow_pages > RUNTIME_CLUSTER_PAGES {
+        eprintln!("static mesh pack: {} atlas pages + {} snow draw pages, more than the {RUNTIME_CLUSTER_PAGES} the LODForge Runtime draws; the rest show the wrong textures in game", rep.pages, rep.snow_pages);
+    }
     rep.trees_files = files.len();
     for f in &files {
         let mut t = StaticsFile::from_bytes(&std::fs::read(f)?)?;
@@ -186,7 +264,7 @@ pub fn build_statics(p: &Profile, out: &Path, s: &Settings, write: WriteOptions)
 /// A mesh pack of `models` (with their shapes' resolved diffuse/normal in part order; an empty
 /// list resolves the textures the model names) written to `out` as `file_name` with pages under
 /// `page_base`. Returns the report and model -> pack mesh.
-pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(String, String)>, Vec<u8>)>, s: &Settings, write: WriteOptions, page_base: &str, file_name: &str, load: &dyn Fn(&str) -> Option<lodforge_objlod::mesh::LodMesh>) -> Result<(Report, HashMap<String, u32>)> {
+pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, PackModel>, s: &Settings, write: WriteOptions, page_base: &str, file_name: &str, load: &dyn Fn(&str) -> Option<lodforge_objlod::mesh::LodMesh>) -> Result<(Report, HashMap<String, u32>)> {
     let dir = crate::instances::out_dir(out);
     std::fs::create_dir_all(&dir)?;
     let mut rep = Report { models: models.len(), ..Default::default() };
@@ -196,12 +274,14 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
         key: String,
         class: u8,
         whiten: bool,
+        /// Drawn on a draw page with this snow material (snow-class parts of baked models).
+        snow: Option<lodforge_instances::statics::Snow>,
     }
     let mut loaded: Vec<(String, String, Vec<Part>)> = Vec::new();
     let mut sizes: BTreeMap<(u8, String), (u32, u32)> = BTreeMap::new();
     let t_load = Instant::now();
     let mut slow: Vec<(f64, String)> = Vec::new();
-    for (mi, (key, (model, shapes, classes))) in models.iter().enumerate() {
+    for (mi, (key, (model, shapes, classes, model_snow))) in models.iter().enumerate() {
         let t_model = Instant::now();
         if std::env::var_os("LODFORGE_PACK_TRACE").is_some() {
             eprintln!("  pack: {mi} {model}");
@@ -253,7 +333,17 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                 key.push_str(crate::object_atlas::HALF_TOP);
             }
             if !sizes.contains_key(&(class, key.clone())) {
-                let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, if complex { (i.height / 2).max(1) } else { i.height }, s.tile_cap));
+                // A generated crown atlas (`<stem>_<crc>crown.dds`) is one tree's own foliage, not a
+                // tiling texture: it keeps its full size (its texels are spent on leaves already).
+                let low = shape.diffuse.to_ascii_lowercase();
+                let cap = if low.ends_with("crown.dds") {
+                    s.tile_cap.max(CROWN_TILE_CAP)
+                } else if low.contains("\\lodforge\\bake\\") {
+                    s.tile_cap.max(BAKED_TILE_CAP)
+                } else {
+                    s.tile_cap
+                };
+                let size = p.vfs.read(&shape.diffuse).ok().flatten().and_then(|b| lodforge_dds::parse(&b).ok()).map(|i| crate::dyndolod_build::tile_size(i.width, if complex { (i.height / 2).max(1) } else { i.height }, cap));
                 let Some(size) = size else {
                     rep.dropped_parts += 1;
                     continue;
@@ -266,7 +356,8 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
             } else {
                 part
             };
-            parts.push(Part { part, key, class, whiten });
+            let snow = model_snow.filter(|_| matches!(class, lodforge_instances::meshpack::CLASS_SNOW | lodforge_instances::meshpack::CLASS_SNOW_HD | lodforge_instances::meshpack::CLASS_ASH | lodforge_instances::meshpack::CLASS_ASH_HD));
+            parts.push(Part { part, key, class, whiten, snow });
         }
         if !parts.is_empty() {
             loaded.push((key.clone(), model.clone(), parts));
@@ -289,9 +380,32 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
     // (class, texture key) -> (pack page, tile).
     let mut entry: HashMap<(u8, String), (u16, lodforge_objlod::atlas_build::AtlasEntry)> = HashMap::new();
     let classes: std::collections::BTreeSet<u8> = sizes.keys().map(|(c, _)| *c).collect();
+    // Each (atlas page, snow material) pair becomes a draw page, and every draw page costs an
+    // engine draw per pass, so textures are grouped by the snow material that uses them most and
+    // groups are packed whole onto page sets: a material's textures share a page instead of
+    // spreading over several.
+    let mut tex_snow: HashMap<(u8, String), HashMap<String, usize>> = HashMap::new();
+    for (_, _, parts) in &loaded {
+        for p in parts {
+            *tex_snow.entry((p.class, p.key.clone())).or_default().entry(p.snow.map(|s| s.key()).unwrap_or_default()).or_default() += p.part.triangles.len().max(1);
+        }
+    }
+    let dominant = |class: u8, k: &str| -> String { tex_snow.get(&(class, k.to_string())).and_then(|m| m.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(s, _)| s.clone())).unwrap_or_default() };
+    // PBR bakes (a detail-bake texture with its `_rmaos.dds` beside it) go on PBR pages of their
+    // own, which carry an RMAOS map and draw through the TruePBR LOD shaders.
+    let is_pbr_key = |k: &str| -> bool {
+        let d = k.split('=').next().unwrap_or("").split(',').next().unwrap_or("").to_ascii_lowercase();
+        d.starts_with(crate::detail_bake::TEXTURE_DIR) && p.vfs.exists(&crate::object_atlas::rmaos_name(&d))
+    };
     for class in classes {
         let mut list: Vec<(String, u32, u32)> = sizes.iter().filter(|((c, _), _)| *c == class).map(|((_, k), (w, h))| (k.clone(), *w, *h)).collect();
         list.sort_by(|a, b| (b.1 * b.2).cmp(&(a.1 * a.2)).then(a.0.cmp(&b.0)));
+        let (pbr_list, plain_list): (Vec<_>, Vec<_>) = list.into_iter().partition(|t| is_pbr_key(&t.0));
+        for (pbr, list) in [(false, plain_list), (true, pbr_list)] {
+        if list.is_empty() {
+            continue;
+        }
+        for (bin_index, list) in material_bins(list, |k| dominant(class, k), s.page).into_iter().enumerate() {
         let tag = match class {
             lodforge_instances::meshpack::CLASS_SNOW => "_Snow",
             lodforge_instances::meshpack::CLASS_SNOW_HD => "_SnowHD",
@@ -300,32 +414,65 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
             lodforge_instances::meshpack::CLASS_GRASS_COMPLEX => "_Complex",
             _ => "",
         };
-        let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, &format!("{page_base}{tag}_Alpha"));
+        let tag = format!("{tag}{}", if pbr { "_PBR" } else { "" });
+        let base = if bin_index == 0 { format!("{page_base}{tag}_Alpha") } else { format!("{page_base}{tag}_M{bin_index:02}_Alpha") };
+        let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, &base);
         // Complex grass: pages twice as high, every tile repeated in the bottom half with the
         // texture's bottom half (normal, specular).
         let render_layout = if class == lodforge_instances::meshpack::CLASS_GRASS_COMPLEX { crate::object_atlas::complex_layout(&layout) } else { layout.clone() };
         let pages = crate::object_atlas::render(&p.vfs, &render_layout, &gpu, &formats)?;
         crate::object_atlas::write(out, &pages)?;
         rep.pages += pages.len();
-        rep.page_bytes += pages.iter().map(|pg| (pg.diffuse.len() + pg.normal.len()) as u64).sum::<u64>();
+        rep.page_bytes += pages.iter().map(|pg| (pg.diffuse.len() + pg.normal.len() + pg.rmaos.as_ref().map_or(0, Vec::len)) as u64).sum::<u64>();
+        rep.pbr_pages += pages.iter().filter(|pg| pg.rmaos.is_some()).count();
         let first = pack.pages.len() as u16;
-        pack.pages.extend(render_layout.pages.iter().map(|pg| Page { width: pg.width, height: pg.height, mips: pg.width.max(pg.height).ilog2() + 1, alpha_threshold: 128, class, albedo: pg.name.to_ascii_lowercase(), normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase() }));
+        pack.pages.extend(render_layout.pages.iter().map(|pg| Page {
+            width: pg.width,
+            height: pg.height,
+            mips: pg.width.max(pg.height).ilog2() + 1,
+            alpha_threshold: 128,
+            class,
+            albedo: pg.name.to_ascii_lowercase(),
+            normal: crate::object_atlas::normal_name(&pg.name).to_ascii_lowercase(),
+            rmaos: if crate::object_atlas::is_pbr_page(&pg.name) { crate::object_atlas::rmaos_name(&pg.name).to_ascii_lowercase() } else { String::new() },
+            snow: None,
+        }));
         for e in layout.entries.into_iter().filter(|e| e.page != usize::MAX) {
             entry.insert((class, e.texture.clone()), (first + e.page as u16, e));
         }
+        }
+        }
     }
     let mut mesh_of: HashMap<String, u32> = HashMap::new();
+    // (atlas page, snow material) -> draw page: the atlas page again (same textures) whose proxy
+    // gets the snow material.
+    let mut draw_pages: HashMap<(u16, String), u16> = HashMap::new();
     for (key, model, parts) in loaded {
         let mut input = MeshInput { model: model.clone(), vertices: Vec::new(), triangles: Vec::new() };
-        for Part { part, key, class, whiten } in &parts {
-            let Some((page, e)) = entry.get(&(*class, key.clone())) else {
+        // Baked models carry the full model's snow mask in their vertex alpha; other LOD models'
+        // alpha follows the HD LOD convention (a bias around 0.5), so they get none (1).
+        let baked = model.to_ascii_lowercase().starts_with(crate::detail_bake::MESH_DIR);
+        for Part { part, key, class, whiten, snow } in &parts {
+            let Some((atlas_page, e)) = entry.get(&(*class, key.clone())) else {
                 rep.dropped_parts += 1;
                 continue;
             };
+            let page = match snow {
+                None => *atlas_page,
+                Some(sn) => *draw_pages.entry((*atlas_page, sn.key())).or_insert_with(|| {
+                    let mut pg = pack.pages[usize::from(*atlas_page)].clone();
+                    pg.snow = Some(*sn);
+                    pack.pages.push(pg);
+                    rep.snow_pages += 1;
+                    (pack.pages.len() - 1) as u16
+                }),
+            };
+            let page = &page;
             let pg = &pack.pages[usize::from(*page)];
             // Complex grass pages: UVs in the top half's space (CS samples colour at v * 0.5).
             let page_h = if *class == lodforge_instances::meshpack::CLASS_GRASS_COMPLEX { pg.height / 2 } else { pg.height };
             let base = input.vertices.len() as u32;
+            let crown_part = format!("{:?}", part.name).contains(CROWN_SHAPE);
             // Half-texel inset so bilinear filtering stays inside the tile.
             let map = |uv: f32, origin: u32, size: u32, page: u32| ((f64::from(origin) + 0.5 + f64::from(uv.clamp(0.0, 1.0)) * f64::from(size.saturating_sub(1))) / f64::from(page) * 65535.0).round().clamp(0.0, 65535.0) as u16;
             for (i, pos) in part.positions.iter().enumerate() {
@@ -340,7 +487,13 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, (String, Vec<(Str
                     normal: pack_unit(n, 0),
                     tangent: pack_unit(t, w),
                     uv: [map(uv[0], e.x, e.width, pg.width), map(uv[1], e.y, e.height, page_h)],
-                    color: part.colors.as_ref().and_then(|c| c.get(i).copied()).map(|c| if *whiten { [255, 255, 255, c[3]] } else { c }).unwrap_or([255; 4]),
+                    color: {
+                        let c = part.colors.as_ref().and_then(|c| c.get(i).copied()).map(|c| if *whiten { [255, 255, 255, c[3]] } else { c }).unwrap_or([255; 4]);
+                        // The alpha channel marks crown planes (255) against everything else (<= 254); the
+                        // source alpha (wind weights on trees) has no use in the pack, except on snow
+                        // draw pages of baked models, where it is the snow mask (254 = 1, ClusterVS).
+                        [c[0], c[1], c[2], if crown_part { 255 } else if snow.is_some() && baked { c[3].min(254) } else { 254 }]
+                    },
                 });
             }
             for tri in &part.triangles {
@@ -377,12 +530,56 @@ pub struct StaticsArgs {
     pub tile: u32,
     #[arg(long, default_value_t = 3)]
     pub zstd: i32,
+    /// Statics pack only: a Data-style folder of replacement models (at the paths the statics
+    /// files name) and their textures, read as the highest-priority input and never copied to
+    /// the output. The replaced models keep their own textures (AltTextures are ignored for
+    /// them). Used to try baked detail LOD models (`detail_bake` example) in game.
+    #[arg(long)]
+    pub substitute: Option<PathBuf>,
+}
+
+/// `lodforge runtime-tree-pack`: rebuilds only `TreeMeshes.bin` (and its pages) from the trees
+/// files of an output, with that output's own files (generated tree LOD models, crown textures)
+/// visible as inputs, and links the trees files to it. For iterating on the generated crowns
+/// without a full build: `tree-models --out <output>` then this.
+pub fn run_trees(a: &StaticsArgs) -> Result<()> {
+    let mut p = a.profile.open()?;
+    p.vfs.add_loose_root_since(&a.data, &lodforge_archive::DirSnapshot::default())?;
+    // TreeMeshes.bin takes the output's run token (Build.txt), like the files it links to; the
+    // runtime checks that they agree.
+    println!("run token {}", crate::instances::init_build_token(&a.data));
+    let rep = build(&p, &a.data, &Settings { tile_cap: a.tile, ..Default::default() }, WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true })?;
+    println!("tree {}", rep.summary());
+    for u in &rep.unresolved {
+        println!("  unresolved: {u}");
+    }
+    Ok(())
 }
 
 pub fn run_statics(a: &StaticsArgs) -> Result<()> {
     let mut p = a.profile.open()?;
     p.vfs.add_loose_root_since(&a.data, &lodforge_archive::DirSnapshot::default())?;
-    let rep = build_statics(&p, &a.data, &Settings { tile_cap: a.tile, ..Default::default() }, WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true })?;
+    // Same token as the output's other runtime files (Build.txt); the runtime checks they agree.
+    println!("run token {}", crate::instances::init_build_token(&a.data));
+    let mut settings = Settings { tile_cap: a.tile, ..Default::default() };
+    if let Some(sub) = &a.substitute {
+        p.vfs.add_loose_root_since(sub, &lodforge_archive::DirSnapshot::default())?;
+        let meshes = sub.join("meshes");
+        let mut stack = vec![meshes.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))?.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("nif")) {
+                    let rel = path.strip_prefix(sub)?.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+                    settings.own_textures.insert(rel);
+                }
+            }
+        }
+        println!("substitute models: {}", settings.own_textures.len());
+    }
+    let rep = build_statics(&p, &a.data, &settings, WriteOptions { zstd: (a.zstd > 0).then_some(a.zstd), crc: true })?;
     println!("static {}", rep.summary());
     for u in &rep.unresolved {
         println!("  unresolved: {u}");
@@ -394,4 +591,26 @@ pub fn run_statics(a: &StaticsArgs) -> Result<()> {
 pub fn vfs_mesh(p: &Profile, model: &str) -> Option<lodforge_objlod::mesh::LodMesh> {
     let bytes = p.vfs.read(model).ok().flatten()?;
     lodforge_objlod::mesh::import(model, &bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::material_bins;
+
+    #[test]
+    fn material_bins_keep_groups_together() {
+        let t = |n: &str, s: u32| (n.to_string(), s, s);
+        // Two groups that each fit half a page share one bin; a third that does not fit goes to a new one.
+        let list = vec![t("a1", 64), t("a2", 64), t("b1", 64), t("c1", 100), t("c2", 20)];
+        let group = |k: &str| k[..1].to_string();
+        let bins = material_bins(list, group, 128);
+        let names: Vec<Vec<String>> = bins.iter().map(|b| b.iter().map(|t| t.0.clone()).collect()).collect();
+        for b in &names {
+            let gs: std::collections::BTreeSet<char> = b.iter().map(|n| n.chars().next().unwrap()).collect();
+            assert!(gs.len() <= 2, "{names:?}");
+        }
+        assert_eq!(names.iter().map(Vec::len).sum::<usize>(), 5);
+        // One group: unchanged list.
+        assert_eq!(material_bins(vec![t("x", 8), t("y", 4)], |_| String::new(), 128).len(), 1);
+    }
 }
