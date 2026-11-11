@@ -68,9 +68,19 @@ pub struct RgbaImage<'a> {
     pub rgba: &'a [u8],
 }
 
+/// The instance settings for [`Gpu`]: wgpu's defaults and `WGPU_*` environment variables, minus
+/// [`wgpu::InstanceFlags::DEBUG`] in debug builds. On D3D12 that flag makes FXC compile shaders
+/// without optimisation, and `bc7_ispc.wgsl` then fails with X4505 (more than 4096 temp
+/// registers). Validation stays on; set `WGPU_DEBUG=1` to get shader debug info back.
+pub fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut desc = wgpu::InstanceDescriptor::from_env_or_default();
+    desc.flags = (wgpu::InstanceFlags::from_build_config() - wgpu::InstanceFlags::DEBUG).with_env();
+    desc
+}
+
 impl Gpu {
     pub fn new() -> Result<Gpu> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let instance = wgpu::Instance::new(&instance_descriptor());
         Self::with_instance(&instance, None, wgpu::Features::empty())
     }
 

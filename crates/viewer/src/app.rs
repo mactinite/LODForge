@@ -199,7 +199,7 @@ impl App {
                 .create_window(attrs)
                 .context("creating the window")?,
         );
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let instance = wgpu::Instance::new(&lodforge_gpu::instance_descriptor());
         let surface = instance
             .create_surface(window.clone())
             .context("creating the surface")?;
