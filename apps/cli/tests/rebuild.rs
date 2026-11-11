@@ -3,8 +3,8 @@
 //! MO2 instance and the GPU):
 //!
 //! ```text
-//! set LODFORGE_REBUILD_ROOT=D:\scratch\rebuild
-//! set LODFORGE_REBUILD_ARGS=--instance D:\Modlists\skyrim-cs --profile LODForge-E2E --mode dyndolod --preset Medium --texgen --worlds JaphetsFollyWorld
+//! set LODFORGE_REBUILD_ROOT=<new, empty folder>
+//! set LODFORGE_REBUILD_ARGS=--instance <MO2 instance> --profile <profile> --mode dyndolod --preset Medium --texgen --worlds JaphetsFollyWorld
 //! cargo test --release -p lodforge --test rebuild -- --ignored
 //! ```
 //!

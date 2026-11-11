@@ -1738,35 +1738,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-mod file_tests {
-    /// `LODFORGE_NIF=<file> cargo test -p lodforge-lodmodel real_file -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn real_file() {
-        let path = std::env::var("LODFORGE_NIF").unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        let nif = lodforge_nif::parse(&bytes).unwrap();
-        println!("roots {:?}", nif.roots);
-        for (i, b) in nif.blocks.iter().enumerate() {
-            match b {
-                lodforge_nif::Block::Node(n) => println!("{i} {} flags {:#x} children {:?}", nif.block_type(i), n.av.flags, n.children),
-                lodforge_nif::Block::TriShape(s) if std::env::var_os("LODFORGE_ZRANGE").is_some() => println!("{i} zrange {:.0} {:.0}", s.positions.iter().map(|p| p[2]).fold(f32::MAX, f32::min), s.positions.iter().map(|p| p[2]).fold(f32::MIN, f32::max)),
-                lodforge_nif::Block::TriShape(s) => println!("{i} shape flags {:#x} skin {:?} shader {:?} alpha {:?} v {} uv {} n {} t {} c {} tris {}", s.av.flags, s.skin, s.shader_property, s.alpha_property, s.positions.len(), s.uvs.len(), s.normals.len(), s.tangents.len(), s.colors.len(), s.triangles.len()),
-                lodforge_nif::Block::LightingShader(l) => println!("{i} shader {:#x} {:#x}", l.flags1, l.flags2),
-                _ => println!("{i} {}", nif.block_type(i)),
-            }
-        }
-        let out_dir = std::env::var_os("LODFORGE_LODMODEL_OUT");
-        for (k, p) in super::LEVELS.iter().enumerate() {
-            let r = super::generate_nif(&nif, p, "x");
-            println!("level {k}: {:?}", r.as_ref().map(|r| r.1.clone()));
-            if let (Some(dir), Ok((out, _))) = (&out_dir, &r) {
-                let stem = std::path::Path::new(&path).file_stem().unwrap().to_string_lossy().to_string();
-                std::fs::write(std::path::Path::new(dir).join(format!("{stem}_lod_{k}.nif")), out.to_bytes().unwrap()).unwrap();
-            }
-        }
-    }
-}
-
