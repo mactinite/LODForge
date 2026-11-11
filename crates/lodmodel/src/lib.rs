@@ -97,8 +97,10 @@ pub const LEVELS: [LevelParams; 3] = [
 /// transform is ignored, as the engine does ([`collect`]). 6: the silhouette check ([`coverage`])
 /// lowers the error limit where the result fills or loses too much. 7: the simplified surface is
 /// pushed back out to the source ([`fit_outward`]), and the silhouette loss tolerances are 0.03 /
-/// 0.06 / 0.10 instead of 0.2 / 0.25 / 0.4.
-pub const GENERATOR_VERSION: u32 = 7;
+/// 0.06 / 0.10 instead of 0.2 / 0.25 / 0.4. 8: the silhouette check keeps halving the error
+/// limit when a pass repeats the last one (the goal stopped it below the limit), instead of
+/// giving up with the silhouette still failing.
+pub const GENERATOR_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stats {
@@ -454,7 +456,6 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3
         let mut err = 0.0f32;
         let mut cov;
         let mut got;
-        let mut last: Option<(usize, (f32, f32))> = None;
         loop {
             got = meshopt::simplify_with_attributes_and_locks_decoder(&g.indices, &positions, &attrs, &weights, 5 * 4, &locks, goal * 3, max_error, opts, Some(&mut err));
             if got.len() / 3 > cap.max(goal) {
@@ -470,14 +471,11 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3
             if dbg && (lost || bad_shape) {
                 eprintln!("    group {:?} at goal {goal}, error {max_error}: {} triangles, extent {box_in:?} -> {box_out:?} lost {lost}, fill {:.2} loss {:.2}", g.part, got.len() / 3, cov.0, cov.1);
             }
-            // A pass that changed nothing (the goal, not the limit, bounds this group): done.
-            let same = last == Some((got.len(), cov));
-            last = Some((got.len(), cov));
             // A lost end: more triangles (the collapse was almost free, a smaller limit rarely
-            // helps). A changed silhouette: a smaller error limit (rims and bars survive it).
-            if same {
-                break;
-            } else if lost && goal < source {
+            // helps). A changed silhouette: a smaller error limit (rims and bars survive it),
+            // down to `min_error` even when a halving repeats the last pass: the goal stopped
+            // that pass below both limits, and a further halving can still bind.
+            if lost && goal < source {
                 goal = (goal * 2).min(source);
             } else if bad_shape && max_error > p.min_error {
                 max_error = (max_error * 0.5).max(p.min_error);
