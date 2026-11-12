@@ -73,7 +73,15 @@ const CHUNK_BLOCKS: u32 = 1 << 18;
 
 impl Gpu {
     /// The ISPC BC7 encoder ([bc7_cpu::encode]) on the GPU: same profiles, same block data.
+    ///
+    /// On a software adapter ([Gpu::is_software]) this runs [bc7_cpu::encode] instead: WARP
+    /// corrupts the process heap running `bc7_ispc.wgsl` (seen on Windows 11 and the CI runner),
+    /// and the native CPU encoder is faster than an emulated GPU anyway.
     pub fn encode_bc7_ispc(&self, images: &[RgbaImage<'_>], quality: Bc7Quality) -> Result<Vec<Vec<u8>>> {
+        if self.is_software() {
+            use rayon::prelude::*;
+            return Ok(images.par_iter().map(|img| bc7_cpu::encode(img, quality)).collect());
+        }
         struct Job {
             out: wgpu::Buffer,
             readback: wgpu::Buffer,
@@ -217,6 +225,10 @@ mod tests {
                 return;
             }
         };
+        if gpu.is_software() {
+            eprintln!("skipping: {} is a software adapter; encode_bc7_ispc runs the CPU encoder there", gpu.adapter_info.name);
+            return;
+        }
         for (w, h, alpha) in [(256u32, 256u32, false), (256, 256, true), (61, 37, true), (4, 4, false)] {
             for quality in [Bc7Quality::High, Bc7Quality::Best] {
                 let rgba = image(w, h, alpha);

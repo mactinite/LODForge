@@ -68,9 +68,19 @@ pub struct RgbaImage<'a> {
     pub rgba: &'a [u8],
 }
 
+/// The instance settings for [`Gpu`]: wgpu's defaults and `WGPU_*` environment variables, minus
+/// [`wgpu::InstanceFlags::DEBUG`] in debug builds. On D3D12 that flag makes FXC compile shaders
+/// without optimisation, and `bc7_ispc.wgsl` then fails with X4505 (more than 4096 temp
+/// registers). Validation stays on; set `WGPU_DEBUG=1` to get shader debug info back.
+pub fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut desc = wgpu::InstanceDescriptor::from_env_or_default();
+    desc.flags = (wgpu::InstanceFlags::from_build_config() - wgpu::InstanceFlags::DEBUG).with_env();
+    desc
+}
+
 impl Gpu {
     pub fn new() -> Result<Gpu> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let instance = wgpu::Instance::new(&instance_descriptor());
         Self::with_instance(&instance, None, wgpu::Features::empty())
     }
 
@@ -150,7 +160,13 @@ impl Gpu {
         };
         let (level_h, level_v, level_copy) = (level_entry("level_h"), level_entry("level_v"), level_entry("level_copy"));
         let bc7_ispc = bc7_gpu::Bc7Ispc::new(&device);
-        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy, bc7_ispc, bc7_on_gpu: std::sync::atomic::AtomicBool::new(bc7_gpu::default_gpu()), bc7_quality: std::sync::atomic::AtomicU8::new(bc7_cpu::default_quality().as_u8()) })
+        let bc7_on_gpu = std::sync::atomic::AtomicBool::new(bc7_gpu::default_gpu() && adapter_info.device_type != wgpu::DeviceType::Cpu);
+        Ok(Gpu { device, queue, adapter, adapter_info, max_msaa, bc7, spec_render, spec_down_h, spec_down_v, level_h, level_v, level_copy, bc7_ispc, bc7_on_gpu, bc7_quality: std::sync::atomic::AtomicU8::new(bc7_cpu::default_quality().as_u8()) })
+    }
+
+    /// Whether the adapter is a software rasteriser (WARP, llvmpipe) rather than a GPU.
+    pub fn is_software(&self) -> bool {
+        self.adapter_info.device_type == wgpu::DeviceType::Cpu
     }
 
     /// Chooses the BC7 encoder for later [Gpu::encode_bc7] calls (default [Bc7Quality::High]).
@@ -162,9 +178,10 @@ impl Gpu {
         Bc7Quality::from_u8(self.bc7_quality.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    /// Runs the multi-mode encoders of [Gpu::encode_bc7] on the GPU instead of the CPU.
+    /// Runs the multi-mode encoders of [Gpu::encode_bc7] on the GPU instead of the CPU. Ignored on
+    /// a software adapter ([Gpu::is_software]): see [Gpu::encode_bc7_ispc].
     pub fn set_bc7_on_gpu(&self, on: bool) {
-        self.bc7_on_gpu.store(on, std::sync::atomic::Ordering::Relaxed);
+        self.bc7_on_gpu.store(on && !self.is_software(), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn bc7_on_gpu(&self) -> bool {
