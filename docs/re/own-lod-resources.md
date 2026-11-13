@@ -278,6 +278,8 @@ tolerance (0.2 / 0.25 / 0.4 for levels 0 / 1 / 2) is redone with the error limit
 to 4 / 8 / 20 units; a lost extent still doubles the triangle goal as before. Edges are drawn
 for every triangle so an edge-on surface or a sliver covers the same texels as its dense source.
 
+Since GENERATOR_VERSION 9 three more rules apply (section 3.9).
+
 Per model, LOD4 / LOD8 / LOD16 triangles before -> after:
 
 | model | before | after | note |
@@ -308,7 +310,49 @@ is deterministic run to run (byte-identical output).
 three levels (and the open state with `--open`) from the front, the side, a three-quarter view
 from above, and the three-quarter view at eight times the distance, every cell of a row in one
 orthographic frame, so silhouettes compare across columns. `LODFORGE_LODMODEL_DEBUG=1` prints
-the groups, their passes and the fill / loss of each.
+the groups, their passes and the fill / loss of each. `--compare <level> [--shade-tol t]` shows
+one level three ways instead: without the rules of section 3.9, with the checked cap and glow
+shapes kept, and with the shading check as well.
+
+### 3.9 Checked cap, shading check, glow shapes (GENERATOR_VERSION 9, 2026-11-12)
+
+Measured with `cargo run --release --example lodmodel_shade -- <folder>` on 241 architecture
+models of skyrim-cs-base (`PGPatcher Output\meshes\architecture`), 723,272 source triangles:
+
+| Level | Variant | Triangles | Silhouette out of tolerance | Shading over 0.15 |
+|---|---|---|---|---|
+| 0 | before | 218,014 | 181 | 192 |
+| 0 | checked cap | 279,923 | 57 | 124 |
+| 0 | checked cap + shading | 298,387 | 52 | 43 |
+| 1 | before | 158,067 | 189 | 223 |
+| 1 | checked cap | 194,070 | 70 | 199 |
+| 1 | checked cap + shading | 237,470 | 69 | 111 |
+| 2 | before | 118,152 | 174 | 219 |
+| 2 | checked cap | 129,426 | 110 | 216 |
+| 2 | checked cap + shading | 152,946 | 107 | 189 |
+
+- **Checked cap** (`checked_cap`). The silhouette check of 3.7 lowered the error limit, but the
+  triangle cap ran after it with no error limit, so three quarters of the models left the
+  generator outside the tolerance the check was meant to hold (missing walls, filled gables,
+  wheel rims folded). A capped result that fails a check is now redone with the cap doubled, up
+  to what the error pass left, before the error limit is lowered. A limit on that growth (twice
+  the cap, or the count at the level's own error limit) was tried and dropped: it saved under
+  5% of the triangles and left 124 instead of 57 level 0 models out of tolerance.
+- **Shading check** (`shade_tol`, 0.15; `shade.rs`). In the silhouette frames the nearest surface
+  from the front and from the back is rasterized with its interpolated vertex normal and the
+  normals are summed per block. Diffuse lighting is linear in the normal, so the per-block
+  difference bounds the difference of two renders under any light. Only blocks the source covers
+  fully count (outline blocks and parts thinner than a block belong to the silhouette check).
+  Above the tolerance the group is redone like a silhouette failure. Textures are not compared.
+- **Glow shapes kept** (`keep_glow`). Window panes with a glow shader (type 2) or glow map are
+  each a connected part far below the small-part limit, so every lit window was removed
+  (`rtsnowshodhouse01.nif`: all 576 triangles of `WindowGlow` at every level). They now skip
+  the small-part removal and the cap and simplify only within `min_error`. With the cap alone
+  the panes showed a dark diagonal; the shading check removes it.
+
+Open: level 2 gains little from any of this (the remesh-and-bake path of section 5), paddles
+of water wheels still go as small parts at level 1, and the generated walls of
+`rtsnowshodhouse01.nif` render darker than the full model with or without these rules.
 
 ## 4. Prototype status and numbers
 

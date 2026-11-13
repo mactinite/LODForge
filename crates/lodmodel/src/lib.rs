@@ -47,6 +47,8 @@
 //! sequence, [`open_pose`] for a door's `Open`) replaces the transforms of the nodes it controls
 //! while collecting, so a gate a reference flags open by default gets an open LOD model.
 
+mod shade;
+
 use std::collections::{BTreeMap, HashMap};
 
 use lodforge_nif::anim::{EndPose, Sequence};
@@ -79,6 +81,21 @@ pub struct LevelParams {
     /// Push the simplified surface back out to the source ([`fit_outward`]): edge collapse keeps
     /// a subset of the source vertices, so convex parts (peaks, ridges, corners) lose volume.
     pub fit_outward: bool,
+    /// Shading tolerance ([`shade`]): how far the lit surface of the result (the model's, or any
+    /// connected part's) may differ from the source's, as the mean difference of the visible
+    /// normals per screen-pixel-sized block from any of the five directions and either side,
+    /// before the level is redone with a smaller error limit. Not finite turns the check off.
+    pub shade_tol: f32,
+    /// The triangle cap (`max_ratio`) gives way to the silhouette and shading checks: the cap
+    /// pass has no error limit, so a capped result that fails a check is redone with the cap
+    /// doubled (up to what the error pass left) before the error limit is lowered. Without it
+    /// the cap wins and a failing capped result stays.
+    pub checked_cap: bool,
+    /// Shapes with a glow shader or glow map (window panes that light up at night) are kept:
+    /// they are not removed as small parts, have no triangle cap and simplify only within
+    /// `min_error`. Each pane is a part of its own and far below the size limit, so without
+    /// this a house loses every lit window.
+    pub keep_glow: bool,
 }
 
 /// Defaults for model levels 0, 1, 2 (object LOD 4, 8, 16). LOD4 starts around 5 cells away
@@ -86,9 +103,9 @@ pub struct LevelParams {
 /// level doubles the distance. The runtime shows LOD4 from the edge of the loaded cells, about
 /// half that distance, so its silhouette tolerances are the tightest.
 pub const LEVELS: [LevelParams; 3] = [
-    LevelParams { max_error: 32.0, max_ratio: 0.3, min_triangles: 12, normal_weight: 0.5, uv_weight: 0.05, permissive: true, fill_tol: 0.2, loss_tol: 0.03, min_error: 4.0, fit_outward: true },
-    LevelParams { max_error: 56.0, max_ratio: 0.15, min_triangles: 8, normal_weight: 0.25, uv_weight: 0.02, permissive: true, fill_tol: 0.25, loss_tol: 0.06, min_error: 8.0, fit_outward: true },
-    LevelParams { max_error: 140.0, max_ratio: 0.08, min_triangles: 4, normal_weight: 0.1, uv_weight: 0.01, permissive: true, fill_tol: 0.4, loss_tol: 0.10, min_error: 20.0, fit_outward: true },
+    LevelParams { max_error: 32.0, max_ratio: 0.3, min_triangles: 12, normal_weight: 0.5, uv_weight: 0.05, permissive: true, fill_tol: 0.2, loss_tol: 0.03, min_error: 4.0, fit_outward: true, shade_tol: 0.15, checked_cap: true, keep_glow: true },
+    LevelParams { max_error: 56.0, max_ratio: 0.15, min_triangles: 8, normal_weight: 0.25, uv_weight: 0.02, permissive: true, fill_tol: 0.25, loss_tol: 0.06, min_error: 8.0, fit_outward: true, shade_tol: 0.15, checked_cap: true, keep_glow: true },
+    LevelParams { max_error: 140.0, max_ratio: 0.08, min_triangles: 4, normal_weight: 0.1, uv_weight: 0.01, permissive: true, fill_tol: 0.4, loss_tol: 0.10, min_error: 20.0, fit_outward: true, shade_tol: 0.15, checked_cap: true, keep_glow: true },
 ];
 
 /// Bumped whenever generation changes the output for the same input (cache key). 2: broken
@@ -99,8 +116,10 @@ pub const LEVELS: [LevelParams; 3] = [
 /// pushed back out to the source ([`fit_outward`]), and the silhouette loss tolerances are 0.03 /
 /// 0.06 / 0.10 instead of 0.2 / 0.25 / 0.4. 8: the silhouette check keeps halving the error
 /// limit when a pass repeats the last one (the goal stopped it below the limit), instead of
-/// giving up with the silhouette still failing.
-pub const GENERATOR_VERSION: u32 = 8;
+/// giving up with the silhouette still failing. 9: the triangle cap gives way to the checks
+/// (`checked_cap`), the shading check ([`shade`], tolerance 0.15) and glow shapes kept
+/// (`keep_glow`).
+pub const GENERATOR_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stats {
@@ -118,6 +137,8 @@ pub struct Stats {
     /// the largest share lost over the five directions.
     pub fill: f32,
     pub loss: f32,
+    /// Shading of the result against the source's ([`shade`]); 0 when the check is off.
+    pub shade: f32,
 }
 
 /// Why a model produced nothing.
@@ -184,6 +205,8 @@ struct Mesh {
     colors: Vec<[u8; 4]>,
     triangles: Vec<[u32; 3]>,
     has: [bool; 5],
+    /// A glow shader or glow map (lit windows): see `LevelParams::keep_glow`.
+    glow: bool,
     /// Name of the first source shape merged into this mesh.
     source_name: Option<String>,
 }
@@ -233,6 +256,7 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 /// BSLightingShaderProperty flags1: decal, dynamic decal.
 const SLSF1_DECAL: u32 = 0x0400_0000;
 const SLSF1_DYNAMIC_DECAL: u32 = 0x0800_0000;
+const SLSF2_GLOW_MAP: u32 = 0x0000_0040;
 
 fn is_marker(name: Option<&str>) -> bool {
     name.is_some_and(|n| n.to_ascii_lowercase().contains("editormarker"))
@@ -295,9 +319,10 @@ fn add_shape(nif: &Nif, s: &TriShape, parent: &Xf, own: bool, pose: Option<&Pose
     shader.texture_set = None;
     let n = s.positions.len();
     let has = [true, s.uvs.len() == n, s.normals.len() == n, s.tangents.len() == n, s.colors.len() == n];
+    let glow = sh.shader_type == 2 || sh.flags2 & SLSF2_GLOW_MAP != 0;
     let key = format!("{shader:?}|{textures:?}|{alpha:?}|{has:?}");
     let mi = *keys.entry(key).or_insert_with(|| {
-        meshes.push(Mesh { shader: Some(shader), textures, alpha, has, source_name: s.av.net.name.clone(), ..Default::default() });
+        meshes.push(Mesh { shader: Some(shader), textures, alpha, has, glow, source_name: s.av.net.name.clone(), ..Default::default() });
         meshes.len() - 1
     });
     let m = &mut meshes[mi];
@@ -394,7 +419,13 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3
         }
         indices.extend(m.triangles.iter().flat_map(|t| t.iter().map(|&i| base + canon[i as usize])));
     }
-    let indices = drop_small_parts(&positions, &indices, 2.0 * p.max_error);
+    // Glow shapes are set aside from the size test and get a group of their own below.
+    let is_glow = |t: &[u32]| p.keep_glow && meshes[owner[t[0] as usize] as usize].glow;
+    let glow: Vec<u32> = indices.chunks_exact(3).filter(|t| is_glow(t)).flatten().copied().collect();
+    let plain: Vec<u32> = indices.chunks_exact(3).filter(|t| !is_glow(t)).flatten().copied().collect();
+    let mut indices = drop_small_parts(&positions, &plain, 2.0 * p.max_error);
+    let glow_from = indices.len();
+    indices.extend_from_slice(&glow);
     let extent = extent_locks(&positions, &indices, p.max_error);
     let weights = [p.normal_weight, p.normal_weight, p.normal_weight, p.uv_weight, p.uv_weight];
     // Vertices on a material border (coincident with a vertex of another mesh) keep the border
@@ -435,11 +466,19 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3
     // left there, and a thin end (a rope, a spike, a post) then vanishes for almost no quadric
     // error; the error limit halves while the silhouette check fails ([`coverage`]). The cap
     // never goes below the goal.
-    let check = p.fill_tol < 1.0 || p.loss_tol < 1.0;
-    let groups = groups(&positions, &indices, p.max_error, check, dbg);
+    let shade = p.shade_tol.is_finite();
+    let check = p.fill_tol < 1.0 || p.loss_tol < 1.0 || shade;
+    let normal = |v: u32| -> [f32; 3] {
+        let a = &attrs[v as usize * 5..];
+        [a[0], a[1], a[2]]
+    };
+    let mut groups = groups(&positions, &indices[..glow_from], p.max_error, check, dbg);
+    if !glow.is_empty() {
+        groups.push(Group { part: None, indices: glow, keep: true });
+    }
     let mut moved = positions.clone();
     let mut out: Vec<u32> = Vec::new();
-    let mut rep = Simplified { error: 0.0, error_limit: p.max_error, fill: 0.0, loss: 0.0 };
+    let mut rep = Simplified { error: 0.0, error_limit: p.max_error, fill: 0.0, loss: 0.0, shade: 0.0 };
     for g in &groups {
         let source = g.indices.len() / 3;
         if source == 0 {
@@ -447,18 +486,25 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3
         }
         // A part of its own keeps at least a few triangles; the rest keeps the level's floor.
         let (floor, min_goal) = if g.part.is_some() { (4usize, 4usize) } else { (p.min_triangles, p.min_triangles) };
-        let cap = ((source as f32 * p.max_ratio).ceil() as usize).max(floor);
+        let mut cap = if g.keep { source } else { ((source as f32 * p.max_ratio).ceil() as usize).max(floor) };
         let box_in = extent_of(&positions, &g.indices);
         let frames = check.then(|| Frames::new(&positions, &g.indices, p.max_error / 16.0));
         let source_masks = frames.as_ref().map(|f| f.masks(&positions, &g.indices));
+        let source_shaded = frames.as_ref().filter(|_| shade).map(|f| f.shaded(&positions, &normal, &g.indices));
+        let shading = |pos: &[[f32; 3]], idx: &[u32]| match (&frames, &source_shaded) {
+            (Some(f), Some(s)) => shade::shading_error(s, &f.shaded(pos, &normal, idx)),
+            _ => 0.0,
+        };
         let mut goal = min_goal.min(source);
-        let mut max_error = p.max_error;
+        let mut max_error = if g.keep { p.min_error } else { p.max_error };
         let mut err = 0.0f32;
         let mut cov;
+        let mut lit;
         let mut got;
         loop {
             got = meshopt::simplify_with_attributes_and_locks_decoder(&g.indices, &positions, &attrs, &weights, 5 * 4, &locks, goal * 3, max_error, opts, Some(&mut err));
-            if got.len() / 3 > cap.max(goal) {
+            let uncapped = got.len() / 3;
+            if uncapped > cap.max(goal) {
                 got = meshopt::simplify_with_attributes_and_locks_decoder(&got, &positions, &attrs, &weights, 5 * 4, &locks, cap.max(goal) * 3, f32::MAX, opts, None);
             }
             let box_out = extent_of(&positions, &got);
@@ -467,16 +513,19 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3
                 (Some(f), Some(s)) => coverage(s, &f.masks(&positions, &got)),
                 _ => (0.0, 0.0),
             };
-            let bad_shape = cov.0 > p.fill_tol || cov.1 > p.loss_tol;
+            lit = shading(&positions, &got);
+            let bad_shape = cov.0 > p.fill_tol || cov.1 > p.loss_tol || lit > p.shade_tol;
             if dbg && (lost || bad_shape) {
-                eprintln!("    group {:?} at goal {goal}, error {max_error}: {} triangles, extent {box_in:?} -> {box_out:?} lost {lost}, fill {:.2} loss {:.2}", g.part, got.len() / 3, cov.0, cov.1);
+                eprintln!("    group {:?} at goal {goal}, error {max_error}: {} triangles, extent {box_in:?} -> {box_out:?} lost {lost}, fill {:.2} loss {:.2} shade {lit:.3}", g.part, got.len() / 3, cov.0, cov.1);
             }
             // A lost end: more triangles (the collapse was almost free, a smaller limit rarely
-            // helps). A changed silhouette: a smaller error limit (rims and bars survive it),
+            // helps). A changed silhouette or shading: a smaller error limit (rims and bars survive it),
             // down to `min_error` even when a halving repeats the last pass: the goal stopped
             // that pass below both limits, and a further halving can still bind.
             if lost && goal < source {
                 goal = (goal * 2).min(source);
+            } else if bad_shape && p.checked_cap && uncapped > cap.max(goal) {
+                cap = (cap.max(goal) * 2).min(uncapped);
             } else if bad_shape && max_error > p.min_error {
                 max_error = (max_error * 0.5).max(p.min_error);
             } else {
@@ -492,19 +541,22 @@ fn simplify(meshes: &[Mesh], p: &LevelParams) -> (Vec<Vec<u32>>, Vec<Vec<[f32; 3
                     (Some(f), Some(s)) => coverage(s, &f.masks(&moved, &got)),
                     _ => cov,
                 };
-                if fitted.0 > p.fill_tol.max(cov.0) {
+                let fitted_lit = shading(&moved, &got);
+                if fitted.0 > p.fill_tol.max(cov.0) || fitted_lit > p.shade_tol.max(lit) {
                     for (v, q) in before {
                         moved[v as usize] = q;
                     }
                 } else {
                     cov = fitted;
+                    lit = fitted_lit;
                 }
             }
         }
         if dbg {
-            eprintln!("  group {:?}: {source} -> {} triangles, error {err:.1} (limit {max_error}), fill {:.2} loss {:.2}", g.part, got.len() / 3, cov.0, cov.1);
+            eprintln!("  group {:?}: {source} -> {} triangles, error {err:.1} (limit {max_error}), fill {:.2} loss {:.2} shade {lit:.3}", g.part, got.len() / 3, cov.0, cov.1);
         }
-        rep.error = rep.error.max(err);
+        rep.shade = rep.shade.max(lit);
+        rep.error =rep.error.max(err);
         rep.error_limit = rep.error_limit.min(max_error);
         rep.fill = rep.fill.max(cov.0);
         rep.loss = rep.loss.max(cov.1);
@@ -781,6 +833,7 @@ struct Simplified {
     error_limit: f32,
     fill: f32,
     loss: f32,
+    shade: f32,
 }
 
 /// A simplification group: one connected part that is a visible share of the model, or the rest
@@ -788,6 +841,8 @@ struct Simplified {
 struct Group {
     part: Option<u32>,
     indices: Vec<u32>,
+    /// Glow shapes (`LevelParams::keep_glow`): no triangle cap, the smallest error limit.
+    keep: bool,
 }
 
 /// Splits the triangles into groups: each connected part (triangles joined through shared or
@@ -798,7 +853,7 @@ struct Group {
 /// first. Without the check, or with one part, everything is one group. Collapses never join
 /// parts (an edge joins vertices of one part), so the groups simplify independently.
 fn groups(positions: &[[f32; 3]], indices: &[u32], max_error: f32, check: bool, dbg: bool) -> Vec<Group> {
-    let all = || vec![Group { part: None, indices: indices.to_vec() }];
+    let all = || vec![Group { part: None, indices: indices.to_vec(), keep: false }];
     if !check {
         return all();
     }
@@ -828,12 +883,12 @@ fn groups(positions: &[[f32; 3]], indices: &[u32], max_error: f32, check: bool, 
             eprintln!("    part {part}: {} triangles, extent {:.0}..{:.0} {:.0}..{:.0} {:.0}..{:.0}", idx.len() / 3, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
         }
         if significant {
-            out.push(Group { part: Some(part), indices: idx });
+            out.push(Group { part: Some(part), indices: idx, keep: false });
         } else {
             rest.extend(idx);
         }
     }
-    out.insert(0, Group { part: None, indices: rest });
+    out.insert(0, Group { part: None, indices: rest, keep: false });
     out
 }
 
@@ -1285,6 +1340,7 @@ fn generate_impl(nif: &Nif, p: &LevelParams, name: &str, keep_names: bool, pose:
     st.error_limit = sim.error_limit;
     st.fill = sim.fill;
     st.loss = sim.loss;
+    st.shade = sim.shade;
 
     let mut out = Nif::new();
     out.header.block_types = vec!["BSFadeNode".into()];
@@ -1641,6 +1697,107 @@ mod tests {
         }
     }
 
+    /// A tall block with a steep ridge across its top (24 high, 24 wide: below level 0's error
+    /// limit and under 3% of the side silhouette). From above the outline is the same with or
+    /// without the ridge, so only the shading check sees it go.
+    fn ridge_block() -> Nif {
+        let mut s = TriShape::default();
+        let quad = |s: &mut TriShape, c: [[f32; 3]; 4]| {
+            let n = normalize(cross3(sub3(c[1], c[0]), sub3(c[3], c[0])));
+            let b = s.positions.len() as u16;
+            for p in c {
+                s.positions.push(p);
+                s.uvs.push([p[0] / 400.0 + p[2] / 1000.0, p[1] / 400.0]);
+                s.normals.push(n);
+            }
+            s.triangles.push([b, b + 1, b + 2]);
+            s.triangles.push([b, b + 2, b + 3]);
+        };
+        let xs = [0.0f32, 50.0, 100.0, 150.0, 188.0, 200.0, 212.0, 250.0, 300.0, 350.0, 400.0];
+        let z = |x: f32| if x == 200.0 { 1024.0 } else { 1000.0 };
+        for w in xs.windows(2) {
+            for j in 0..8 {
+                let (y0, y1) = (j as f32 * 50.0, (j + 1) as f32 * 50.0);
+                quad(&mut s, [[w[0], y0, z(w[0])], [w[1], y0, z(w[1])], [w[1], y1, z(w[1])], [w[0], y1, z(w[0])]]);
+            }
+        }
+        quad(&mut s, [[0.0, 0.0, 0.0], [400.0, 0.0, 0.0], [400.0, 0.0, 1000.0], [0.0, 0.0, 1000.0]]);
+        quad(&mut s, [[400.0, 400.0, 0.0], [0.0, 400.0, 0.0], [0.0, 400.0, 1000.0], [400.0, 400.0, 1000.0]]);
+        quad(&mut s, [[0.0, 400.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1000.0], [0.0, 400.0, 1000.0]]);
+        quad(&mut s, [[400.0, 0.0, 0.0], [400.0, 400.0, 0.0], [400.0, 400.0, 1000.0], [400.0, 0.0, 1000.0]]);
+        quad(&mut s, [[0.0, 400.0, 0.0], [400.0, 400.0, 0.0], [400.0, 0.0, 0.0], [0.0, 0.0, 0.0]]);
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(Node::default()));
+        let ts = nif.add_block(Block::TextureSet(vec!["textures\\a.dds".into()]));
+        let sh = nif.add_block(Block::LightingShader(LightingShader { texture_set: Some(ts), ..Default::default() }));
+        s.shader_property = Some(sh);
+        s.vertex_desc = VertexDesc::with_attributes(true, true, true, false, false).0;
+        let si = nif.add_block(Block::TriShape(s));
+        if let Block::Node(r) = &mut nif.blocks[0] {
+            r.children = vec![Some(si)];
+        }
+        nif
+    }
+
+    /// The shading check keeps what the silhouette check lets go: without it the ridge is
+    /// flattened, with it the level is redone at a smaller error limit and the ridge stays.
+    #[test]
+    fn shading_check_keeps_a_ridge() {
+        let nif = ridge_block();
+        // Measured only (a tolerance nothing exceeds).
+        let measure = LevelParams { shade_tol: 1e6, checked_cap: false, ..LEVELS[0] };
+        let (_, st0) = generate_nif(&nif, &measure, "t").unwrap();
+        assert!(st0.shade > 0.02 && st0.loss <= LEVELS[0].loss_tol && st0.error_limit == LEVELS[0].max_error, "the silhouette check should pass a result with changed shading: {st0:?}");
+        let checked = LevelParams { shade_tol: 0.02, checked_cap: false, ..LEVELS[0] };
+        let (out1, st1) = generate_nif(&nif, &checked, "t").unwrap();
+        assert!(extent(&out1).1[2] >= 1020.0, "the ridge should stay: {st1:?}");
+        assert!(st1.shade <= 0.02 && st1.error_limit < LEVELS[0].max_error && st1.triangles > st0.triangles, "{st1:?} vs unchecked {st0:?}");
+        // Off: nothing measured, same result as before the check existed.
+        let (_, off) = generate_nif(&nif, &LevelParams { shade_tol: f32::INFINITY, checked_cap: false, ..LEVELS[0] }, "t").unwrap();
+        assert_eq!((off.shade, off.triangles), (0.0, st0.triangles));
+    }
+
+    /// Window panes with a glow shader, each a part of its own far below the size limit, stay at
+    /// every level with `keep_glow` and are removed as small parts without it.
+    #[test]
+    fn glow_panes_are_kept() {
+        let quad = |s: &mut TriShape, c: [[f32; 3]; 4]| {
+            let b = s.positions.len() as u16;
+            for p in c {
+                s.positions.push(p);
+                s.uvs.push([p[0] / 400.0, p[2] / 400.0]);
+                s.normals.push([0.0, -1.0, 0.0]);
+            }
+            s.triangles.push([b, b + 1, b + 2]);
+            s.triangles.push([b, b + 2, b + 3]);
+        };
+        let mut wall = TriShape::default();
+        quad(&mut wall, [[0.0, 0.0, 0.0], [400.0, 0.0, 0.0], [400.0, 0.0, 400.0], [0.0, 0.0, 400.0]]);
+        let mut panes = TriShape::default();
+        for x in [60.0f32, 180.0, 300.0] {
+            quad(&mut panes, [[x, -1.0, 200.0], [x + 40.0, -1.0, 200.0], [x + 40.0, -1.0, 240.0], [x, -1.0, 240.0]]);
+        }
+        let mut nif = Nif::new();
+        nif.add_block(Block::Node(Node::default()));
+        let mut children = Vec::new();
+        for (mut s, shader_type, tex) in [(wall, 0u32, "textures\\wall.dds"), (panes, 2, "textures\\window.dds")] {
+            let ts = nif.add_block(Block::TextureSet(vec![tex.into()]));
+            let sh = nif.add_block(Block::LightingShader(LightingShader { shader_type, texture_set: Some(ts), ..Default::default() }));
+            s.shader_property = Some(sh);
+            s.vertex_desc = VertexDesc::with_attributes(true, true, true, false, false).0;
+            children.push(Some(nif.add_block(Block::TriShape(s))));
+        }
+        if let Block::Node(r) = &mut nif.blocks[0] {
+            r.children = children;
+        }
+        for (k, p) in LEVELS.iter().enumerate() {
+            let (_, st) = generate_nif(&nif, p, "t").unwrap();
+            assert_eq!((st.shapes, st.triangles), (2, 8), "level {k}: {st:?}");
+            let (_, off) = generate_nif(&nif, &LevelParams { keep_glow: false, ..*p }, "t").unwrap();
+            assert_eq!((off.shapes, off.triangles), (1, 2), "level {k} without keep_glow: {off:?}");
+        }
+    }
+
     /// A gate leaf under a hinge node, generated in the pose at the end of an `Open` sequence that
     /// turns the hinge 90 degrees about Z, swings from +X to +Y; without the pose it stays at +X.
     #[test]
@@ -1732,7 +1889,9 @@ mod tests {
             let (out, st) = generate_nif(&nif, p, "t").unwrap();
             let (lo, hi) = extent(&out);
             assert!(hi[0] - lo[0] >= 600.0 - 2.0 * p.max_error, "level {k}: extent {lo:?}..{hi:?} {st:?}");
-            assert!(st.triangles <= 60, "level {k}: {st:?}");
+            // The checks hold a rope thinner than a block to most of its triangles (`checked_cap`
+            // lets the cap follow the lowered error limit); before version 9 the cap cut it to 35.
+            assert!(st.triangles <= 100, "level {k}: {st:?}");
         }
     }
 }

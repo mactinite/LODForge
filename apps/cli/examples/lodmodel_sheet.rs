@@ -5,7 +5,12 @@
 //! Every cell of a row shares one orthographic frame, so sizes compare across columns.
 //!
 //! `cargo run --release --example lodmodel_sheet -- <full.nif> <out.png> [--mods <MO2 mods folder>]
-//!  [--open] [--upp <units per pixel, default 1.5>] [--max-error e0,e1,e2] [--max-ratio r0,r1,r2]`
+//!  [--open] [--upp <units per pixel, default 1.5>] [--max-error e0,e1,e2] [--max-ratio r0,r1,r2]
+//!  [--compare <level> [--shade-tol t]]`
+//!
+//! `--compare` replaces the level columns with one level made three ways: without the three checks below (the generator before version 9), with the
+//! triangle cap giving way to the checks and glow shapes kept (`checked_cap`, `keep_glow`), and
+//! with the shading check as well.
 //!
 //! Textures are looked up as loose files below the mods folder's sub-folders (first hit); without
 //! one the models render untextured.
@@ -23,12 +28,14 @@ struct Opts {
     upp: f32,
     max_error: Option<Vec<f32>>,
     max_ratio: Option<Vec<f32>>,
+    compare: Option<usize>,
+    shade_tol: f32,
 }
 
 fn parse_args() -> Result<Opts> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let mut pos = Vec::new();
-    let mut o = Opts { full: PathBuf::new(), out: PathBuf::new(), mods: None, open: false, upp: 1.5, max_error: None, max_ratio: None };
+    let mut o = Opts { full: PathBuf::new(), out: PathBuf::new(), mods: None, open: false, upp: 1.5, max_error: None, max_ratio: None, compare: None, shade_tol: 0.15 };
     let mut i = 0;
     let list = |s: &str| -> Result<Vec<f32>> { s.split(',').map(|v| v.trim().parse::<f32>().map_err(|e| anyhow!("{s}: {e}"))).collect() };
     while i < a.len() {
@@ -38,6 +45,14 @@ fn parse_args() -> Result<Opts> {
                 i += 1;
             }
             "--open" => o.open = true,
+            "--compare" => {
+                o.compare = Some(a.get(i + 1).context("--compare needs a level")?.parse()?);
+                i += 1;
+            }
+            "--shade-tol" => {
+                o.shade_tol = a.get(i + 1).context("--shade-tol needs a value")?.parse()?;
+                i += 1;
+            }
             "--upp" => {
                 o.upp = a.get(i + 1).context("--upp needs a value")?.parse()?;
                 i += 1;
@@ -120,13 +135,21 @@ fn main() -> Result<()> {
                 Err(e) => println!("full{suffix}: {e:?}"),
             }
         }
-        for (k, p) in params.iter().enumerate() {
+        let variants: Vec<(String, lodforge_lodmodel::LevelParams)> = match o.compare {
+            Some(k) => {
+                let p = *params.get(k).context("--compare: level 0, 1 or 2")?;
+                let p = lodforge_lodmodel::LevelParams { shade_tol: f32::INFINITY, checked_cap: false, keep_glow: false, ..p };
+                vec![(format!("lod{k} before"), p), (format!("lod{k} checked cap"), lodforge_lodmodel::LevelParams { checked_cap: true, keep_glow: true, ..p }), (format!("lod{k} checked cap + shading"), lodforge_lodmodel::LevelParams { checked_cap: true, keep_glow: true, shade_tol: o.shade_tol, ..p })]
+            }
+            None => params.iter().enumerate().map(|(k, p)| (format!("lod{k}"), *p)).collect(),
+        };
+        for (k, p) in &variants {
             match lodforge_lodmodel::generate_nif_posed(&nif, p, &name, pose.as_ref()) {
                 Ok((n, st)) => {
-                    println!("lod{k}{suffix}: {} -> {} triangles in {} shapes (error {:.1})", st.source_triangles, st.triangles, st.shapes, st.error);
-                    columns.push((format!("lod{k}{suffix}"), n));
+                    println!("{k}{suffix}: {} -> {} triangles in {} shapes (error {:.1}, fill {:.2}, loss {:.2})", st.source_triangles, st.triangles, st.shapes, st.error, st.fill, st.loss);
+                    columns.push((format!("{k}{suffix}"), n));
                 }
-                Err(e) => println!("lod{k}{suffix}: {e:?}"),
+                Err(e) => println!("{k}{suffix}: {e:?}"),
             }
         }
     }
