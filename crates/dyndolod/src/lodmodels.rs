@@ -18,6 +18,8 @@ pub struct LodIndex {
     by_name: HashMap<String, String>,
     /// Models consulted only where this index has none ([`LodIndex::with_fallback`]).
     fallback: Option<Box<LodIndex>>,
+    /// Generic models outside the fallback ([`LodIndex::with_generic_paths`]).
+    generic_extra: HashSet<String>,
 }
 
 impl LodIndex {
@@ -37,7 +39,7 @@ impl LodIndex {
                 by_name.insert(name.to_string(), p.to_string());
             }
         }
-        LodIndex { by_name, fallback: None }
+        LodIndex { by_name, fallback: None, generic_extra: HashSet::new() }
     }
 
     /// This index with `fallback` behind it: name lookups ([`LodIndex::get`]) try this index
@@ -50,7 +52,7 @@ impl LodIndex {
 
     /// This index without its fallback.
     pub fn without_fallback(&self) -> LodIndex {
-        LodIndex { by_name: self.by_name.clone(), fallback: None }
+        LodIndex { by_name: self.by_name.clone(), fallback: None, generic_extra: HashSet::new() }
     }
 
     /// The fallback index, if any.
@@ -65,6 +67,22 @@ impl LodIndex {
     /// [`LodIndex::get`] without the fallback.
     pub fn get_own(&self, name: &str) -> Option<&str> {
         self.by_name.get(&name.to_ascii_lowercase()).map(String::as_str)
+    }
+
+    /// True when `path` (Data-relative, lower-case) is one of the fallback's models: a generic LOD
+    /// model (base game, DynDOLOD Resources) that generated LOD models replace. Always false
+    /// without a fallback.
+    pub fn is_generic(&self, path: &str) -> bool {
+        let name = path.rsplit('\\').next().unwrap_or(path);
+        self.generic_extra.contains(path) || self.fallback.as_ref().is_some_and(|f| f.get_own(name) == Some(path))
+    }
+
+    /// Adds generic LOD models that discovery does not index (no `_lod` in the name) but a base
+    /// record's MNAM can name, such as the base game's `farmhouse01_hlod.nif`
+    /// ([`LodIndex::is_generic`]). Data-relative lower-case paths.
+    pub fn with_generic_paths(mut self, paths: impl Iterator<Item = String>) -> LodIndex {
+        self.generic_extra.extend(paths);
+        self
     }
 
     pub fn len(&self) -> usize {

@@ -111,6 +111,34 @@ mod tests {
         assert!(resolve(&base, false, true).levels.iter().all(Option::is_none));
     }
 
+    /// Generated LOD models preferred (generic models as the index fallback): a generic model the
+    /// base's MNAM names does not count as installed for the generator's plan, and does not
+    /// replace a generated level afterwards; with nothing generated it still serves.
+    #[test]
+    fn generic_mnam_models_give_way_to_generated_levels() {
+        let generic = ["meshes\\lod\\farm_lod.nif", "meshes\\lod\\farm_lod_1.nif"];
+        let generated = ["meshes\\lod\\lodforge\\farm_lod_0.nif", "meshes\\lod\\lodforge\\farm_lod_1.nif", "meshes\\lod\\lodforge\\farm_lod_2.nif"];
+        let base = Base { flags: 0x8000, signature: *b"STAT", model: "farm.nif".into(),
+            mnam: Some(["lod\\farm_lod.nif".into(), "lod\\farm_lod_1.nif".into(), String::new(), String::new()]), ..Default::default() };
+        let parallax = Default::default();
+        let materials = HashMap::new();
+        let owners = HashMap::new();
+        let scan = |paths: &[&str]| LodIndex::scan(paths.iter().copied(), &["meshes".into()], &[], &Default::default());
+        let resolve = |index: &LodIndex, exists: &(dyn Fn(&str) -> bool + Sync)| {
+            Resolver { rules: &[], index, parallax: &parallax, materials: &materials, plugins: &[], owners: &owners, read: &|_| None, exists, level32: false, model_fallback: false, mesh_crc: &crate::lodmodels::MeshCrcTable::default() }.resolve(&base).levels
+        };
+        let all = |p: &str| generic.contains(&p) || generated.contains(&p);
+        // The plan (own models only, generic files not counted): no level is installed.
+        let before = scan(&[]).with_fallback(scan(&generic));
+        assert!(before.is_generic(generic[0]) && !before.is_generic(generated[0]));
+        assert!(resolve(&before.without_fallback(), &|p| all(p) && !before.is_generic(p)).iter().all(Option::is_none));
+        // Nothing generated: the generic models serve.
+        assert_eq!(resolve(&before, &all)[..2], [Some(generic[0].to_string()), Some(generic[1].to_string())]);
+        // Generated: every level is the generated one, MNAM's `_lod_1` included.
+        let after = scan(&generated).with_fallback(scan(&generic));
+        assert_eq!(resolve(&after, &all)[..3], generated.map(|p| Some(p.to_string())));
+    }
+
     /// `keep` level coverage: a log matching the `tree` mask (billboards at LOD8/16) keeps its
     /// model levels there; without the fallback, a tree, or with a billboard, the rule stands.
     #[test]
@@ -218,7 +246,11 @@ impl Resolver<'_> {
                 let p = crate::bases::model_path(m);
                 let same_model = p.rsplit('\\').next().is_some_and(|n| n.starts_with(&format!("{stem}_lod")));
                 let keep_passthru = levels[k].as_deref().is_some_and(|l| l.contains("passthru_lod"));
-                if same_model && !keep_passthru && (self.exists)(&p) {
+                // A generic model (index fallback) never replaces a level the index's own models
+                // (generated, or a mod's) fill: it would put the generic shape between two
+                // levels made from the installed full model.
+                let keep_own = self.index.is_generic(&p) && levels[k].as_deref().is_some_and(|l| !self.index.is_generic(l));
+                if same_model && !keep_passthru && !keep_own && (self.exists)(&p) {
                     levels[k] = Some(p);
                 }
             }
