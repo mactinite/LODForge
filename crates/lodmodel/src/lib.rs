@@ -102,10 +102,13 @@ pub struct LevelParams {
 /// (fBlockLevel0Distance), where one pixel at 1080p covers roughly 10..20 units; each further
 /// level doubles the distance. The runtime shows LOD4 from the edge of the loaded cells, about
 /// half that distance, so its silhouette tolerances are the tightest.
+/// Level 2 has no shading check: rock has noisy normals, so the check drove mountains to their
+/// smallest error limit (`mountainpeak01.nif` 391 -> 3,150 triangles) for detail that does not
+/// show at that distance.
 pub const LEVELS: [LevelParams; 3] = [
     LevelParams { max_error: 32.0, max_ratio: 0.3, min_triangles: 12, normal_weight: 0.5, uv_weight: 0.05, permissive: true, fill_tol: 0.2, loss_tol: 0.03, min_error: 4.0, fit_outward: true, shade_tol: 0.15, checked_cap: true, keep_glow: true },
     LevelParams { max_error: 56.0, max_ratio: 0.15, min_triangles: 8, normal_weight: 0.25, uv_weight: 0.02, permissive: true, fill_tol: 0.25, loss_tol: 0.06, min_error: 8.0, fit_outward: true, shade_tol: 0.15, checked_cap: true, keep_glow: true },
-    LevelParams { max_error: 140.0, max_ratio: 0.08, min_triangles: 4, normal_weight: 0.1, uv_weight: 0.01, permissive: true, fill_tol: 0.4, loss_tol: 0.10, min_error: 20.0, fit_outward: true, shade_tol: 0.15, checked_cap: true, keep_glow: true },
+    LevelParams { max_error: 140.0, max_ratio: 0.08, min_triangles: 4, normal_weight: 0.1, uv_weight: 0.01, permissive: true, fill_tol: 0.4, loss_tol: 0.10, min_error: 20.0, fit_outward: true, shade_tol: f32::INFINITY, checked_cap: true, keep_glow: true },
 ];
 
 /// Bumped whenever generation changes the output for the same input (cache key). 2: broken
@@ -117,7 +120,7 @@ pub const LEVELS: [LevelParams; 3] = [
 /// 0.06 / 0.10 instead of 0.2 / 0.25 / 0.4. 8: the silhouette check keeps halving the error
 /// limit when a pass repeats the last one (the goal stopped it below the limit), instead of
 /// giving up with the silhouette still failing. 9: the triangle cap gives way to the checks
-/// (`checked_cap`), the shading check ([`shade`], tolerance 0.15) and glow shapes kept
+/// (`checked_cap`), the shading check ([`shade`], tolerance 0.15 at levels 0 and 1) and glow shapes kept
 /// (`keep_glow`).
 pub const GENERATOR_VERSION: u32 = 9;
 

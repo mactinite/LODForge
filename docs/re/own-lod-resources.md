@@ -338,12 +338,17 @@ models of skyrim-cs-base (`PGPatcher Output\meshes\architecture`), 723,272 sourc
   to what the error pass left, before the error limit is lowered. A limit on that growth (twice
   the cap, or the count at the level's own error limit) was tried and dropped: it saved under
   5% of the triangles and left 124 instead of 57 level 0 models out of tolerance.
-- **Shading check** (`shade_tol`, 0.15; `shade.rs`). In the silhouette frames the nearest surface
+- **Shading check** (`shade_tol`, 0.15 at levels 0 and 1, off at level 2; `shade.rs`). In the silhouette frames the nearest surface
   from the front and from the back is rasterized with its interpolated vertex normal and the
   normals are summed per block. Diffuse lighting is linear in the normal, so the per-block
   difference bounds the difference of two renders under any light. Only blocks the source covers
   fully count (outline blocks and parts thinner than a block belong to the silhouette check).
   Above the tolerance the group is redone like a silhouette failure. Textures are not compared.
+  Level 2 has none: on mountains it drove the error limit to its minimum (`mountainpeak01.nif`
+  391 -> 3,150 triangles, `mountainridge01.nif` 177 -> 1,312) for detail that does not show at
+  that distance, and on the architecture sample it added 18% triangles for few models fixed. The
+  level 2 "checked cap + shading" row of the table is therefore not what a build produces; the
+  "checked cap" row is.
 - **Glow shapes kept** (`keep_glow`). Window panes with a glow shader (type 2) or glow map are
   each a connected part far below the small-part limit, so every lit window was removed
   (`rtsnowshodhouse01.nif`: all 576 triangles of `WindowGlow` at every level). They now skip
