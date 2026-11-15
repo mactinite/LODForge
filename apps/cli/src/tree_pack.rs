@@ -69,6 +69,8 @@ pub struct Report {
     pub snow_pages: usize,
     /// Atlas pages of PBR bakes (with an RMAOS map; drawn through the TruePBR LOD shaders).
     pub pbr_pages: usize,
+    /// Tiles of PBR diffuses on plain pages, scaled by `pbr_linear::SCALE`.
+    pub pbr_scaled: usize,
     pub page_bytes: u64,
     pub vertices: usize,
     pub triangles: usize,
@@ -92,12 +94,13 @@ impl Report {
     pub fn summary(&self) -> String {
         let mb = |b: f64| b / 1e6;
         format!(
-            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({} PBR; {:.1} MB BC7 + mips) + {} snow draw page(s); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128), {} opaque parts; {} instance files linked; {:.1} s",
+            "mesh pack: {} models -> {} meshes, {} textures on {} atlas page(s) ({} PBR; {} PBR diffuses scaled for the plain LOD shader; {:.1} MB BC7 + mips) + {} snow draw page(s); {} vertices, {} triangles in {} clusters of 64 ({:.1}% padding); GPU buffers {:.1} MB, pack file {:.1} MB; {} parts re-cut, {} parts without a texture dropped, {} parts with an alpha threshold other than 128 (alpha remapped to 128), {} opaque parts; {} instance files linked; {:.1} s",
             self.models,
             self.meshes,
             self.textures,
             self.pages,
             self.pbr_pages,
+            self.pbr_scaled,
             mb(self.page_bytes as f64),
             self.snow_pages,
             self.vertices,
@@ -416,7 +419,21 @@ pub fn make(p: &Profile, out: &Path, models: &BTreeMap<String, PackModel>, s: &S
         };
         let tag = format!("{tag}{}", if pbr { "_PBR" } else { "" });
         let base = if bin_index == 0 { format!("{page_base}{tag}_Alpha") } else { format!("{page_base}{tag}_M{bin_index:02}_Alpha") };
-        let layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, &base);
+        let mut layout = lodforge_objlod::atlas_build::layout(&list, s.page, s.page, &base);
+        // A PBR albedo (`textures\pbr\...`) drawn through the plain LOD shader shows brighter than
+        // the PBR full model it stands for. The detail bake and the `...linear.dds` copies scale
+        // it (`pbr_linear::SCALE`), but a LOD model that names the PBR diffuse itself (one
+        // generated from a PBR full model and not baked) put it on the page as stored, half
+        // again as bright as its full model (`lodforge lod-color`: dragon mounds, tundra rocks).
+        if !pbr {
+            for (k, _, _) in &list {
+                let d = lodforge_objlod::tiling::split_key(k).0.split('=').next().unwrap_or("").split(',').next().unwrap_or("").to_lowercase();
+                if is_raw_pbr_diffuse(&d) {
+                    rep.pbr_scaled += 1;
+                    layout.tones.insert(d, [crate::pbr_linear::SCALE; 3]);
+                }
+            }
+        }
         // Complex grass: pages twice as high, every tile repeated in the bottom half with the
         // texture's bottom half (normal, specular).
         let render_layout = if class == lodforge_instances::meshpack::CLASS_GRASS_COMPLEX { crate::object_atlas::complex_layout(&layout) } else { layout.clone() };
@@ -587,6 +604,13 @@ pub fn run_statics(a: &StaticsArgs) -> Result<()> {
     Ok(())
 }
 
+/// A PBR albedo as its full model names it (`textures\pbr\...`), not one of the build's own
+/// `...linear.dds` copies, which carry the scale already.
+fn is_raw_pbr_diffuse(diffuse: &str) -> bool {
+    let d = diffuse.to_ascii_lowercase().replace('/', "\\");
+    d.starts_with(r"textures\pbr\") && !d.ends_with("linear.dds")
+}
+
 /// A model from the load order, imported with its node transforms.
 pub fn vfs_mesh(p: &Profile, model: &str) -> Option<lodforge_objlod::mesh::LodMesh> {
     let bytes = p.vfs.read(model).ok().flatten()?;
@@ -595,7 +619,16 @@ pub fn vfs_mesh(p: &Profile, model: &str) -> Option<lodforge_objlod::mesh::LodMe
 
 #[cfg(test)]
 mod tests {
-    use super::material_bins;
+    use super::{is_raw_pbr_diffuse, material_bins};
+
+    #[test]
+    fn raw_pbr_diffuses() {
+        assert!(is_raw_pbr_diffuse(r"textures\pbr\effects\fxdirtmound01.dds"));
+        assert!(is_raw_pbr_diffuse("Textures/PBR/a/b.dds"));
+        assert!(!is_raw_pbr_diffuse(r"textures\pbr\a\blinear.dds"));
+        assert!(!is_raw_pbr_diffuse(r"textures\lodforge\bake\x.dds"));
+        assert!(!is_raw_pbr_diffuse(r"textures\architecture\a.dds"));
+    }
 
     #[test]
     fn material_bins_keep_groups_together() {

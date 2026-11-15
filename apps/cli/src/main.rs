@@ -29,6 +29,7 @@ mod tree_pack;
 mod tree_pack_preview;
 mod grass_far;
 mod grass_pack;
+mod lod_color;
 mod lod_models;
 mod lod_sources;
 mod tree_report;
@@ -242,6 +243,8 @@ enum Command {
     RuntimeGrassPack(grass_pack::Args),
     /// CPU preview of TreeMeshes.bin meshes through the atlas pages (PNG).
     TreePackPreview(tree_pack_preview::Args),
+    /// Brightness of each near-tier reference's LOD against its full model, from a build's output (no game).
+    LodColor(lod_color::Args),
     /// Rebuilds only StaticMeshes.bin from the statics files of an output.
     RuntimeStaticsPack(tree_pack::StaticsArgs),
     /// Rebuilds only TreeMeshes.bin (and its atlas pages) from the trees files of an output.
@@ -350,6 +353,7 @@ fn main() -> Result<()> {
         Command::RuntimeRetype(a) => runtime_dyn::retype(&a),
         Command::RuntimeGrassPack(a) => grass_pack::run(&a),
         Command::TreePackPreview(a) => tree_pack_preview::run(&a),
+        Command::LodColor(a) => lod_color::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
         Command::RuntimeTreePack(a) => tree_pack::run_trees(&a),
         Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),
