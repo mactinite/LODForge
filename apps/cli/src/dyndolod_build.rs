@@ -371,7 +371,11 @@ fn lod_index(p: &Profile, ini: &Ini, dir: &Path, prefer_generated: bool) -> (Lod
         None => false,
     };
     let (fallback, own): (Vec<&String>, Vec<&String>) = meshes.iter().partition(|m| m.contains("_lod") && generic(m));
-    let index = LodIndex::scan(own.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed).with_fallback(LodIndex::scan(fallback.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed));
+    // Generic LOD models discovery does not index but a base's MNAM names (`farmhouse01_hlod.nif`).
+    let unindexed: Vec<String> = own.iter().filter(|m| !m.contains("_lod") && m.rsplit('\\').next().is_some_and(|n| n.contains("lod")) && generic(m)).map(|m| m.to_string()).collect();
+    let index = LodIndex::scan(own.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed)
+        .with_fallback(LodIndex::scan(fallback.iter().map(|m| m.as_str()), &folders, &ignore, &misnamed))
+        .with_generic_paths(unindexed.into_iter());
     (index, meshes.len())
 }
 

@@ -83,6 +83,10 @@ pub struct Args {
     /// Generate every level the rules use, also where a LOD model is installed.
     #[arg(long)]
     pub all: bool,
+    /// Plan as `build --lod-models` does: the generic LOD models (base game archives, DynDOLOD
+    /// Resources) do not count as installed.
+    #[arg(long)]
+    pub prefer_generated: bool,
     /// Compare triangle counts and coverage with the LOD models of this mod (e.g. DynDOLOD
     /// Resources), read from `<instance>\mods\<name>` (never copied).
     #[arg(long)]
@@ -144,15 +148,28 @@ impl Item {
 pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) -> Vec<Item> {
     // Per base: references, the largest scale, references open by default.
     let mut used: HashMap<u32, (usize, f32, usize)> = HashMap::new();
+    // The bases a season swaps a base to stand where its references do. Left out, a seasonal
+    // base kept the installed models its record names while the default base got generated
+    // ones (Seasonal Landscapes' WRCloudDistrictTerrainLODSUM: a full model without the terrace
+    // at the top of Dragonsreach's stairs under a hand-made LOD model with it).
+    let mut seasonal: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (a, b) in c.swaps.swaps.values().flat_map(|secs| secs.values()).flat_map(|m| m.iter()) {
+        let v = seasonal.entry(*a).or_default();
+        if !v.contains(b) {
+            v.push(*b);
+        }
+    }
     for w in worlds {
         for q in w.refs.values() {
             if q.flags & FLAG_DELETED != 0 {
                 continue;
             }
-            let e = used.entry(q.base).or_insert((0, 0.0, 0));
-            e.0 += 1;
-            e.1 = e.1.max(if q.has_scale { q.scale } else { 1.0 });
-            e.2 += usize::from(q.open_by_default);
+            for base in std::iter::once(q.base).chain(seasonal.get(&q.base).into_iter().flatten().copied()) {
+                let e = used.entry(base).or_insert((0, 0.0, 0));
+                e.0 += 1;
+                e.1 = e.1.max(if q.has_scale { q.scale } else { 1.0 });
+                e.2 += usize::from(q.open_by_default);
+            }
         }
     }
     // Per full model: the levels any of its bases needs.
@@ -178,8 +195,15 @@ pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) ->
             let Some(rule) = select_mask_rule(&c.rules, &below, false, &|l| !matches!(l, Level::Billboard(_) | Level::None)) else { continue };
             // With generated LOD preferred, the generic models (index fallback) do not count as
             // installed, and every level they gave this base is generated whatever its size.
+            // That holds for the generic models a base record names itself too (MNAM, looked up
+            // as files rather than through the index): counted as installed, they left a base
+            // with generic models at the levels its MNAM names and generated ones at the rest
+            // (farmhouses: DynDOLOD Resources' model at LOD4 and LOD8, a generated one at LOD16).
             let lod = match &own_index {
-                Some(own) => lodforge_dyndolod::assign::Resolver { index: own, ..*r }.resolve(b),
+                Some(own) => {
+                    let exists = |path: &str| (r.exists)(path) && !c.index.is_generic(path);
+                    lodforge_dyndolod::assign::Resolver { index: own, exists: &exists, ..*r }.resolve(b)
+                }
                 None => r.resolve(b),
             };
             let had = match c.index.fallback().filter(|_| c.prefer_generated_lod) {
@@ -391,6 +415,10 @@ pub fn run(a: &Args) -> Result<()> {
     let dir = a.dyndolod_config.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
     let mut c = Config::load(&p, &dir, &a.preset, false)?;
     c.keep_levels = a.level_coverage.keeps(&a.preset);
+    if a.prefer_generated {
+        c.prefer_generated_lod = true;
+        c.rescan(&p);
+    }
     let all_worlds = lodforge_esp::scan_worldspaces(&p.load_order)?;
     let worlds: Vec<&Worldspace> = a.worlds.iter().filter_map(|n| all_worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(n))).collect();
     let min_size = min_size(a.min_size.as_deref(), c.keep_levels);

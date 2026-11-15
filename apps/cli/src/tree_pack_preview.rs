@@ -16,6 +16,9 @@ pub struct Args {
     /// Mesh indices (default: the first 8).
     #[arg(long, value_delimiter = ',')]
     pub meshes: Vec<u32>,
+    /// Meshes whose model path contains this text (case-insensitive), instead of indices.
+    #[arg(long)]
+    pub model: Option<String>,
     /// Size of each mesh's square, pixels.
     #[arg(long, default_value_t = 384)]
     pub size: u32,
@@ -37,7 +40,23 @@ pub fn run(a: &Args) -> Result<()> {
         let img = lodforge_dds::decode(&b, &info, 0)?;
         pages.push((img.width, img.height, img.rgba));
     }
-    let ids: Vec<u32> = if a.meshes.is_empty() { (0..pack.meshes.len().min(8) as u32).collect() } else { a.meshes.clone() };
+    let ids: Vec<u32> = match &a.model {
+        Some(q) => {
+            let q = q.to_ascii_lowercase();
+            pack.meshes.iter().enumerate().filter(|(_, m)| m.model.to_ascii_lowercase().contains(&q)).map(|(i, _)| i as u32).take(12).collect()
+        }
+        None if a.meshes.is_empty() => (0..pack.meshes.len().min(8) as u32).collect(),
+        None => a.meshes.clone(),
+    };
+    for &i in &ids {
+        let Some(m) = pack.meshes.get(i as usize) else { continue };
+        let mut by_page: std::collections::BTreeMap<u16, u32> = Default::default();
+        for c in &pack.clusters[m.first_cluster as usize..(m.first_cluster + m.cluster_count) as usize] {
+            *by_page.entry(c.page).or_default() += u32::from(c.triangles);
+        }
+        let pages: Vec<String> = by_page.iter().map(|(pg, n)| { let p = &pack.pages[usize::from(*pg)]; format!("page {pg} class {} {}{} ({n} triangles)", p.class, p.albedo, if p.snow.is_some() { " +snow material" } else { "" }) }).collect();
+        println!("mesh {i}: {} ({} triangles): {}", m.model, m.triangles, pages.join("; "));
+    }
     let s = a.size;
     let (w, h) = (s * ids.len() as u32, s);
     let mut px = vec![40u8; (w * h * 3) as usize];
