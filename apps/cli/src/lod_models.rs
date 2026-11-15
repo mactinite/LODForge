@@ -148,15 +148,28 @@ impl Item {
 pub fn plan(p: &Profile, c: &Config, worlds: &[&Worldspace], policy: &Policy) -> Vec<Item> {
     // Per base: references, the largest scale, references open by default.
     let mut used: HashMap<u32, (usize, f32, usize)> = HashMap::new();
+    // The bases a season swaps a base to stand where its references do. Left out, a seasonal
+    // base kept the installed models its record names while the default base got generated
+    // ones (Seasonal Landscapes' WRCloudDistrictTerrainLODSUM: a full model without the terrace
+    // at the top of Dragonsreach's stairs under a hand-made LOD model with it).
+    let mut seasonal: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (a, b) in c.swaps.swaps.values().flat_map(|secs| secs.values()).flat_map(|m| m.iter()) {
+        let v = seasonal.entry(*a).or_default();
+        if !v.contains(b) {
+            v.push(*b);
+        }
+    }
     for w in worlds {
         for q in w.refs.values() {
             if q.flags & FLAG_DELETED != 0 {
                 continue;
             }
-            let e = used.entry(q.base).or_insert((0, 0.0, 0));
-            e.0 += 1;
-            e.1 = e.1.max(if q.has_scale { q.scale } else { 1.0 });
-            e.2 += usize::from(q.open_by_default);
+            for base in std::iter::once(q.base).chain(seasonal.get(&q.base).into_iter().flatten().copied()) {
+                let e = used.entry(base).or_insert((0, 0.0, 0));
+                e.0 += 1;
+                e.1 = e.1.max(if q.has_scale { q.scale } else { 1.0 });
+                e.2 += usize::from(q.open_by_default);
+            }
         }
     }
     // Per full model: the levels any of its bases needs.

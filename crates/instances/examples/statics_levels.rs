@@ -1,10 +1,12 @@
 //! Which LOD levels each reference of a `.statics.bin` has a record in: counts per level set, and
 //! the models of references present in a farther level but missing from a nearer one.
-//! `cargo run --release -p lodforge-instances --example statics_levels -- <file> [rows] [model substring]`
+//! `cargo run --release -p lodforge-instances --example statics_levels -- <file> [rows] [model substring] [--copies]`
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let mut a: Vec<String> = std::env::args().collect();
+    let copies = a.iter().any(|x| x == "--copies");
+    a.retain(|x| x != "--copies");
     let f = lodforge_instances::statics::StaticsFile::from_bytes(&std::fs::read(&a[1]).unwrap()).unwrap();
     let rows: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(40);
     let filt = a.get(3).map(|s| s.to_ascii_lowercase());
@@ -13,10 +15,14 @@ fn main() {
     let mut refs: HashMap<(u16, u32), BTreeMap<u8, BTreeSet<&str>>> = HashMap::new();
     for (&(level, _, _), recs) in &f.blocks {
         for r in recs {
-            if r.plugin == lodforge_instances::statics::NO_PLUGIN {
+            // Synthetic records (child-world copies) have no reference; their position hash tells
+            // them apart. `--copies` surveys those instead of the worldspace's own references.
+            let synthetic = r.plugin == lodforge_instances::statics::NO_PLUGIN;
+            if synthetic != copies {
                 continue;
             }
-            refs.entry((r.plugin, r.form)).or_default().entry(level).or_default().insert(f.meshes[r.mesh as usize].model.as_str());
+            let key = if synthetic { (r.plugin, r.hash) } else { (r.plugin, r.form) };
+            refs.entry(key).or_default().entry(level).or_default().insert(f.meshes[r.mesh as usize].model.as_str());
         }
     }
     let mut sets: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
