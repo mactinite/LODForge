@@ -12,7 +12,7 @@ use lodforge_nif::{
 };
 
 use crate::bounds::{Aabb, BBox};
-use crate::input::{CELL_UNITS, TerrainCell, TerrainInput};
+use crate::input::{CELL_UNITS, TerrainInput};
 use crate::mesh::{QuadOptions, build_quad};
 use crate::settings::ControlFile;
 
@@ -361,18 +361,10 @@ pub fn summarize(nif: &Nif) -> Vec<QuadSummary> {
     out
 }
 
-/// Whether a cell belongs to the underside input (helper for callers building the input).
-pub fn cell_in_bounds(s: &UndersideSettings, c: &TerrainCell) -> bool {
-    s.min_x.is_none_or(|v| c.x >= v)
-        && s.max_x.is_none_or(|v| c.x <= v)
-        && s.min_y.is_none_or(|v| c.y >= v)
-        && s.max_y.is_none_or(|v| c.y <= v)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::GRID;
+    use crate::input::{GRID, TerrainCell};
     use lodforge_nif::parse;
 
     #[test]

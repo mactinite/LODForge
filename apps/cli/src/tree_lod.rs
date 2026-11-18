@@ -281,7 +281,7 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     let bases = read_tree_bases(lo)?;
     let lod = p.vfs.read(&format!("lodsettings\\{}.lod", world.editor_id))?.context("lodsettings missing")?;
     let sw = (i32::from(i16::from_le_bytes([lod[0], lod[1]])), i32::from(i16::from_le_bytes([lod[2], lod[3]])));
-    let inputs = crate::object_export::load_inputs(&p, &a.world)?;
+    let inputs = crate::object_export::load_inputs(&p)?;
     let mut seasons = vec![None];
     for s in &a.seasons {
         seasons.push(Some(crate::object_export::season_from_code(s).with_context(|| format!("unknown season {s}"))?));

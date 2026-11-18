@@ -1,11 +1,9 @@
-# Own LOD resources: dropping DynDOLOD Resources (2026-10-18, branch `own-lod-resources`)
+# Generated LOD models (`--lod-models`)
 
-Goal: `lodforge build --mode dyndolod` must not need the **DynDOLOD Resources SE** mod, and its
-output must stay DynDOLOD-compatible, so public modlists keep running the stock DynDOLOD DLL NG
-and scripts. This document has the inventory of what a build reads from Resources and from the
-DynDOLOD install, the licensing constraints, the design of the replacement, and the first
-prototype's numbers. Numbers come from `lodforge lod-sources` and `lodforge lod-models` (new) on
-profile `LODForge-E2E`, Tamriel, Medium rules, with `LODForge E2E - DynDOLOD Output` left out.
+What a DynDOLOD-mode build reads from DynDOLOD Resources SE and the DynDOLOD install, and how
+`--lod-models` generates the models that are missing (`apps/cli/src/lod_models.rs`,
+`crates/lodmodel`). Section numbers are kept from the original design document; its licensing
+notes, prototype numbers and next steps live in the development notes.
 
 ## 1. Inventory
 
@@ -96,30 +94,6 @@ session), `Shaders\`, `Presets\`.
   `_dyndolod_lod.nif` when one exists (keeps animation and effect shaders, e.g. waterfalls,
   fires, water planes), else the level-0 LOD model, else the full model. These files must ship
   in the output Data folder.
-
-## 2. Licensing
-
-- DynDOLOD Resources assets (and DynDOLOD's own NIF/text assets in the install) are **CC BY-NC-SA
-  4.0** (`docs\DynDOLOD-LICENSE.txt`). LODForge never bundles, copies, converts or derives from
-  them. The generator's only geometric input is the full model the load order uses; Resources'
-  files are read solely by the measurement commands (`lod-sources`, `lod-models
-  --reference-mod`) to count triangles and coverage, never as an input to generation.
-- The selection policy and level budgets were tuned against Resources' aggregate numbers (share
-  of triangles, which sizes get LOD); no per-model data from Resources is stored or shipped.
-- meshoptimizer (used through the `meshopt` crate) is MIT licensed.
-- DynDOLOD's rules and configs are its text. LODForge keeps reading them from the user's install
-  as an optional source. To drop that dependency LODForge needs its own:
-  - **rule preset** (mask → LOD4/8/16 columns, grid, reference action, flags) in a LODForge
-    format (TOML), written from scratch from the documented semantics
-    (docs/re/dyndolod-spec.md "Rules and mesh masks"), not by converting DynDOLOD's files;
-  - defaults for the `[DynDOLOD]` keys the build uses (folders, ignore lists, brightness, grids,
-    occlusion modes) as LODForge settings;
-  - its own `flat_normals` data (a normals file for billboards; LODGen's built-in
-    `billboard_nif` path already covers the case without a NIF template);
-  - its own grass billboard template (procedural crossed planes; see 3.5);
-  - TexGen stand-ins for skinned trees made from the tree's own skin bind pose
-    (`crates/nif` already reads skin data) instead of `Replace\*_static.nif`, and trunk models
-    cut from the full tree model instead of `Render\Skyrim\Billboards`.
 
 ## 3. Design
 
@@ -358,33 +332,3 @@ models of skyrim-cs-base (`PGPatcher Output\meshes\architecture`), 723,272 sourc
 Open: level 2 gains little from any of this (the remesh-and-bake path of section 5), paddles
 of water wheels still go as small parts at level 1, and the generated walls of
 `rtsnowshodhouse01.nif` render darker than the full model with or without these rules.
-
-## 4. Prototype status and numbers
-
-Tamriel on LODForge-E2E without Resources, `build --mode dyndolod --texgen --lod-models` (82 s):
-2,827 levels for 1,614 full models; DynDOLOD's (with Resources) LOD4 / LOD8 / LOD16 references
-that have a model: 92.0% / 96.7% / 93.5% (without generation: 14,838 of 34,250 lines). Object LOD
-triangles 10.2 M / 4.2 M / 1.7 M vs 5.6 M / 2.9 M / 0.8 M for DynDOLOD; per model, against
-Resources' own models weighted by references, 1.59x / 0.63x / 0.77x. Full table in
-docs/baseline.md "Own LOD resources".
-
-## 5. Next steps
-
-1. Mountains: drop or handle the moss/snow overlay layer of full mountain models in generated levels, and generate levels 1-2 for mountains instead of falling back to vanilla snow-baked `_lod` meshes (docs/baseline.md "Clean in-game comparison"). Whiterun in Tamriel needs child-world copies (MVP gap, not this branch).
-2. Selection: a debris rule (low, flat models; `landscape\trees\` non-tree statics) and enable-
-   parented Hearthfire / Civil War parts, to get closer to Resources' 34 k lines.
-3. Coarser architecture: a box/hull proxy level (silhouette-preserving, e.g. voxel or convex
-   decomposition) for city buildings that Resources ships as `_lod_2` only. A feasibility study
-   of voxel remeshing and octree / cluster streaming is in progress
-   (`docs/lod-voxel-octree-feasibility.md`, branch `voxel-lod-feasibility`).
-4. Baked detail (the user's suggestion of 2026-10-27): the detail a collapse removes (planks,
-   nails, bevels, the wheel's spokes) could be baked into a normal map of the LOD model so the
-   lighting keeps it. The generated models keep the full model's UVs so that the object LOD
-   atlas treats them like the full model, and the LOD shader samples one normal map at the same
-   UVs as the diffuse; a baked normal map therefore needs unique UVs of its own, and with them
-   the diffuse (and the PBR channels under Community Shaders) must be baked as well, as one tile
-   per model in the atlas (the runtime's cluster pages take their textures from the same atlas).
-   That is the "remeshing + baking" path the study above covers; the silhouette check (3.7) is
-   what can be had without it.
-5. `_dyndolod_lod` effect models (3.4), then the DynDOLOD-install pieces (2): rule preset,
-   billboard template, TexGen stand-ins.

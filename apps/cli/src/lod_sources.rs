@@ -1,5 +1,5 @@
 //! `lodforge lod-sources`: where the LOD models of a DynDOLOD-mode build come from. Builds the
-//! worldspace's DynDOLOD export and dynamic LOD selection the way `build --mode dyndolod` does and
+//! worldspace's DynDOLOD export and dynamic LOD selection the way `build` does and
 //! classifies every LOD model (and the textures of the models a given mod provides) by origin:
 //! the "resources" mod (default `DynDOLOD Resources SE 3`), vanilla archives, other mods' loose
 //! files or archives. Used to size the work of replacing DynDOLOD Resources with generated models

@@ -44,7 +44,7 @@ try {
         if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing $binary." }
         Copy-Item -LiteralPath $binary -Destination $stage
     }
-    foreach ($path in @('README.md', 'PLAN.md', 'docs')) {
+    foreach ($path in @('README.md', 'docs')) {
         Copy-Item -LiteralPath $path -Destination $stage -Recurse
     }
     foreach ($path in @('LICENSE', 'THIRD-PARTY-NOTICES.txt', 'licenses')) {

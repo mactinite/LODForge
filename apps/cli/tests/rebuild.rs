@@ -13,7 +13,7 @@
 //! `--out`, `--work-dir` and `--json` are added here. The root must not exist yet. Run it with
 //! `--release`: the test drives the `lodforge` binary of the same profile, and a debug build is
 //! far too slow for TexGen and LODGen. A small worldspace takes about a minute per run, the
-//! Tamriel full-validation command (docs/validation-20261019.md) about three.
+//! full Tamriel command about three.
 
 use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};

@@ -7,9 +7,7 @@ description = "Terrain LOD meshes (.btr) and terrain underside: Terra greedy-ins
 
 [dependencies]
 rayon.workspace = true
-thiserror.workspace = true
 lodforge-esp.workspace = true
 lodforge-nif.workspace = true
 
 [dev-dependencies]
-lodforge-archive.workspace = true

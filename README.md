@@ -5,19 +5,22 @@ LODForge generates terrain, object and tree LOD, textures and dynamic LOD
 plugins while retaining compatible in-game files.
 It uses Rust, parallel CPU processing and wgpu GPU baking, with a CLI and a Tauri UI.
 
-**Status: experimental.** End-to-end builds and targeted golden comparisons work;
-full Community Shaders / PBR and DynDOLOD runtime parity is not yet certified.
-Use a separate test profile and backed-up saves. See the
-[compatibility assessment](docs/parity.md) before replacing a working output.
+**Status: experimental.** Releases are prereleases. Build into a separate test profile and keep
+backed-up saves. Read the [known limitations](docs/limitations.md) and the
+[gotchas](docs/gotchas.md) before replacing a working LOD setup.
 
 ## What it does
 
 - Terrain meshes and diffuse/normal textures; seasonal texture delta builds.
-- Object LOD using xLODGen and DynDOLOD LODGen behaviors.
-- Tree billboards, stitched/rendered object textures and classic tree LOD.
+- Object LOD by DynDOLOD's rules, with the object texture atlas.
+- Tree billboards, stitched and rendered LOD textures (its own TexGen stage), classic tree LOD or
+  Ultra tree LOD, and optionally [generated 3D tree LOD models](docs/tree-models.md).
 - DynDOLOD-compatible plugins, DLL NG data, occlusion and terrain undersides.
 - Optional BTO grass LOD or Community Shaders Grass Optimizations meshes.
-- Optional LOD model generation when installed LOD models are missing.
+- Optional [generated LOD models](docs/re/own-lod-resources.md) where installed ones are missing.
+- Optional data for the LODForge Runtime plugin (`--runtime lodforge`): instanced trees with
+  impostors, instanced statics, far grass and dynamic LOD.
+- A [viewer](docs/viewer.md) that shows and checks the generated LOD without the game.
 
 PBR-compatible output follows DynDOLOD's treatment of PBR inputs. It does **not**
 mean every distant mesh uses a True PBR shader. Lists without Community Shaders
@@ -35,7 +38,7 @@ DynDOLOD BTO grass are different output modes, not interchangeable parity tests.
   There is no complete CPU-only replacement for all build stages.
 - Portable Windows builds require the Microsoft Visual C++ v14 x64 Redistributable
   (the CLI imports `VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`).
-- For DynDOLOD mode / TexGen: the user's DynDOLOD installation, configuration and
+- The user's DynDOLOD installation, configuration and
   appropriate input resources. LODForge does not bundle these.
 - For generated dynamic plugins: the compatible DynDOLOD scripts / DLL NG runtime
   and their prerequisites. Install Community Shaders, Seasons of Skyrim and grass
@@ -47,14 +50,14 @@ DynDOLOD BTO grass are different output modes, not interchangeable parity tests.
 LODForge reads these from your MO2 profile's virtual file system (or the game's
 Data folder) and never bundles them. Install them in the profile you build against.
 
-**Needed for DynDOLOD mode (`build --mode dyndolod`)**
+**Needed for a build**
 
 | Mod | Why |
 |---|---|
 | DynDOLOD (the tool install, `Edit Scripts\DynDOLOD`) | Its INI, rules, configs and billboard templates are read as configuration. |
 | DynDOLOD Resources SE | Supplies the LOD models for most references (about 93% of LOD4 refs on a large list), billboards and `_dyndolod_lod` models. Optional if you pass `--lod-models`: LODForge then generates missing models itself, with lower geometry parity. |
 | DynDOLOD DLL NG (plus its Papyrus scripts/data) | Runtime for the generated `DynDOLOD.esm/.esp` and `SKSE\Plugins\DynDOLOD_Data`. Its copies of scripts win over Resources' older ones. |
-| TexGen output (stitched `textures\lod\*`) | Still taken from the profile; LODForge's own TexGen currently produces billboards only. |
+| TexGen output | Only without `--texgen`. With `--texgen` LODForge renders the billboards and the stitched and rendered LOD textures itself. |
 | SKSE64, Address Library for SKSE Plugins | Prerequisites of DLL NG. |
 | Cleaned masters (Skyrim, DLC, CC; xEdit-cleaned plugins) | Needed for results close to DynDOLOD. |
 
@@ -64,7 +67,8 @@ Data folder) and never bundles them. Install them in the profile you build again
 |---|---|
 | Community Shaders (with PBR / Grass Optimizations) | CS-targeted output, PBR LOD, or `meshes\lod\grass` Grass Optimizations meshes. |
 | Seasons of Skyrim (and its swap data) | `--seasons` builds and `Seasons\...` runtime swaps. |
-| NGIO (Grass Cache), Grass Optimizations | Only if you choose runtime grass instead of BTO grass LOD. |
+| No Grass In Objects NG (grass cache) | `--grass bto` and the LODForge Runtime's far grass read its cache; LODForge does not generate grass placements. |
+| LODForge Runtime (`LODForgeRuntime.dll`) | `--runtime lodforge` builds. |
 | Any PBR texture mods you use | DynDOLOD-style PBR handling needs the source RMAOS files present. |
 
 Remove other LOD generators' outputs (xLODGen, an earlier DynDOLOD run) from the
@@ -75,7 +79,7 @@ input set automatically.
 Not needed: the "xLODGen Resource - SSE Terrain Tamriel" plugins. LODForge fills
 Tamriel's outer cells, whose LAND records Skyrim.esm lacks, from the terrain LOD
 meshes the game ships (`docs/re/terrain-lod-spec.md` 2.3; `--no-lod-fill` turns
-it off). Keep those plugins disabled for DynDOLOD-mode builds in particular:
+it off). Keep those plugins disabled:
 `Occlusion.esp` copies the winning worldspace record, and the Extend plugin's
 enlarged object bounds would stay in it after the plugin is removed.
 
@@ -97,18 +101,23 @@ Start with one worldspace and a new output folder:
 ```powershell
 .\target\release\lodforge.exe build `
   --instance 'D:\Modlists\skyrim-cs' --profile 'LODForge-E2E' `
-  --mode dyndolod --preset Medium --texgen --grass off `
+  --preset Medium --texgen --grass off `
   --worlds Tamriel --out 'D:\LODForge-output\trial-01'
 ```
 
-- Omit `--mode dyndolod` for the default xLODGen-style workflow.
 - Add `--seasons SPR,SUM,AUT,WIN` for extra seasons; default season is always built.
-- Use `--grass go` for Grass Optimizations meshes. For a BTO grass parity run,
-  use `--grass bto --grass-source cache --grass-density 100` with a matching cache.
-  Automatic/generated placements are not NGIO raycast-equivalent.
+- Use `--grass go` for Grass Optimizations meshes, or `--grass bto` for grass in object LOD
+  (needs an NGIO grass cache; `--grass-density`, default 50).
+- `--tree-lod ultra` puts every tree in object LOD; `--tree-models generate` adds generated 3D
+  tree LOD models.
+- `--runtime lodforge` also writes `SKSE\Plugins\LODForgeRuntime\*` for the LODForge Runtime
+  plugin.
 - Override nonstandard tool paths with `--dyndolod` (installation root) and
   `--dyndolod-config` (the `Edit Scripts\DynDOLOD` directory).
-- Use `--lod-models` to generate missing models, not to eliminate all external dependencies.
+- Use `--lod-models` to generate missing LOD models. It does not remove the other DynDOLOD
+  dependencies.
+- [Build options](docs/build-options.md) lists every option, the configuration files a build
+  reads and the reports it writes.
 - `--materials pbr|standard` (default `pbr`) picks the list's material setup. `pbr`
   (Community Shaders with PBR) makes `pbr_lod` texture twins, PBR texture sets and
   `linear.dds` copies wherever a `textures\pbr\` source exists. `standard` (non-PBR:
@@ -137,11 +146,15 @@ cargo build --locked --release -p lodforge -p lodforge-ui --features lodforge-ui
 .\target\release\lodforge-ui.exe
 ```
 
-The UI launches the neighboring CLI executable, or the path in `LODFORGE_CLI`.
-The frontend is checked-in HTML/CSS/JavaScript; no npm build is required.
-The CLI exposes more options than the UI. The UI builds DynDOLOD-style output, renders the tree
-billboards and stitched LOD textures itself by default (no TexGen output needs to be installed),
-shows the running stage in the build table and ends on a Done screen that can close the program.
+The UI launches the neighboring CLI executable, or the path in `LODFORGE_CLI`. It builds
+DynDOLOD-style output with its own TexGen stage by default, in a guided view or an advanced view
+with every exposed option; it can edit the DynDOLOD configuration files a build reads, shows the
+running stage, and ends on a Done screen with the build's reports that can open the viewer. The
+CLI has more options than the UI.
+
+The frontend source is in `apps/ui/web` (React, Vite). Its bundle is checked in as
+`apps/ui/dist`, so building the UI needs no npm; changing the frontend does
+(see [development](docs/development.md)).
 
 `lodforge-ui.exe --instance <MO2 folder> [--profile <name>]` prefills the first step and
 scans the load order at start. For an MO2 tool entry, set the arguments to
@@ -162,13 +175,11 @@ terrain seams and floating trees. The UI's Done screen opens it on the build jus
 works headlessly: `--screenshot shot.png --camera x,y,z,yaw,pitch` renders a PNG and `--check
 --json report.json` writes the issue list. See [the viewer page](docs/viewer.md).
 
-## Release preparation
+## Releases
 
-Windows x64 CI builds and checks the CLI/UI; the release workflow prepares a
-portable ZIP, matching source and SHA-256 checksums as a draft prerelease.
-**Public distribution remains blocked pending licensing/provenance clearance.**
-No release is published automatically. See [builds and releases](docs/releases.md)
-and the [licensing assessment](docs/licensing.md).
+Windows x64 CI builds and checks the CLI and UI. The release workflow prepares a portable ZIP,
+the matching source and SHA-256 checksums as a draft prerelease; a maintainer publishes it by
+hand. See [builds and releases](docs/releases.md).
 
 LODForge is an independent project, not endorsed by the authors of the
 reference tools or required runtimes. Compatibility names identify interfaces
@@ -176,11 +187,11 @@ and dependencies, not affiliation.
 
 ## Documentation
 
-- [Documentation map](docs/README.md) - choose a short, task-specific starting point.
-- [Architecture](docs/architecture.md) - actual crate boundaries and build flow.
-- [Development and quality checks](docs/development.md).
-- [Validation and safe comparisons](docs/validation.md).
-- [Remaining parity gaps](docs/parity.md) and [roadmap](PLAN.md).
+- [Documentation map](docs/README.md): one starting point per task.
+- [Build options](docs/build-options.md), [gotchas](docs/gotchas.md) and
+  [known limitations](docs/limitations.md).
+- [Architecture](docs/architecture.md): crates and build flow.
+- [Development and quality checks](docs/development.md); [validation](docs/validation.md).
 
 ## License
 
@@ -193,8 +204,7 @@ CageTV, GPL-3.0-only); the combined work is therefore GPL-3.0-only. Everything
 that was once ported from LODGen (MPL 1.1, which cannot be combined with GPL
 code) or written after disassembling a closed tool has been replaced by
 clean-room re-implementations written from the specifications in
-[docs/re](docs/re); the [licensing review](docs/licensing.md) and the
-[re-implementation plan](docs/reimplementation-plan.md) record how.
+[docs/re](docs/re); the [licensing review](docs/licensing.md) records how.
 
 **Third-party components** are listed in
 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) with their license texts
@@ -209,5 +219,4 @@ in your own setup at run time. The files LODForge generates can contain other
 mods' assets and must not be redistributed without those authors' permission.
 
 Do not commit game/mod assets, decompilations, local output or private profiles
-to this repository. Public distribution waits on the clearance checklist in the
-licensing review.
+to this repository.

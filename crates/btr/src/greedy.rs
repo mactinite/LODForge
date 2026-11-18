@@ -10,7 +10,7 @@
 //! error threshold or the point limit is reached. Points can be pre-selected (forced into the
 //! mesh) or ignored (never candidates).
 
-use crate::quadedge::{EdgeId, FaceId, NO_FACE, QuadEdges, inv_rot, rot, sym};
+use crate::quadedge::{EdgeId, FaceId, NO_FACE, QuadEdges, sym};
 
 pub const UNUSED: u8 = 0;
 pub const USED: u8 = 1;
@@ -636,12 +636,6 @@ impl<'a> Greedy<'a> {
             }
         }
     }
-}
-
-// Silence the unused-import warning when the helpers are only used in tests.
-#[allow(dead_code)]
-fn _rot_helpers(e: EdgeId) -> (EdgeId, EdgeId) {
-    (rot(e), inv_rot(e))
 }
 
 #[cfg(test)]

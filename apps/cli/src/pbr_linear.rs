@@ -2,10 +2,9 @@
 //! AltTextures point LOD shapes at (`lodforge_dyndolod::sidefiles::linear_texture_name`). LOD
 //! uses the vanilla lighting shader, which shows a PBR albedo too bright.
 //!
-//! DynDOLOD makes them in `CreateNonAlphaImage` (docs/re/gap-audit-20261019.md P2): half size
+//! DynDOLOD makes them in `CreateNonAlphaImage` (its `FullTextureSizeDivider` and PBR scale settings): half size
 //! (`FullTextureSizeDivider`), BC7 UNORM with a full mip chain, its PBR scale 0.65 on RGB. The
-//! alpha handling is fitted to its output (E2E run 2026-10-18; docs/baseline.md "AltTextures and
-//! VC side files"): RGB darkened towards black where the diffuse alpha is low, alpha sharpened
+//! alpha handling is fitted to its output (E2E run 2026-10-18): RGB darkened towards black where the diffuse alpha is low, alpha sharpened
 //! around 88. An opaque source is just scaled; a source with alpha ~0 (`snowrocks01`) comes out
 //! black and transparent, as DynDOLOD's does. The PBR scale requires the source's RMAOS map:
 //! TexGen no-alpha copies have no such companion and must not be darkened.

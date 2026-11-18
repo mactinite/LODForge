@@ -1,11 +1,10 @@
-//! `lodforge build`: the whole xLODGen job in one command. For every selected worldspace:
-//! terrain meshes, terrain textures (diffuse + normal; seasons as deltas of the default),
-//! object LOD (export, atlas + textures, BTOs, clipped against the fresh terrain meshes) and tree
-//! LOD, for the default season and any extra seasons. Output goes to a Data folder or straight
-//! into an MO2 mod (`--mo2-mod`). `--json` prints one JSON object per finished stage.
+//! `lodforge build`: the whole LOD job in one command. For every selected worldspace: terrain
+//! meshes, terrain textures (diffuse + normal; seasons as deltas of the default), object LOD by
+//! DynDOLOD's rules (export, atlas + textures, BTOs, clipped against the fresh terrain meshes;
+//! see `dyndolod_build`) and tree LOD, for the default season and any extra seasons, then
+//! DynDOLOD.esm/.esp and Occlusion.esp. Output goes to a Data folder or straight into an MO2 mod
+//! (`--mo2-mod`). `--json` prints one JSON object per finished stage.
 //!
-//! `--mode dyndolod` replaces the object LOD stage with DynDOLOD's (its object LOD export and
-//! LODGen 3.1.8, see `dyndolod_build`) and adds DynDOLOD.esm/.esp and Occlusion.esp at the end.
 //! Earlier LOD output enabled in the profile (mods LODForge generated, DynDOLOD output) and the
 //! DynDOLOD plugins are left out of the input. So is an earlier build's output in the output
 //! folder itself: the stages see only the files this run wrote (`own_output`), plus
@@ -63,8 +62,10 @@ pub struct Args {
     /// Print one JSON line per finished stage.
     #[arg(long)]
     pub json: bool,
-    /// Object LOD flavour: xLODGen's, or DynDOLOD's with dynamic LOD plugins and occlusion.
-    #[arg(long, value_enum, default_value = "xlodgen")]
+    /// Accepted so existing command lines and the UI keep working: `dyndolod` (object LOD by
+    /// DynDOLOD's rules, with dynamic LOD plugins and occlusion) is the only mode.
+    #[arg(long, value_enum, default_value = "dyndolod")]
+    #[allow(dead_code)]
     pub mode: Mode,
     #[command(flatten)]
     pub dyn_opts: crate::dyndolod_build::Opts,
@@ -128,7 +129,6 @@ pub struct Args {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum Mode {
-    Xlodgen,
     Dyndolod,
 }
 
@@ -283,12 +283,6 @@ pub fn run(a: &Args) -> Result<()> {
     if !a.json && !prof.exclude_mod.is_empty() {
         println!("not read: {}", prof.exclude_mod.join(", "));
     }
-    if a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Bto && a.mode != Mode::Dyndolod {
-        bail!("--grass bto puts grass into DynDOLOD's object LOD; use it with --mode dyndolod (or --grass go)");
-    }
-    if a.rt.on() && a.mode != Mode::Dyndolod {
-        bail!("--runtime lodforge needs --mode dyndolod (the trees and repeated statics come from its export)");
-    }
     if a.rt.on() && a.dyn_opts.grass == crate::dyndolod_build::GrassMode::Bto {
         bail!("--runtime lodforge draws far grass from .lfg files; leave --grass bto off");
     }
@@ -327,27 +321,25 @@ pub fn run(a: &Args) -> Result<()> {
                 failed.push(format!("texgen: {e}"));
             }
         }
-        if a.mode == Mode::Dyndolod {
-            // The mini atlases DynDOLOD's LOD models use (textures\lod\..., stitched from full
-            // textures by the TexGen rules), so no installed TexGen output is needed.
-            let t = Instant::now();
-            begin(a.json, "all", "texgen-stitched", None);
-            let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
-            let reuv = work.join("DynDOLOD_SSE_re-uv-miniatlas.txt");
-            match lodforge_gpu::Gpu::shared().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr(), a.lod_texture_tone == LodTextureTone::Dyndolod)) {
-                Ok(m) => {
-                    if !a.json {
-                        println!("texgen-stitched: {} atlases, {} PBR twins, {} full textures, {} temporaries, {} rendered; {} skipped", m.atlases, m.pbr, m.full, m.temps, m.rendered, m.skipped.len());
-                        for s in m.skipped.iter().take(10) {
-                            println!("  skipped {s}");
-                        }
+        // The mini atlases DynDOLOD's LOD models use (textures\lod\..., stitched from full
+        // textures by the TexGen rules), so no installed TexGen output is needed.
+        let t = Instant::now();
+        begin(a.json, "all", "texgen-stitched", None);
+        let dyndolod = a.dyndolod.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD"));
+        let reuv = work.join("DynDOLOD_SSE_re-uv-miniatlas.txt");
+        match lodforge_gpu::Gpu::shared().map_err(anyhow::Error::from).and_then(|gpu| crate::texgen_stitched::stitch_into(&p, gpu, &dyndolod, &out, Some(&reuv), a.materials.pbr(), a.lod_texture_tone == LodTextureTone::Dyndolod)) {
+            Ok(m) => {
+                if !a.json {
+                    println!("texgen-stitched: {} atlases, {} PBR twins, {} full textures, {} temporaries, {} rendered; {} skipped", m.atlases, m.pbr, m.full, m.temps, m.rendered, m.skipped.len());
+                    for s in m.skipped.iter().take(10) {
+                        println!("  skipped {s}");
                     }
-                    event(a.json, "all", "texgen-stitched", None, t.elapsed().as_millis());
                 }
-                Err(e) => {
-                    eprintln!("texgen-stitched: {e:#}");
-                    failed.push(format!("texgen-stitched: {e}"));
-                }
+                event(a.json, "all", "texgen-stitched", None, t.elapsed().as_millis());
+            }
+            Err(e) => {
+                eprintln!("texgen-stitched: {e:#}");
+                failed.push(format!("texgen-stitched: {e}"));
             }
         }
         // Later stages read the new billboards and textures through the VFS.
@@ -366,8 +358,7 @@ pub fn run(a: &Args) -> Result<()> {
             .collect();
         p.vfs.add_loose_files(&out, rels.iter().map(String::as_str));
     }
-    // DynDOLOD mode: configuration, worldspaces and the work folder for LODGen's input files.
-    let dyn_mode = a.mode == Mode::Dyndolod;
+    // DynDOLOD's configuration, worldspaces and the work folder for the object LOD input files.
     let mut dyn_cfg: Option<crate::dyndolod_build::Config> = None;
     // PBR linear textures named by the AltTextures, and those already written.
     let mut linear: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -379,7 +370,7 @@ pub fn run(a: &Args) -> Result<()> {
     let mut undersides: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut mini_rows: Vec<lodforge_texgen::stitch::MiniAtlasRow> = Vec::new();
     let mut tree_billboards: Vec<String> = Vec::new();
-    if dyn_mode && !a.no_objects {
+    if !a.no_objects {
         let t = Instant::now();
         begin(a.json, "all", "dyndolod-config", None);
         let dir = a.dyn_opts.dyndolod_config.clone().unwrap_or_else(|| a.profile.instance.join(r"tools\DynDOLOD\Edit Scripts\DynDOLOD"));
@@ -479,8 +470,8 @@ pub fn run(a: &Args) -> Result<()> {
     }
     // Runtime mode: the DynDOLOD.esm reference ids of the child-world copies, settled before the
     // object LOD stage writes the statics (the plugin stage below keeps them).
-    let writes_plugins = dyn_mode && !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod && !(a.rt.on() && a.rt.runtime_no_dyndolod_plugins);
-    let mut copy_ids = (a.rt.on() && dyn_mode && !a.no_objects).then(|| crate::dyndolod_build::child_copy_ids(&a.dyn_opts, writes_plugins, &out));
+    let writes_plugins = !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod && !(a.rt.on() && a.rt.runtime_no_dyndolod_plugins);
+    let mut copy_ids = (a.rt.on() && !a.no_objects).then(|| crate::dyndolod_build::child_copy_ids(&a.dyn_opts, writes_plugins, &out));
     // Runtime mode: per worldspace, the export's large references -> `.bto` levels with a column.
     let mut large_columns: std::collections::HashMap<String, std::collections::HashMap<u32, u16>> = std::collections::HashMap::new();
     // Runtime mode: per worldspace, its export lines inside the bounds of a child worldspace that
@@ -508,7 +499,7 @@ pub fn run(a: &Args) -> Result<()> {
             println!("  {:.3} {:.3} {:.4} {:.3}; {:.3} {:.3} {:.3} (x{n})", v.params[0], v.params[1], v.params[2], v.params[3], v.color[0], v.color[1], v.color[2]);
         }
     }
-    let occ_lane = (dyn_mode && !a.no_objects && !a.dyn_opts.no_occlusion && dyn_cfg.is_some()).then(|| crate::occlusion_lane::OcclusionLane::start(prof.clone(), out.clone(), worlds.clone()));
+    let occ_lane = (!a.no_objects && !a.dyn_opts.no_occlusion && dyn_cfg.is_some()).then(|| crate::occlusion_lane::OcclusionLane::start(prof.clone(), out.clone(), worlds.clone()));
     for world in &worlds {
         let mut step = |stage: &str, season: Option<&str>, f: &mut dyn FnMut() -> Result<()>| {
             let t = Instant::now();
@@ -527,7 +518,7 @@ pub fn run(a: &Args) -> Result<()> {
         if a.impostors && !a.rt.on() {
             step("impostors", None, &mut || crate::impostors::build_stage(&p, &impostor_dir, &out, world, &a.seasons, &a.impostor_opts, &std::collections::HashSet::new()).map(|_| ()));
         }
-        if !a.no_objects && dyn_mode {
+        if !a.no_objects {
             let Some(c) = &dyn_cfg else { continue };
             let Some(ws) = dyn_worlds.iter().find(|w| w.editor_id.eq_ignore_ascii_case(world)) else { continue };
             let parent = ws.parent.and_then(|pid| dyn_worlds.iter().find(|w| w.form_id == pid));
@@ -792,7 +783,7 @@ pub fn run(a: &Args) -> Result<()> {
                     Ok(())
                 });
             }
-            let mut args = object_lod_args(a, world, &out, paths, crate::object_lod::FlavorArg::Dyndolod);
+            let mut args = object_lod_args(a, &out, paths, crate::object_lod::FlavorArg::Dyndolod);
             if let Some(g) = grass_inputs {
                 args.grass = Some(g.dir);
                 args.grass_map = Some(g.map);
@@ -821,57 +812,19 @@ pub fn run(a: &Args) -> Result<()> {
                     Ok(())
                 });
             }
-        } else if !a.no_objects {
-            let args = crate::object_lod::Args {
-                profile: a.profile.clone(),
-                export: Vec::new(),
-                seasons: a.seasons.clone(),
-                atlas: None,
-                terrain: None,
-                hidden_rule: None,
-                no_hidden: false,
-                reuv: false,
-                loose_atlas_uv: false,
-                hidden_study: false,
-                out: out.clone(),
-                golden: None,
-                level: None,
-                only: None,
-                explain: Vec::new(),
-                compare_only: None,
-                dry_run: false,
-                from_load_order: true,
-                world: world.clone(),
-                atlas_textures: true,
-                flavor: crate::object_lod::FlavorArg::Xlodgen,
-                tolerant: false,
-                geometry_only: false,
-                side_files: None,
-                grid: 0.1,
-                grass: None,
-                grass_map: None,
-                grass_flat: None,
-                grass_density: None,
-                runtime: None,
-            };
-            if let Some(l) = &lane {
-                l.wait_meshes(world);
-            }
-            step("objects", None, &mut || crate::object_lod::run_with(&p, &args));
         }
         if !a.no_trees {
-            let dyndolod = dyn_cfg.as_ref().filter(|_| dyn_mode).map(|c| c.dir.clone());
+            let dyndolod = dyn_cfg.as_ref().map(|c| c.dir.clone());
             let exclude = tree_exclude.remove(world).unwrap_or_default();
             let args = crate::tree_lod::Args { profile: a.profile.clone(), world: world.clone(), seasons: a.seasons.clone(), out: out.clone(), placeholder_billboards: None, golden: None, list_missing: false, dyndolod, exclude };
-            if dyn_cfg.as_ref().is_some_and(|c| c.ultra && dyn_mode) {
+            if dyn_cfg.as_ref().is_some_and(|c| c.ultra) {
                 // Ultra: the trees are in object LOD; empty lists switch the game's tree LOD off.
                 step("trees", None, &mut || crate::tree_lod::write_empty_lists(&p, &args));
             } else {
                 step("trees", None, &mut || crate::tree_lod::run_with(&p, &args));
             }
         }
-        if dyn_mode
-            && !a.no_objects
+        if !a.no_objects
             && !a.dyn_opts.no_underside
             && let Some(c) = &dyn_cfg
             && crate::dyndolod_build::wants_underside(c, world)
@@ -1008,7 +961,7 @@ pub fn run(a: &Args) -> Result<()> {
     if let Some(l) = lane {
         l.finish(&mut failed);
     }
-    if dyn_mode && let Some(c) = &dyn_cfg {
+    if let Some(c) = &dyn_cfg {
         // The DynDOLOD stages read the build's own terrain LOD and plugins.
         own_output(&mut p, &out, &before)?;
         if !a.dyn_opts.no_plugins && !a.dyn_opts.static_lod && !(a.rt.on() && a.rt.runtime_no_dyndolod_plugins) {
@@ -1126,7 +1079,7 @@ fn texgen_stage(a: &Args, p: &Profile, out: &std::path::Path) -> Result<()> {
 }
 
 /// `object-lod` arguments for one worldspace of the build.
-fn object_lod_args(a: &Args, world: &str, out: &std::path::Path, export: Vec<PathBuf>, flavor: crate::object_lod::FlavorArg) -> crate::object_lod::Args {
+fn object_lod_args(a: &Args, out: &std::path::Path, export: Vec<PathBuf>, flavor: crate::object_lod::FlavorArg) -> crate::object_lod::Args {
     crate::object_lod::Args {
         profile: a.profile.clone(),
         export,
@@ -1145,9 +1098,6 @@ fn object_lod_args(a: &Args, world: &str, out: &std::path::Path, export: Vec<Pat
         explain: Vec::new(),
         compare_only: None,
         dry_run: false,
-        from_load_order: false,
-        world: world.to_string(),
-        atlas_textures: false,
         flavor,
         tolerant: false,
         geometry_only: false,

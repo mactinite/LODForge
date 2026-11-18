@@ -1,5 +1,5 @@
 //! Generated 3D tree LOD models ("passthru" LOD for DynDOLOD's Ultra tree LOD), ported from
-//! TreeLODGen (docs/ultra-tree-models-plan.md, algorithm in docs/re/treelodgen-algorithm.md).
+//! TreeLODGen (docs/tree-models.md, algorithm in docs/re/treelodgen-algorithm.md).
 //!
 //! Derived from TreeLODGen, Copyright (C) 2026 Clemus, https://github.com/Cl3mus33/TreeLODGen
 //! (commit dc4cc8a, GPL-3.0): `Split.cs`, `WoodSplit.cs`, `Islands.cs`, `NifUtil.cs`, `Prune.cs`,

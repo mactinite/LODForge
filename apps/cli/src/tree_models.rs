@@ -1,5 +1,4 @@
-//! `lodforge tree-models`: generated 3D tree LOD models (Ultra phase 3,
-//! docs/ultra-tree-models-plan.md), written as
+//! `lodforge tree-models`: generated 3D tree LOD models (docs/tree-models.md), written as
 //! `meshes\dyndolod\lod\trees\<stem>_<crc>passthru_lod[_1|_2].nif` so DynDOLOD-mode LOD discovery
 //! finds them like installed models. `--inspect` prints how trees split and their level counts.
 //!

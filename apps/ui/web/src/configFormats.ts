@@ -1,4 +1,4 @@
-// Table formats of the flat config files LODForge reads (docs/ui-options-inventory.md). Each file
+// Table formats of the flat config files LODForge reads (docs/build-options.md). Each file
 // parses into lines: data rows (cells) or kept-as-is lines (comments, blanks, INI sections), so a
 // save writes the file back in its own layout with only the edited rows changed.
 

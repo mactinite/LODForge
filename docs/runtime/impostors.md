@@ -286,70 +286,7 @@ FNV-1a key over: the model's CRC-32, each texture's path and CRC-32, grid, frame
 supersampling, mip bias, light-map size, the pre-lighting settings, and the baker version (2). Types with the same key (identical model and textures under
 another path, common in Skyrim's per-hold tree copies) share one atlas rectangle.
 
-## Measured: skyrim-cs-base Tamriel (2026-10-24)
-
-`lodforge impostors --instance D:\Modlists\skyrim-cs-base --worlds Tamriel --preview-instances`,
-default settings, CPU BC7 (`--bc7 high`).
-
-- **348 types** (one per rendered model) for 380 tree bases with references; 88,741 instances.
-  Types with an identical bake share one rectangle (same model and texture bytes under another
-  path, e.g. the per-hold `haafingar_*` / `whiterun_*` copies).
-- **Baker v2** (pre-lit, alpha-tested coverage, coverage-preserving mips, 256 px tier):
-  - Time from an empty cache: 5.5 min (bake 240 s, 0.94 s per baked type; page encode 84 s).
-  - A rebake after a layout change: 1.5 min (320 of 348 from the cache).
-  - Size: 55 pages, 1.39 GiB on disk.
-
-  | Layout | Types | BC7 + mips (both maps) |
-  | --- | --- | --- |
-  | 12 x 12 x 256 px (3072) | 26 (22 unique) | 528 MiB |
-  | 12 x 12 x 128 px (1536) | 220 | 774 MiB |
-  | 16 x 16 x 64 px (1024) | 32 | 72 MiB |
-  | 16 x 16 x 32 px (512) | 70 | 47 MiB |
-
-  With the large tier at 2000 units instead of 2600, 92 types (53 unique) get 256 px frames
-  and the set grows to 2.0 GiB / 79 pages. `--impostor-large-frame 0` gives about 0.95 GiB;
-  `--impostor-max-frame 64` puts the mid tier at 1024 px (about 0.4 GiB less).
-- **v1** (unlit, M2): 39 pages, 1.09 GiB, 5.3 min.
-- 2 bases bake nothing: `deadshrub01.nif` (no renderable texture) and
-  `haafingar_tundradriftwood01.nif` (no geometry).
-
-### Viewer goldens
-
-The classic billboard tree LOD (`--layers terrain,water,objects,trees`, the 2026-10-22 cs-base
-build) against the impostor preview (`--layers terrain,water,objects,impostors --impostors <set
-folder>`), `--levels 4`.
-
-The Rift from above (`--camera 100000,-112000,40000,45,-28 --fov 50`): billboards, impostors v1,
-impostors v2.
-
-![billboards](img/rift-trees.png)
-![impostors v1](img/rift-impostors-v1.png)
-![impostors v2](img/rift-impostors-v2.png)
-
-The forest edge near Riften (`--camera 113000,-99000,15500,45,-6 --fov 40`): billboards,
-v1, v2.
-
-![billboards](img/near-billboards.png)
-![impostors v1](img/near-impostors-v1.png)
-![impostors v2](img/near-impostors-v2.png)
-
-- **v1** shows the in-game problem: unlit, light-grey bark streaks through flat crowns.
-- **v2**: trunks sit dark inside the crowns, tops are lit and undersides shaded.
-- Foliage colour in the near shot (rows 300..700):
-
-  | Shot | Mean RGB | Luma | Luma sd |
-  | --- | --- | --- | --- |
-  | Billboards | 65, 76, 35 | 68.4 | 13.5 |
-  | v1 | 49, 58, 31 | 52.3 | 10.6 |
-  | v2 | 48, 58, 28 | 51.4 | 15.1 |
-
-  v2 has 43% more contrast than v1 at the same mean.
-- Pre-lighting keeps a type's mean brightness about where the unlit albedo was (pine02 atlas:
-  lit / unlit 1.04): the top light adds about as much as occlusion and transmittance take away.
-  Match the in-game 3D trees through `brightness` / `tint` (`--impostor-calibration`), measured
-  per type in game.
-
-## Preview instances (temporary)
+## Preview instances
 
 `preview-instances.bin` exists only until the runtime instance files land: `"LFPI"`, u32 version
 1, u32 count, then per record `pos.xyz, yaw, scale` (f32) and `type index` (u32), 24 bytes. It

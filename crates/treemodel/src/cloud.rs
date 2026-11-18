@@ -1,5 +1,5 @@
 //! Billboard-cloud crowns: the leaves of a tree replaced by a few textured planes, the trunk kept as
-//! reduced 3D geometry (docs/ultra-tree-models-plan.md, "Crown alternatives"). LODForge's own
+//! reduced 3D geometry (docs/tree-models.md). LODForge's own
 //! method, after Décoret et al., "Billboard Clouds for Extreme Model Simplification" (SIGGRAPH
 //! 2003); not part of TreeLODGen.
 //!

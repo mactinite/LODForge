@@ -2619,16 +2619,10 @@ dependencies = [
 name = "lodforge-btr"
 version = "0.1.0"
 dependencies = [
- "lodforge-archive",
  "lodforge-esp",
  "lodforge-nif",
  "rayon",
- "thiserror 2.0.21",
 ]
-
-[[package]]
-name = "lodforge-core"
-version = "0.1.0"
 
 [[package]]
 name = "lodforge-dds"
@@ -2657,7 +2651,6 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "libdeflater",
- "lodforge-archive",
  "lodforge-dds",
  "lodforge-esp",
  "lodforge-nif",
@@ -2748,7 +2741,6 @@ dependencies = [
  "lodforge-grass",
  "lodforge-nif",
  "rayon",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2790,7 +2782,6 @@ dependencies = [
 name = "lodforge-treelod"
 version = "0.1.0"
 dependencies = [
- "lodforge-archive",
  "lodforge-esp",
  "lodforge-objlod",
 ]
@@ -2828,11 +2819,9 @@ dependencies = [
  "lodforge-instances",
  "lodforge-nif",
  "png 0.17.16",
- "pollster",
  "rayon",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "wgpu",
  "winit",
 ]

@@ -17,7 +17,6 @@ lodforge-terrain = { path = "crates/terrain" }
 lodforge-objlod = { path = "crates/objlod" }
 lodforge-treelod = { path = "crates/treelod" }
 lodforge-seasons = { path = "crates/seasons" }
-lodforge-core = { path = "crates/core" }
 lodforge-btr = { path = "crates/btr" }
 lodforge-grass = { path = "crates/grass" }
 lodforge-dyndolod = { path = "crates/dyndolod" }

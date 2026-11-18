@@ -10,4 +10,3 @@ lodforge-esp.workspace = true
 lodforge-objlod.workspace = true
 
 [dev-dependencies]
-lodforge-archive.workspace = true

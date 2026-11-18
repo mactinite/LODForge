@@ -45,8 +45,6 @@ mod object_export;
 mod object_lod;
 mod profile;
 mod scan;
-mod season_delta;
-mod terrain_bake;
 mod terrain_lane;
 mod terrain_meshes;
 mod terrain_textures;
@@ -137,22 +135,6 @@ enum Command {
         #[command(flatten)]
         profile: ProfileArgs,
     },
-    /// Predict which terrain LOD tiles each season changes and, given a golden xLODGen seasons run,
-    /// compare the prediction with the tiles that actually differ from the default season.
-    SeasonDelta {
-        #[command(flatten)]
-        profile: ProfileArgs,
-        #[arg(long, default_value = "Tamriel")]
-        world: String,
-        /// Golden run directory (contains output\Textures\Terrain\<World>\).
-        #[arg(long)]
-        golden: Option<PathBuf>,
-        /// Widen each affected cell by this many cells.
-        #[arg(long, default_value_t = 0)]
-        margin: i32,
-    },
-    /// Bake one terrain LOD diffuse tile on the CPU and compare it with a golden xLODGen tile.
-    TerrainBake(terrain_bake::BakeArgs),
     /// GPU-bake all terrain LOD diffuse textures of a worldspace (optionally a season delta).
     TerrainTextures(terrain_textures::Args),
     /// List the profile's virtual Data paths under a prefix, with where each comes from.
@@ -171,24 +153,12 @@ enum Command {
         /// Destination file.
         out: PathBuf,
     },
-    /// Re-encode DDS textures with the GPU BC7 encoder; report throughput and quality.
-    Bc7Bench {
-        dir: PathBuf,
-        #[arg(long, default_value_t = 1024)]
-        size: u32,
-        #[arg(long, default_value_t = 400)]
-        limit: usize,
-        #[arg(long, default_value_t = 64)]
-        batch: usize,
-    },
     /// Terrain LOD meshes (.btr) for a worldspace, straight from the load order.
     TerrainMeshes(terrain_meshes::Args),
     /// DynDOLOD's terrain underside mesh (<World>_Underside.nif), optional golden comparison.
     TerrainUnderside(terrain_underside::Args),
     /// Object LOD meshes (.bto) from a LODGen export file (LODGen port), optional golden diff.
     ObjectLod(object_lod::Args),
-    /// LODGen object export built from the load order (wbLOD.pas port), diffed against xLODGen's.
-    ObjectExport(object_export::Args),
     /// DynDOLOD-compatible object LOD export from the load order and DynDOLOD's configuration.
     DyndolodExport(dyndolod_export::Args),
     /// DynDOLOD-compatible pre-computed occlusion (CELL TVDT), compared with a golden Occlusion.esp.
@@ -207,7 +177,8 @@ enum Command {
     ImpostorRegrade(impostors::RegradeArgs),
     /// Billboard tree LOD (.lst/.btt + atlas) from the load order.
     TreeLod(tree_lod::Args),
-    /// Everything xLODGen does (terrain, objects, trees; all worldspaces and seasons) in one run.
+    /// Terrain, object and tree LOD, textures, plugins and occlusion for all worldspaces and
+    /// seasons in one run.
     Build(build::Args),
     /// Inspect generated LOD as the game arranges it (window, or --screenshot / --check headless).
     View(view::Args),
@@ -227,14 +198,10 @@ enum Command {
     RuntimeTrees(runtime_trees::Args),
     /// Conservative terrain heightfields (`<World>.hf.bin`) for the LODForge Runtime's occlusion culling.
     RuntimeHeightfield(runtime_heightfield::Args),
-    /// Removes from .statics.bin files the instances of references the matching .trees.bin draws.
-    RuntimeStripStatics(strip_statics::Args),
     /// Lists statics instances whose mesh has no pack mesh.
     RuntimeCheck(strip_statics::CheckArgs),
     /// Summary of a `.dyn.bin` (dynamic LOD for LODForge Runtime): items by flag, models without a pack mesh, lists.
     RuntimeDynInfo(dyn_export::InfoArgs),
-    /// Brings an earlier runtime output to format 1.7: .dyn.bin files, static pack with their models, build token, Build.txt.
-    RuntimeDyn(runtime_dyn::Args),
     /// Writes only Occlusion.esp into an output folder (use --exclude-plugin for a plugin without DynDOLOD masters).
     RuntimeOcclusion(runtime_dyn::OcclusionArgs),
     /// Retypes .dyn.bin tree items against the current impostor sets and stamps a new token into every runtime file.
@@ -249,8 +216,6 @@ enum Command {
     RuntimeStaticsPack(tree_pack::StaticsArgs),
     /// Rebuilds only TreeMeshes.bin (and its atlas pages) from the trees files of an output.
     RuntimeTreePack(tree_pack::StaticsArgs),
-    /// Projects what static instancing would take out of .bto per copy threshold (export only).
-    RuntimeStaticsPlan(runtime_trees::PlanArgs),
     /// Generated 3D tree LOD models (Ultra phase 3); `--inspect` prints a tree's bark/foliage split
     TreeModels(tree_models::Args),
     /// LOD models generated from full models where DynDOLOD's rules want LOD and none is installed.
@@ -310,8 +275,6 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Inspect { profile, json } => inspect::run(&profile, json),
         Command::BsaScan { profile } => scan::bsa_scan(&profile.open()?.vfs),
-        Command::SeasonDelta { profile, world, golden, margin } => season_delta::run(&profile, &world, golden.as_deref(), margin),
-        Command::TerrainBake(a) => terrain_bake::run(&a),
         Command::TerrainTextures(a) => terrain_textures::run(&a),
         Command::VfsList { profile, prefix } => {
             let p = profile.open()?;
@@ -327,11 +290,9 @@ fn main() -> Result<()> {
             println!("{path}: {} bytes from {:?} -> {}", bytes.len(), p.vfs.origin(&path), out.display());
             Ok(())
         }
-        Command::Bc7Bench { dir, size, limit, batch } => scan::bc7_bench(&dir, size, limit, batch),
         Command::TerrainMeshes(a) => terrain_meshes::run(&a),
         Command::TerrainUnderside(a) => terrain_underside::run(&a),
         Command::ObjectLod(a) => object_lod::run(&a),
-        Command::ObjectExport(a) => object_export::run(&a),
         Command::TreeLod(a) => tree_lod::run(&a),
         Command::Impostors(a) => impostors::run(&a),
         Command::ImpostorStats(a) => impostors::run_stats(&a),
@@ -345,10 +306,8 @@ fn main() -> Result<()> {
         Command::BtoStats(a) => instances::bto_stats(&a),
         Command::RuntimeTrees(a) => runtime_trees::run(&a),
         Command::RuntimeHeightfield(a) => runtime_heightfield::run(&a),
-        Command::RuntimeStripStatics(a) => strip_statics::run(&a),
         Command::RuntimeCheck(a) => strip_statics::check(&a),
         Command::RuntimeDynInfo(a) => dyn_export::info(&a),
-        Command::RuntimeDyn(a) => runtime_dyn::run(&a),
         Command::RuntimeOcclusion(a) => runtime_dyn::occlusion(&a),
         Command::RuntimeRetype(a) => runtime_dyn::retype(&a),
         Command::RuntimeGrassPack(a) => grass_pack::run(&a),
@@ -356,7 +315,6 @@ fn main() -> Result<()> {
         Command::LodColor(a) => lod_color::run(&a),
         Command::RuntimeStaticsPack(a) => tree_pack::run_statics(&a),
         Command::RuntimeTreePack(a) => tree_pack::run_trees(&a),
-        Command::RuntimeStaticsPlan(a) => runtime_trees::plan(&a),
         Command::TreeModels(a) => tree_models::run(&a),
         Command::LodModels(a) => lod_models::run(&a),
         Command::PluginDump(a) => plugin_dump::run(&a),

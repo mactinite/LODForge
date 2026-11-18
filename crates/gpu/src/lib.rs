@@ -169,11 +169,6 @@ impl Gpu {
         self.adapter_info.device_type == wgpu::DeviceType::Cpu
     }
 
-    /// Chooses the BC7 encoder for later [Gpu::encode_bc7] calls (default [Bc7Quality::High]).
-    pub fn set_bc7_quality(&self, q: Bc7Quality) {
-        self.bc7_quality.store(q.as_u8(), std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub fn bc7_quality(&self) -> Bc7Quality {
         Bc7Quality::from_u8(self.bc7_quality.load(std::sync::atomic::Ordering::Relaxed))
     }

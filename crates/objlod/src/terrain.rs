@@ -26,12 +26,6 @@ impl TerrainHeights {
         Ok(TerrainHeights::new(lodforge_btr::export::terrain_input(lo, world, parent, south_west, max_level)?))
     }
 
-    /// Heights from a terrain dump (`LODGen_Terrain_<World>.bin` / DynDOLOD's `TerrainData`).
-    pub fn from_bin(bytes: &[u8], world: &str, south_west: (i32, i32), max_level: i32, default_land: f32, default_water: Option<f32>) -> Result<TerrainHeights, String> {
-        let cells = lodforge_btr::terrain_bin::read_cells(bytes)?;
-        Ok(TerrainHeights::new(lodforge_btr::terrain_bin::terrain_input(&cells, world, south_west, max_level, default_land, default_water)))
-    }
-
     pub fn cells(&self) -> usize {
         self.input.cells.len()
     }

@@ -1,4 +1,4 @@
-//! The DynDOLOD part of `lodforge build --mode dyndolod`, chained without DynDOLOD's own files:
+//! The DynDOLOD part of `lodforge build`, chained without DynDOLOD's own files:
 //!
 //! 1. per worldspace, the DynDOLOD object LOD export from the load order (`lodforge-dyndolod`)
 //!    for every season, with the side files LODGen reads (terrain `.bin`, atlas map,
@@ -15,9 +15,7 @@
 // The atlas planning (glow page included) lives in `object_atlas_plan` (object LOD stage
 // B2.4), the FlatTextures list, the grass header and the complex-grass lines below (B2.5 /
 // B2.6); `grass_lod1_nif` (`--grass go`, the Grass Optimizations far-LOD meshes) was rewritten
-// from Community Shaders' loader requirements (object-lod-spec 11.9). The allow below still
-// covers test-only helpers and atlas imports kept for the B2 stages.
-#![allow(dead_code, unused_imports)]
+// from Community Shaders' loader requirements (object-lod-spec 11.9).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,7 +30,7 @@ use lodforge_dyndolod::ini::Ini;
 use lodforge_dyndolod::lodmodels::{LodIndex, ParallaxGenDiff};
 use lodforge_dyndolod::rules::{self, Rule, RuleSource};
 use lodforge_esp::Worldspace;
-use lodforge_objlod::atlas_build::{AtlasLayout, layout, sorted_unique, texture_asset_name};
+use lodforge_objlod::atlas_build::{AtlasLayout, layout};
 use lodforge_seasons::{Season, SeasonSwaps};
 
 use crate::profile::Profile;
@@ -58,6 +56,7 @@ impl LevelCoverage {
 
 /// DynDOLOD options of `lodforge build`.
 #[derive(clap::Args, Clone, Debug)]
+#[group(id = "dyndolod_opts")]
 pub struct Opts {
     /// DynDOLOD rule preset: Low, Medium or High.
     #[arg(long, default_value = "Medium")]
@@ -120,20 +119,19 @@ pub struct Opts {
     /// `.lodforge-work-<pid>` next to the output, removed after the build.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
-    /// Grass LOD: off, DynDOLOD-style grass in the LOD4 object LOD (`bto`, needs `--mode
-    /// dyndolod`), or LOD meshes for Community Shaders' Grass Optimizations (`go`). `bto` reads
+    /// Grass LOD: off, DynDOLOD-style grass in the LOD4 object LOD (`bto`), or LOD meshes for Community Shaders' Grass Optimizations (`go`). `bto` reads
     /// NGIO's grass cache only: cells without a cache file get no grass (it no longer generates
     /// placements from the load order); `go` needs no cache.
     #[arg(long, value_enum, default_value = "off")]
     pub grass: GrassMode,
-    /// Tree LOD (`--mode dyndolod`): `classic` (default; billboards in the game's tree LOD,
+    /// Tree LOD: `classic` (default; billboards in the game's tree LOD,
     /// at most 256 tree types per list) or `ultra` (DynDOLOD's Ultra tree LOD: every tree in
     /// object LOD, with the rule's LOD models where the preset asks for them (High: a 3D model
     /// at LOD4) and its billboard otherwise, and empty tree LOD lists).
     #[arg(long, value_enum, default_value = "classic")]
     pub tree_lod: TreeLodMode,
     /// With `--tree-lod ultra`: generate 3D tree LOD models for the trees big enough for them
-    /// (TreeLODGen's method, docs/ultra-tree-models-plan.md) into the output before the export, so
+    /// (TreeLODGen's method, docs/tree-models.md) into the output before the export, so
     /// those trees get a 3D model where the preset asks for one. `generate` skips trees with an
     /// installed CRC-named 3D model, `all` replaces those too; `off` (default) uses installed
     /// models only.
@@ -859,6 +857,7 @@ pub fn has_transparency(rgba: &[u8]) -> bool {
 }
 
 /// The diffuse of an atlas map key (`diffuse[,normal[,glow]][=alpha]`), lower case.
+#[cfg(test)]
 pub fn atlas_key_diffuse(key: &str) -> String {
     key.split(['=', ',']).next().unwrap_or("").to_lowercase()
 }
@@ -1049,14 +1048,6 @@ pub fn write_plugins(p: &Profile, c: &Config, opts: &Opts, worlds: &[PluginWorld
     Ok((inputs.iter().map(|w| w.dynamic.len()).sum(), inputs.len(), linear.into_inner().unwrap()))
 }
 
-/// Occlusion stage: Occlusion.esp in `out` for every main worldspace in `worlds` (with their
-/// child worldspaces), computed against the load order plus the build's DynDOLOD.esm/.esp.
-/// The VFS must already see the build's terrain LOD; object height maps are read from `out`.
-/// Returns (worldspace, cells) per worldspace with occlusion data.
-pub fn write_occlusion(p: &Profile, c: &Config, worlds: &[String], out: &Path) -> Result<Vec<(String, usize)>> {
-    write_occlusion_with(p, c, worlds, out, &mut HashMap::new())
-}
-
 /// The occlusion settings of a main worldspace: params, and `mode(world, is_main)`.
 pub struct OcclusionInputs {
     pub params: lodforge_dyndolod::occlusion::Params,
@@ -1241,7 +1232,7 @@ pub enum TreeLodMode {
 pub enum GrassMode {
     /// No grass LOD.
     Off,
-    /// DynDOLOD's classic grass LOD: grass billboards in the LOD4 object LOD (`--mode dyndolod`).
+    /// DynDOLOD's classic grass LOD: grass billboards in the LOD4 object LOD.
     Bto,
     /// Grass LOD meshes for Community Shaders' Grass Optimizations (`meshes\LOD\Grass\*_lod1.nif`,
     /// crossed planes per grass model). Needs no grass placements, so no cache.

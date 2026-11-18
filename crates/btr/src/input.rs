@@ -51,19 +51,6 @@ impl TerrainCell {
     pub fn min_height(&self) -> f32 {
         self.heights.iter().copied().fold(f32::INFINITY, f32::min)
     }
-
-    /// Whether the quadrant containing grid point (col, row) of this cell is hidden. Points on a
-    /// quadrant boundary belong to the quadrant with the lower index on that axis.
-    pub fn quadrant_bit(col: usize, row: usize) -> u8 {
-        let east = col >= 16;
-        let north = row >= 16;
-        match (north, east) {
-            (false, false) => 1,
-            (false, true) => 2,
-            (true, false) => 4,
-            (true, true) => 8,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,6 +1,6 @@
 # DynDOLOD / TexGen golden-run harness
 
-These scripts drove the P6 golden runs (docs/baseline.md, "P6"). Both tools are Delphi VCL apps:
+These scripts drive reference runs of DynDOLOD and TexGen for golden comparisons. Both tools are Delphi VCL apps:
 UIA is only used to find windows, and everything else goes through Win32 messages. Close MO2 and
 the tools before starting, and never run this while the user has them open.
 

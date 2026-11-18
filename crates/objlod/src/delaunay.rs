@@ -339,14 +339,6 @@ fn add_fan(points: &[Pt], hull: &mut Hull, triads: &mut Vec<Triad>, pi: i32, hid
     }
 }
 
-/// `Triangulator.ConvexHull(points, rejectDuplicatePoints)`: the hull vertices.
-pub fn convex_hull(points: &[Pt], reject_duplicates: bool) -> Result<Vec<Pt>, TooFewPoints> {
-    let mut hull = Hull(Vec::new());
-    let mut triads = Vec::new();
-    analyse(points, &mut hull, &mut triads, reject_duplicates, true)?;
-    Ok(hull.0.iter().map(|h| Pt { x: h.x, y: h.y }).collect())
-}
-
 /// `Triangulator.Triangulation(points, rejectDuplicatePoints)`.
 pub fn triangulation(points: &[Pt], reject_duplicates: bool) -> Result<Vec<Triad>, TooFewPoints> {
     let mut triads = Vec::new();

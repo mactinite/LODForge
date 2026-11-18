@@ -1,5 +1,5 @@
 //! DynDOLOD-style object LOD atlas planning (docs/re/object-lod-spec.md 1.2 and 7.2) for
-//! `lodforge build --mode dyndolod`: which texture keys of the LOD models the export names go
+//! `lodforge build`: which texture keys of the LOD models the export names go
 //! on which page, and where.
 //!
 //! Observed in the golden `LODGen_SSE_ObjectAtlasMap_Tamriel.txt` (700 rows): keys are
