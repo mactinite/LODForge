@@ -1,46 +1,50 @@
 # Documentation map
 
-Read one focused page first. The large evidence logs are references, not onboarding.
+This folder documents the code that is here and how to use it. Plans, dated measurements and
+research notes are kept outside the repository.
 
 | Task | Start here |
 |---|---|
 | Build or use LODForge | [Project README](../README.md) |
+| Look up a build option, a config file or a report | [Build options](build-options.md) |
+| Avoid a known trap | [Gotchas](gotchas.md) |
+| See what is unsupported or uncertified | [Known limitations](limitations.md) |
+| Look at generated LOD without the game | [LOD viewer](viewer.md) |
+| Compare output or test in game | [Validation](validation.md) |
 | Find the code that owns a feature | [Architecture](architecture.md) |
 | Run tests, formatting, linting or API documentation | [Development](development.md) |
 | Build release archives or prepare a draft | [Builds and releases](releases.md) |
-| Review license selection and distribution blockers | [Licensing and provenance](licensing.md) |
-| Replace provenance-blocked code | [Re-implementation plan](reimplementation-plan.md) |
-| Compare output or test in game | [Validation](validation.md) |
-| Look at generated LOD without the game | [LOD viewer](viewer.md) |
-| Decide what still blocks compatibility | [Parity assessment](parity.md) |
-| Read the latest measured result | [Full-output qualification](validation-full-20261019.md) |
-| Implement the remaining fixes | [Gap-closure plan](gap-closure-plan.md) |
-| Choose the next task | [Roadmap](../PLAN.md) |
+| Check license and provenance | [Licensing and provenance](licensing.md) |
+| Drive reference-tool runs | [Golden automation](../scripts/golden/dyndolod/README.md) |
 
-## Evidence library (read on demand)
+## Reference
+
+Specifications the code was written against. Code comments cite them by path and section.
 
 | Subject | Reference |
 |---|---|
-| Measurements, profiles, tolerances and historical runs | [Baseline log](baseline.md) |
-| DynDOLOD rules, exports, plugins and DLL formats | [Behavioral specification](re/dyndolod-spec.md) |
-| LODGen 3.0.36 vs 3.1.8 | [Port delta](re/lodgen-318-delta.md) |
-| Terrain texture algorithm | [xLODGen texture specification](re/xlodgen-terrain-textures.md) |
-| Grass placements / cache format | [Grass cache specification](re/grass-cache-spec.md) |
-| Generating missing object models | [Own LOD resources](re/own-lod-resources.md) |
-| Original broad gap inventory | [2026-10-19 audit](re/gap-audit-20261019.md) |
-| Per-key settings inventory | [INI-key audit](re/gap-audit-20261019-ini-keys.md) |
-| How the project reached this point | [Archived phase plan](history/roadmap-20261018.md) |
-| Driving local reference-tool runs | [Golden automation](../scripts/golden/dyndolod/README.md) |
+| Terrain LOD meshes (`.btr`) | [Terrain LOD specification](re/terrain-lod-spec.md) |
+| Object LOD (`.bto`), exports, atlas | [Object LOD specification](re/object-lod-spec.md) |
+| DynDOLOD rules, exports, plugins and DLL data | [DynDOLOD behavioral specification](re/dyndolod-spec.md) |
+| Occlusion (`Occlusion.esp`, TVDT) | [Occlusion specification](re/occlusion-spec.md) |
+| Terrain texture algorithm | [xLODGen terrain textures](re/xlodgen-terrain-textures.md) |
+| NGIO grass cache format | [`.cgid` format](re/grass-cache-spec.md) |
+| Generated LOD models (`--lod-models`) | [Generated LOD models](re/own-lod-resources.md) |
+| Generated tree models (`--tree-models`) | [Tree models](tree-models.md), [TreeLODGen algorithm](re/treelodgen-algorithm.md) |
+| LODForge Runtime files | [Instance formats](runtime/instance-formats.md), [impostors](runtime/impostors.md) |
 
-## Documentation ownership
+The terrain, object LOD and occlusion specifications end with process records that are part of
+the [provenance record](licensing.md). Those records name documents by the path they had at the
+time (`docs/baseline.md`, `docs/parity.md`, the gap audits, the dated validation runs and
+`docs/reimplementation-plan.md`); these now live with the development notes.
 
-- **README:** supported entry points, requirements and warnings; no benchmark diary.
+## Keeping it current
+
+- **README:** entry points, requirements and warnings.
 - **Architecture:** what exists, not a proposed design.
-- **Parity:** current gaps, evidence strength and completion tests.
-- **Plan:** priorities only. Do not repeat the entire gap inventory.
-- **Baselines / RE:** dated evidence. Old numbers stay attributed to their run.
-- **Rustdoc:** public APIs and non-obvious format/algorithm contracts near the code.
+- **Build options:** every option, input file, event and report.
+- **Gotchas / limitations:** short, current, without dated run logs.
+- **Rustdoc:** public APIs and format or algorithm contracts near the code.
 
-When behavior changes, update its focused page and link the measurement or test.
-Do not require developers to read the full baseline/specification to find current
-status. Historical "open" or "done" labels do not override the current assessment.
+When behavior changes, update its page in the same change. Plans, status and measurements do
+not belong here.

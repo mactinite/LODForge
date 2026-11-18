@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use lodforge_nif::{Block, EffectShader, LightingShader, Nif, TriShape};
 
-use crate::transform::{Mat3, Xform, cross, dot, normalize, sub};
+use crate::transform::{Xform, cross, dot, normalize, sub};
 
 /// The shader of a source shape, as the file has it.
 #[derive(Debug, Clone, PartialEq)]
@@ -247,11 +247,6 @@ pub fn tangents_from_uv(pos: &[[f32; 3]], uv: &[[f32; 2]], nrm: &[[f32; 3]], tri
         bit[i] = b;
     }
     (tan, bit)
-}
-
-/// Applies the rotation part of a transform to a direction and renormalizes.
-pub fn rotate_dir(rot: &Mat3, v: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
-    normalize(rot.apply(v), fallback)
 }
 
 #[cfg(test)]

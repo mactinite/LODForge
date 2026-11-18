@@ -1,6 +1,6 @@
 # Object LOD (`.bto`): scrubbed specification
 
-Written 2026-10-19 as stage B0.2 of [the reimplementation plan](../reimplementation-plan.md), so
+Written 2026-10-19 as stage B0.2 of [the re-implementation plan](../licensing.md#clean-room-method), so
 that fresh sessions can rewrite `crates/objlod` and the LODGen-mirroring pieces of `apps/cli`
 (stage B2) **without ever seeing the LODGen-derived code or the LODGen decompiles**. Everything
 here comes from sources we may use: MPL-2.0 xEdit code we own, dyndolod.info documentation, the

@@ -7,7 +7,6 @@ description = "Object LOD meshes (.bto): export and atlas-map parsing, reference
 
 [dependencies]
 rayon.workspace = true
-thiserror.workspace = true
 lodforge-nif.workspace = true
 lodforge-btr.workspace = true
 lodforge-grass.workspace = true

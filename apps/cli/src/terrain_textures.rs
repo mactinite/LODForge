@@ -47,7 +47,7 @@ pub struct Args {
     #[arg(long)]
     pub golden: Option<PathBuf>,
     /// Only build the LOD32 tile whose south-west cell is x,y (debugging).
-    #[arg(long, value_parser = crate::terrain_bake::parse_xy, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_xy, allow_hyphen_values = true)]
     pub top: Option<(i32, i32)>,
     /// Rendered cells per GPU batch.
     #[arg(long, default_value_t = 96)]
@@ -650,6 +650,12 @@ pub fn run_in(ctx: &TerrainContext<'_>, a: &Args) -> Result<()> {
     }
     println!("total {} ms (output: {})", total.elapsed().as_millis(), out_dir.display());
     Ok(())
+}
+
+/// Parses `x,y` cell coordinates.
+fn parse_xy(s: &str) -> std::result::Result<(i32, i32), String> {
+    let (x, y) = s.split_once(',').ok_or("expected x,y")?;
+    Ok((x.trim().parse().map_err(|e| format!("{e}"))?, y.trim().parse().map_err(|e| format!("{e}"))?))
 }
 
 #[cfg(test)]

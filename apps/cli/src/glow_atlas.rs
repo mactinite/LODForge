@@ -14,14 +14,6 @@ use lodforge_objlod::atlas_build::{AtlasEntry, AtlasLayout, AtlasPage};
 /// Largest glow tile side.
 pub const GLOW_TILE: u32 = 256;
 
-/// Whether LODGen treats `model` as a passthru model (`PassThruMeshMask=glow_lod` /
-/// `passthru_lod` in DynDOLOD's export header).
-#[allow(dead_code)]
-pub fn is_passthru_model(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    m.contains("glow_lod") || m.contains("passthru_lod")
-}
-
 /// Glow page layout for `keys` (sorted, unique `diffuse,normal,glow`); `dims` gives a texture's
 /// size. Keys whose diffuse is missing are dropped. Tiles are the diffuse halved until both
 /// sides fit [`GLOW_TILE`], laid out row by row on a page whose width is the power of two

@@ -142,7 +142,7 @@ pub fn build(p: &Profile, world: &str, seasons: &[String], cache: Option<&Path>,
     let files = src.list(world)?;
     if files.is_empty() {
         println!(
-            "  far grass: no NGIO grass cache for {world} in {}; no .lfg written (docs/runtime/grass-lfg-sizes.md says how to precache)",
+            "  far grass: no NGIO grass cache for {world} in {}; no .lfg written (docs/gotchas.md says how to get one)",
             cache.map(|d| d.display().to_string()).unwrap_or_else(|| "Grass\\ of the load order".into())
         );
         return Ok(Vec::new());

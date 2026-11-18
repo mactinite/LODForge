@@ -1,21 +1,13 @@
 # Builds and releases
 
-## Current status
+A release is an experimental, unsigned **Windows x64 portable ZIP** containing the CLI and the
+UI, published as a GitHub prerelease. There is no installer, auto-update service, code signing,
+bundled WebView2 installer or bundled game/mod/runtime assets. Users must install WebView2 for
+the UI and the Microsoft Visual C++ v14 x64 Redistributable for the CLI, which imports
+`VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`; it is not a self-contained static-CRT build.
 
-LODForge is GPL-3.0-only; the code-level provenance work is complete and the
-license documents (`LICENSE`, `THIRD-PARTY-NOTICES.txt`, `licenses/`) are in
-place (2026-10-20). Public distribution still waits on the maintainer items of
-the [clearance checklist](licensing.md#clearance-checklist) and must start
-from a clean commit (see "Publication from a clean commit" below). Do not
-switch repository visibility or publish source/binaries merely because CI
-passes. This setup creates drafts only; it never publishes a release automatically.
-
-The first release target is an experimental, unsigned **Windows x64 portable ZIP**
-containing both the CLI and UI. There is no installer, auto-update service, code
-signing, bundled WebView2 installer or bundled game/mod/runtime assets.
-Users must install WebView2 for the UI and the Microsoft Visual C++ v14 x64
-Redistributable for the CLI. The latter imports `VCRUNTIME140.dll` and
-`VCRUNTIME140_1.dll`; it is not a self-contained static-CRT build.
+The workflow creates drafts only; it never publishes a release automatically. Do not publish
+merely because CI passes.
 
 ## Continuous integration
 
@@ -30,11 +22,11 @@ resolved. Clippy warnings remain visible but are not promoted to errors.
 Missing local golden fixtures / GPU adapters can cause existing tests to skip:
 CI is not certification of in-game behavior, GPU support or runtime parity.
 
-The UI production build enables `lodforge-ui/custom-protocol`. Its HTML/CSS/JS
-is embedded from the checked-in frontend; Node/npm and a development server are
+The UI production build enables `lodforge-ui/custom-protocol`. Its frontend
+is embedded from the checked-in bundle (`apps/ui/dist`); Node/npm and a development server are
 not release dependencies.
 
-## Local private build and packaging
+## Local build and packaging
 
 Run from the repository root in PowerShell:
 
@@ -88,7 +80,6 @@ links into source or developer scripts require the matching source checkout.
    automatically vendored; resolve any obligation to supply them before approval.
    Artifacts are retained for seven days; draft attachments persist.
 8. Inspect all three assets, notices, source, checksum values and release notes.
-   Complete the repository/history review before making the repository public.
    Publish the draft manually only after both legal and runtime qualification.
    Clear the approval variable afterward.
 

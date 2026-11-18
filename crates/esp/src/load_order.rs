@@ -79,11 +79,6 @@ impl LoadedPlugin {
         let slot = file_index.min(self.master_map.len() - 1);
         self.master_map[slot].map(|m| m.global(local))
     }
-
-    /// True when a stored form ID refers to a record this plugin itself introduces.
-    pub fn is_own(&self, local: u32) -> bool {
-        (local >> 24) as usize >= self.master_map.len() - 1
-    }
 }
 
 pub struct LoadOrder {

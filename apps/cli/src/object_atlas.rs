@@ -15,7 +15,6 @@ use lodforge_archive::Vfs;
 use lodforge_dds::mips::{Edge, MipKind};
 use lodforge_gpu::{Gpu, RgbaImage};
 use lodforge_objlod::atlas_build::AtlasLayout;
-use lodforge_terrain::image::{Image, compare};
 
 use crate::object_export::normal_for;
 
@@ -46,9 +45,6 @@ pub struct Page {
     /// PBR pages ([`is_pbr_page`]): the RMAOS map (`_rmaos.dds`), each tile's
     /// `<diffuse>_rmaos.dds` ([`DEFAULT_RMAOS`] where a tile has none).
     pub rmaos: Option<Vec<u8>>,
-    pub top: (Vec<u8>, Vec<u8>),
-    pub width: u32,
-    pub height: u32,
 }
 
 fn blit(dst: &mut [u8], dw: u32, src: &[u8], sw: u32, sh: u32, x: u32, y: u32) {
@@ -113,11 +109,6 @@ pub struct Formats {
     pub mips: u32,
     /// DynDOLOD's `ObjectLODCreateAverageColor` and alpha-coverage mips on alpha pages.
     pub alpha_fill: bool,
-}
-
-impl Formats {
-    /// xLODGen-style pages: everything BC7 with the full mip chain.
-    pub const BC7_FULL: Formats = Formats { diffuse: Encoding::Bc7, alpha_diffuse: Encoding::Bc7, normal: Encoding::Bc7, mips: u32::MAX, alpha_fill: false };
 }
 
 fn encode_as(gpu: &Gpu, enc: Encoding, levels: &[(u32, u32, Vec<u8>)]) -> Result<Vec<u8>> {
@@ -668,7 +659,7 @@ pub fn render(vfs: &Vfs, layout: &AtlasLayout, gpu: &Gpu, formats: &Formats) -> 
             Some(r) => Some(encode(gpu, r)?),
             None => None,
         };
-        pages.push(Page { name: p.name.clone(), diffuse: d_dds, normal: n_dds, glow: g_dds, rmaos: r_dds, top: (d_levels.into_iter().next().unwrap().2, n_levels.into_iter().next().unwrap().2), width: p.width, height: p.height });
+        pages.push(Page { name: p.name.clone(), diffuse: d_dds, normal: n_dds, glow: g_dds, rmaos: r_dds });
     }
     Ok(pages)
 }
@@ -726,27 +717,6 @@ pub fn remove_stale_season_btos(out: &Path, world: &str, built: &[String]) -> Re
         }
     }
     Ok(removed)
-}
-
-/// Top-mip PSNR of our pages against xLODGen's (`golden` = its output Data folder).
-pub fn compare_golden(golden: &Path, pages: &[Page]) {
-    for p in pages {
-        for (name, ours) in [(p.name.clone(), &p.top.0), (normal_name(&p.name), &p.top.1)] {
-            let path = find_ci(golden, &name);
-            let Some(bytes) = path.as_ref().and_then(|p| std::fs::read(p).ok()) else {
-                println!("    {name}: no golden file");
-                continue;
-            };
-            let Ok(info) = lodforge_dds::parse(&bytes) else { continue };
-            let Ok(g) = lodforge_dds::decode(&bytes, &info, 0) else { continue };
-            if (g.width, g.height) != (p.width, p.height) {
-                println!("    {name}: golden {}x{} vs ours {}x{}", g.width, g.height, p.width, p.height);
-                continue;
-            }
-            let m = compare(&Image::from_rgba8(g.width, g.height, &g.rgba), &Image::from_rgba8(p.width, p.height, ours));
-            println!("    {name}: {:?} {}x{}, PSNR {:.2} dB, MAE {:.2}", info.format, g.width, g.height, m.psnr, m.mae);
-        }
-    }
 }
 
 /// Case-insensitive path lookup under `root` (golden folders use the game's mixed case).

@@ -25,6 +25,7 @@ use crate::texgen_billboards::Candidate;
 
 /// Bake and layout options shared by the command and the build flag.
 #[derive(clap::Args, Clone, Debug)]
+#[group(id = "impostor_opts")]
 pub struct Opts {
     /// Frames per side (12..16 recommended); 0 = 16 for frames up to 64 px, else 12.
     #[arg(long = "impostor-grid", default_value_t = 0)]
@@ -322,7 +323,7 @@ pub fn bake_world(p: &Profile, gpu: &lodforge_gpu::Gpu, renderer: &Renderer, dyn
     // Season swaps of tree bases.
     let mut swaps: Vec<HashMap<u32, u32>> = Vec::new();
     if !seasons.is_empty() {
-        let inputs = crate::object_export::load_inputs(p, world)?;
+        let inputs = crate::object_export::load_inputs(p)?;
         for s in seasons {
             let season = crate::object_export::season_from_code(s).with_context(|| format!("unknown season {s}"))?;
             swaps.push(crate::object_export::base_swaps(&inputs, season));

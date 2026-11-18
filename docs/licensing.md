@@ -9,7 +9,7 @@ specifications, partly ported from AnvilLOD (GPL-3.0-only):
 
 | Replacement | Merged into main | Record |
 |---|---|---|
-| Billboard shader (TexGen GLSL transcription) | `f79eb6e` | docs/baseline.md "Billboard shader re-derivation" |
+| Billboard shader (TexGen GLSL transcription) | `f79eb6e` | development notes, baseline log "Billboard shader re-derivation" |
 | Grass generator removed (NGIO GPL + engine disassembly; product decision) | `5a9dc95` | docs/re/grass-cache-spec.md header |
 | Terrain LOD mesher, BTR assembly, NIF serializer (stage B1) | `b96c5b9` | [terrain-lod-spec.md](re/terrain-lod-spec.md) sections 5.5, 6, 8 |
 | Occlusion / TVDT (Target 1) | `7cac5ed`, record `3036063` | [occlusion-spec.md](re/occlusion-spec.md) sections 11, 12 |
@@ -118,9 +118,80 @@ Reviewed 2026-10-19, statuses updated 2026-10-20.
 | DynDOLOD DLL data formats ([dynplugins.rs](../crates/dyndolod/src/dynplugins.rs), `[pdb]`/`[dll-string]`) | The DLL consumes the data LODForge writes. | **Interoperability; kept.** |
 | Game engine grass research ([grass-cache-spec.md](re/grass-cache-spec.md)) | Ghidra on SkyrimSE.exe for grass placement; also informed the `.cgid` format. | Format sections kept; the engine/NGIO placement sections (addresses, pseudo-code) were moved out of the repository on 2026-10-20 together with the generator they described. |
 | [AnvilLOD](https://github.com/CageTV/AnvilLOD) | GPL-3.0-only, "Copyright (c) 2026 CageTV"; clone `D:\Modlists\ref\AnvilLOD` at `606eece` (v0.2.60). Its own provenance statements are output-observation based (TVDT "decoded from xLODGen's output", occlusion "fitted to … xLODGen's own output", BTO layout "verified vertex-for-vertex against existing output"); zero LODGen signature names. | **Derivation source.** Eleven files carry CageTV's copyright, the source file and commit, and modification marks (GPL §5a): `crates/dyndolod/src/occlusion/{grid,tvdt,visibility}.rs`, `crates/objlod/src/{build,grid,hidden,lib,material,mesh,refs,transform}.rs`. Listed in THIRD-PARTY-NOTICES part 1.1. |
-| [TreeLODGen](https://github.com/Cl3mus33/TreeLODGen) | GPL-3.0, "Copyright (C) 2026 Clemus"; clone `D:\Modlists\ref\TreeLODGen` at `dc4cc8a` (v1.0.6), read as data (not built or run). | **Derivation source** for generated 3D tree LOD models (Ultra phase 3, docs/ultra-tree-models-plan.md). Algorithm spec: docs/re/treelodgen-algorithm.md. Ported files carry Clemus' copyright, the source files and commit, and modification marks: `crates/treemodel/src/*.rs`. Listed in THIRD-PARTY-NOTICES part 1.7. |
+| [TreeLODGen](https://github.com/Cl3mus33/TreeLODGen) | GPL-3.0, "Copyright (C) 2026 Clemus"; clone `D:\Modlists\ref\TreeLODGen` at `dc4cc8a` (v1.0.6), read as data (not built or run). | **Derivation source** for generated 3D tree LOD models (`--tree-models`, docs/tree-models.md). Algorithm spec: docs/re/treelodgen-algorithm.md. Ported files carry Clemus' copyright, the source files and commit, and modification marks: `crates/treemodel/src/*.rs`. Listed in THIRD-PARTY-NOTICES part 1.7. |
 | Runtime scripts, resource packs, configuration, game/mod assets | Read from the user's installation. "Assets Licensed under creative commons : CC BY-NC-SA". | Never bundled. The repository holds no game/mod assets, decompiles, local output or private profiles (checked at each release per [releases.md](releases.md)). |
-| Cargo dependencies and native components | `cargo metadata --filter-platform x86_64-pc-windows-msvc`: 507 third-party crates, all MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, MPL-2.0 or CC0 (one crate Apache-2.0 WITH LLVM-exception); no GPL-incompatible dependency. The UI frontend (`apps/ui/dist`) is hand-written; WebView2 is a system runtime, not distributed. | **Inventoried.** `scripts/third_party_notices.py` generates part 2 of THIRD-PARTY-NOTICES.txt and fails when a license text is missing from `licenses/`; `--check` in CI keeps it current. |
+| Cargo dependencies and native components | `cargo metadata --filter-platform x86_64-pc-windows-msvc`: 507 third-party crates, all MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, MPL-2.0 or CC0 (one crate Apache-2.0 WITH LLVM-exception); no GPL-incompatible dependency. The UI frontend source is `apps/ui/web` (React, Mantine, recharts, Tabler icons), bundled into `apps/ui/dist`; its npm dependencies are **not yet inventoried** in THIRD-PARTY-NOTICES.txt (the script covers Cargo only). WebView2 is a system runtime, not distributed. | **Inventoried.** `scripts/third_party_notices.py` generates part 2 of THIRD-PARTY-NOTICES.txt and fails when a license text is missing from `licenses/`; `--check` in CI keeps it current. |
+
+## Clean-room method
+
+The replaced modules were rewritten in stages (B1 terrain, B2 object LOD, Target 1 occlusion, Target 3
+billboards) under the rules below. The stage-by-stage plan is kept with the development notes; the
+process records are in the three specifications.
+
+1. **Spec scrub (analyst).** The analyst may read everything, including the
+   tainted modules and decompiles, and writes a spec that conveys *function*,
+   not expression: file formats (with the legitimate source of each format:
+   golden files, MPL xEdit writers, public docs), observable rules and
+   constants, configuration keys, acceptance metrics. Decompile-derived detail
+   goes verbatim to `D:\Modlists\ref\quarantine\` (outside the repository) with
+   a pointer left behind. Rule of thumb: if a sentence needs the decompile to
+   be written, it does not belong in the spec.
+2. **Fresh implementer context.** A separate session that has never had the
+   tainted modules, decompiles, quarantined text or the research documents
+   listed under "Research material and the quarantine" below in context. Its brief lists the allowed inputs and the files
+   it must delete unread as its first action. It may read AnvilLOD and port
+   from it with GPL attribution.
+3. **Output-based validation only.** Golden files, the existing comparison
+   tooling (`e2e-compare`, the tolerant BTO/BTR comparisons, the texgen image
+   comparisons, `Test-OcclusionParity.ps1`) and in-game checks on the
+   LODForge-E2E / Ref-Test profiles. Never iterate against the old code or the
+   decompiles.
+4. **Record the process.** Each stage lands as commits that delete the old
+   module, add the new one, and append a "Process record" (date, inputs read,
+   files never opened, AnvilLOD files ported) to the stage's spec.
+5. **Parity policy.** Byte-identical parity with LODGen/DynDOLOD is no longer
+   a goal (it cannot be reached without the decompile). Each stage records the
+   tolerant-comparison numbers before and after; acceptance is "valid files,
+   documented tolerance, no in-game visual defects at the agreed vantage
+   points", not a fixed percentage.
+6. **Architecture stays LODForge's.** Export + atlas map from the xEdit ports →
+   mesh builders → NIF writer; seasons as deltas; GPU atlas/texture work.
+   AnvilLOD is a reference for algorithms and formats, not a pipeline to adopt.
+
+**Caveat:** a solo-maintainer clean room is weaker than a two-team one. This
+process improves defensibility and documents good faith; it is not a guarantee,
+and it is not legal advice.
+
+### What AnvilLOD provides (GPL-3.0-only, `D:\Modlists\ref\AnvilLOD` @ 606eece)
+
+Its own provenance statements are output-observation based (see licensing).
+Useful files for the rewrite, by stage:
+
+- **B1 terrain:** none for the mesher (AnvilLOD leaves terrain LOD to xLODGen).
+  Underside: `AnvilLOD.Meshes\UndersideBuilder.cs`, `AnvilLOD.Core\World\UndersideMesher.cs`,
+  `AnvilLOD.Plugins\UndersideStage.cs` / `UndersidePluginWriter.cs`.
+- **B2 object LOD:** `AnvilLOD.Meshes\LodGenerator.cs` (block generation),
+  `BtoBuilder.cs` (BTO layout "verified vertex-for-vertex against existing output",
+  per-cell `BSSubIndexTriShape` segments, 65,535 splits), `MeshCleaner.cs`,
+  `Transforms.cs` (REFR rotation convention), `LodInset.cs`, `ShaderGuard.cs`,
+  `Nif\NifGeometryReader.cs` / `NifWriter.cs`; `AnvilLOD.Core\World\QuadBucketer.cs`,
+  `LodGrid.cs`, `LodSettings.cs`, `TerrainHeights.cs` (hidden-face test against
+  LAND heights, conservative); `AnvilLOD.Core\Lod\LodMeshResolver.cs` /
+  `LodMeshIndex.cs` (MNAM + `_lod_N` naming + folder precedence), `LodRules.cs` /
+  `RuleEntry.cs`, `ChildWorldCopies.cs`, `SeasonSwaps.cs`; `AnvilLOD.Plugins\ScanPipeline.cs`
+  (stage order), `SeasonalLod.cs`, `LargeReferenceStage.cs`, `GrassLodSource.cs` +
+  `AnvilLOD.Meshes\GrassPatchBuilder.cs` (a *different* grass-LOD model: one tuft
+  per ground bin), `TreeLodGenerator.cs` + `AnvilLOD.Textures\TreeAtlasBuilder.cs`.
+  Not provided: object texture atlas and UV remap ("planned"), FlatTextures
+  billboards as DynDOLOD does them, DynDOLOD's HD/passthru/effect-shader special
+  cases, any .NET-exact arithmetic.
+- **Target 1 occlusion:** `AnvilLOD.Core\Occlusion\TvdtData.cs`, `OcclusionGrid.cs`,
+  `OcclusionCalculator.cs` (429 lines).
+- **Target 3 billboards:** the software rasterizer in `AnvilLOD.Meshes\Authoring`
+  and `AnvilLOD.Plugins\Authoring` (optional reference).
+
+Every port keeps "Copyright (c) 2026 CageTV", names the source file and commit,
+marks modifications, and is listed in THIRD-PARTY-NOTICES.
 
 ## Research material and the quarantine
 
@@ -132,6 +203,9 @@ disassembly-derived text was moved out of the repository to
 
 - `dyndolod-occlusion-decomp.md`, `object-lod-lodgen-{delta,notes}.md`,
   `terrain-lod-lodgen-notes.md` (the B0 scrubs, 2026-10-19/20);
+Documents named below by their former `docs/` paths (`baseline.md`, `parity.md`, the gap audit)
+now live in the private development notes.
+
 - `baseline-lodgen-notes.md`, `gap-audit-lodgen-notes.md`,
   `dyndolod-spec-lodgen-notes.md`, `xlodgen-terrain-textures-ghidra-notes.md`,
   `grass-cache-engine-notes.md` (the 2026-10-20 doc pass: baseline.md port

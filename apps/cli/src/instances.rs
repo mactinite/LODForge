@@ -33,10 +33,11 @@ pub enum RuntimeMode {
 
 /// The runtime options of `lodforge build`.
 #[derive(clap::Args, Clone, Debug, Default)]
+#[group(id = "runtime_opts")]
 pub struct Opts {
     /// `lodforge`: write `SKSE\Plugins\LODForgeRuntime\*` instance files for the LODForge Runtime
     /// plugin, leave the trees it draws out of `.bto` / `.btt` and draw far grass from `.lfg`
-    /// (needs `--mode dyndolod`; trees are kept in object LOD as with `--tree-lod ultra`).
+    /// (trees are kept in object LOD as with `--tree-lod ultra`).
     #[arg(long, value_enum, default_value = "none")]
     pub runtime: RuntimeMode,
     /// Runtime: LOD models with at least this many copies in the worldspace (per LOD level) are

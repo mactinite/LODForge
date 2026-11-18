@@ -1,13 +1,14 @@
-# LODForge UI options inventory (2026-10-24)
+# Build options, input files and reports
 
-What the UI has to cover: every `lodforge build` option and every flat file the CLI reads.
-Sources: `apps/cli/src/main.rs`, `build.rs`, `dyndolod_build.rs`, `profile.rs`; UI backend
-`apps/ui/src/main.rs`. The UI's option catalog is `apps/ui/web/src/options.ts`.
+Every `lodforge build` option by area, the flat files a build reads, the `--json` events and the
+reports it writes. `lodforge build --help` has the full text of each option. Sources:
+`apps/cli/src/main.rs`, `build.rs`, `dyndolod_build.rs`, `instances.rs`, `profile.rs`. The UI
+exposes a subset through its option catalog, `apps/ui/web/src/options.ts`.
 
 ## Build options by area
 
 - **General:** `--instance`, `--profile`, `--game`, `--exclude-mod`, `--exclude-plugin`,
-  `--worlds`, `--seasons`, `--mode` (UI: always `dyndolod`), `--materials pbr|standard`,
+  `--worlds`, `--seasons`, `--mode dyndolod` (the only mode; accepted for existing command lines), `--materials pbr|standard`,
   `--keep-lod-mods`, `--no-terrain/--no-objects/--no-trees`, `--json`.
 - **DynDOLOD:** `--preset Low|Medium|High`, `--child-parent Low|Medium|High`,
   `--dyndolod-config`, `--dyndolod`, `--static-lod`, `--no-plugins`, `--no-occlusion`,
@@ -19,13 +20,13 @@ Sources: `apps/cli/src/main.rs`, `build.rs`, `dyndolod_build.rs`, `profile.rs`; 
   `--lod-models`, `--lod-model-cache`, `--lod-model-min-size` (3 sizes),
   `--level-coverage auto|rules|keep` (auto = keep with `--preset High`: generated LOD8/16 models
   down to 128/256 units, billboard levels of non-tree models without a billboard take model
-  levels; docs/runtime/level-coverage.md).
+  levels; `--lod-model-min-size` still wins).
 - **Trees:** `--texgen`, `--tree-lod classic|ultra`, `--tree-models off|generate|all`,
   `--tree-model-levels keep:area:bark:floor[:max_scale]`×3, `--tree-model-crown cloud|prune`,
   global `--billboard-scale`, `--billboard-supersample 1..8`, `--installed-billboards
   render|keep`, `--billboard-density 0.1..1`, `--billboard-soft`.
 - **Grass:** `--grass off|bto|go`, `--grass-source auto|cache`, `--grass-density` (%).
-- **LODForge Runtime (UI group "LODForge Runtime", 2026-10-26):** `--runtime none|lodforge`,
+- **LODForge Runtime (UI group "LODForge Runtime"):** `--runtime none|lodforge`,
   `--impostor-units-per-px`, `--impostor-max-frame`, `--impostor-large-frame`,
   `--impostor-alpha coverage|binary`, `--runtime-no-grass`, `--runtime-grass-cache`,
   `--runtime-no-large-refs`, `--runtime-min-copies`, `--runtime-no-dyndolod-plugins`. In runtime
@@ -40,7 +41,7 @@ Sources: `apps/cli/src/main.rs`, `build.rs`, `dyndolod_build.rs`, `profile.rs`; 
 
 `<cfg>` = `tools\DynDOLOD\Edit Scripts\DynDOLOD` (`--dyndolod-config`).
 
-| File | Format | Controls | Override before this change |
+| File | Format | Controls | Override |
 |---|---|---|---|
 | `<cfg>\DynDOLOD_SSE.ini` `[DynDOLOD]` | `key=value` | atlas, grids, occlusion, grass, flat LOD colours, ignore lists | none |
 | `<cfg>\Rules\DynDOLOD_SSE_<Preset>.ini`, `_all*.ini`, per plugin | `LODGen<n>=mask,LOD4,LOD8,LOD16[,LOD32],Grid,Reference,Flags` | LOD per mesh / reference | `Data\DynDOLOD\<name>` via VFS |

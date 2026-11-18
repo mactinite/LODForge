@@ -102,10 +102,6 @@ impl<'a> Record<'a> {
     pub fn is_deleted(&self) -> bool {
         self.flags & FLAG_DELETED != 0
     }
-    /// Raw (possibly compressed) record data, without the header.
-    pub fn raw_data(&self) -> &'a [u8] {
-        self.raw
-    }
 
     /// Record data, decompressed if needed.
     pub fn data(&self) -> Result<Cow<'a, [u8]>> {
@@ -148,12 +144,6 @@ impl<'a> Group<'a> {
     }
     pub fn label_u32(&self) -> u32 {
         u32::from_le_bytes(self.label)
-    }
-    /// Exterior block/sub-block label as (x, y); the file stores Y first, then X, as i16 each.
-    pub fn label_grid(&self) -> (i16, i16) {
-        let y = i16::from_le_bytes([self.label[0], self.label[1]]);
-        let x = i16::from_le_bytes([self.label[2], self.label[3]]);
-        (x, y)
     }
     pub fn entries(&self) -> Entries<'a> {
         Entries { bytes: self.body, base: self.offset + HEADER_LEN, pos: 0 }

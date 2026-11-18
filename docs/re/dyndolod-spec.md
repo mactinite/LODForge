@@ -18,7 +18,7 @@ Earlier research identified Resources/configs as CC BY-NC-SA
 and LODGen as MPL-1.1; those assertions still need verification against the exact
 distributions. Reading installed resources is not permission to redistribute them,
 and decompilation does not itself grant porting rights.
-See [lodgen-318-delta.md](lodgen-318-delta.md) for the LODGen 3.1.8 changes ported in
+The LODGen 3.1.8 behavior is specified in [object-lod-spec.md](object-lod-spec.md) and implemented in
 `crates/objlod` (`Flavor::Dyndolod318`).
 
 **Evidence tags.**
@@ -415,7 +415,7 @@ implementation rule. Making every no-level/no-grid/non-VWD match terminal remove
 fallback when such a match has no LOD resource, but preserves resource-backed
 pass-through. Golden MODL records confirm full-model dynamic fallback for
 `Unchanged` doors, rapids and parented trees. This does not establish `Replace`
-semantics; see the [measured boundary](../validation-runtime-20261019.md).
+semantics; see the 2026-10-19 runtime validation in the development notes (kept outside this repository).
 
 ### Patch files (`*.patch`)
 
@@ -826,7 +826,7 @@ Generator rules (matched against the E2E golden; `lodforge large-refs` prints th
 | `_DynDOLOD_REVERT` + `[Resets]` | persistent Is Full LOD references that get object, tree or dynamic LOD are overridden without Is Full LOD (copy of the winning record, EditorID `<plugin without punctuation>&<id6>_DynDOLOD_REVERT`). Large references go into DynDOLOD.esm's persistent cell, the rest into DynDOLOD.esp's. Each one is listed in `[Resets]` so saves reload it. Temporary Is Full LOD references are not touched | every golden REVERT is a persistent Is Full LOD reference and every `[Resets]` entry is a REVERT (57/57). Ours: 23, all in golden; the other 34 are references our export does not give LOD (12 Civil War banners, 5 CC tower/hall pieces, 19 Solitude refs copied by `_DynDOLOD_CHILD`) |
 
 The counts above are historical. Child copies and replacement support have since
-advanced; see the [current qualification](../validation-runtime-20261019.md).
+advanced; see the 2026-10-19 runtime validation in the development notes (kept outside this repository).
 Remaining policies include missing child copies, `_DynDOLOD_FIX`,
 ConvertEnabledReferences and non-replacement Disabled selection.
 
@@ -861,7 +861,7 @@ golden. The current unpatched replacement must not be counted as patch parity.
 
 ### Matched child resets and tree timing [golden] [ours] [live]
 
-The later [runtime batch](../validation-runtime-batch-20261019.md) also recovers
+The later runtime batch (2026-10-19, development notes) also recovers
 the 19 missing Solitude resets. A persistent full-LOD child with a known
 parent counterpart receiving LOD still needs a REVERT even when it is excluded
 from child copies. Write it to the child's persistent cell, not the parent's;
@@ -1027,7 +1027,7 @@ LODGen is run as `"LODGenx64.exe" --inputfile "<export>" --logfile "<log>" [--LO
 Moved. The behavioural specification of TVDT occlusion (Occlusion.esp) is now
 [occlusion-spec.md](occlusion-spec.md), written 2026-10-19 from public documentation, the MPL
 xEdit record definitions, the shipped configuration and the golden output only (Target 1 of the
-[re-implementation plan](../reimplementation-plan.md)). The `[decomp]`-derived description of
+[re-implementation plan](../licensing.md#clean-room-method)). The `[decomp]`-derived description of
 DynDOLOD's internals that stood here (node structure and initial values, height-map build rules,
 ray stepping, the order in which child worldspaces reuse the parent's map, Ghidra findings) was
 quarantined outside the repository on 2026-10-19 (`D:\Modlists\ref\quarantine\dyndolod-occlusion-decomp.md`)

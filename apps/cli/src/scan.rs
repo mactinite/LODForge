@@ -123,55 +123,6 @@ pub fn bsa_scan(vfs: &lodforge_archive::Vfs) -> Result<()> {
     Ok(())
 }
 
-/// Decodes up to `limit` DDS files of `size`x`size` under `dir`, re-encodes them with the GPU BC7
-/// encoder in batches and reports throughput and round-trip PSNR against the decoded source.
-pub fn bc7_bench(dir: &Path, size: u32, limit: usize, batch: usize) -> Result<()> {
-    let gpu = lodforge_gpu::Gpu::new()?;
-    println!("GPU: {} ({:?})", gpu.adapter_info.name, gpu.adapter_info.backend);
-    let mut sources: Vec<(u32, u32, Vec<u8>)> = files_with(dir, &["dds"])
-        .par_iter()
-        .filter_map(|p| {
-            let bytes = std::fs::read(p).ok()?;
-            let info = lodforge_dds::parse(&bytes).ok()?;
-            if info.width != size || info.height != size {
-                return None;
-            }
-            let img = lodforge_dds::decode(&bytes, &info, 0).ok()?;
-            Some((img.width, img.height, img.rgba))
-        })
-        .collect();
-    sources.truncate(limit);
-    if sources.is_empty() {
-        anyhow::bail!("no {size}x{size} DDS files under {}", dir.display());
-    }
-    let mpix = sources.iter().map(|s| f64::from(s.0 * s.1)).sum::<f64>() / 1e6;
-    // Warm-up (pipeline compile, driver caches).
-    gpu.encode_bc7(&[lodforge_gpu::RgbaImage { width: sources[0].0, height: sources[0].1, rgba: &sources[0].2 }])?;
-    let t = Instant::now();
-    let mut encoded = Vec::with_capacity(sources.len());
-    for chunk in sources.chunks(batch) {
-        let imgs: Vec<_> = chunk.iter().map(|(w, h, rgba)| lodforge_gpu::RgbaImage { width: *w, height: *h, rgba }).collect();
-        encoded.extend(gpu.encode_bc7(&imgs)?);
-    }
-    let secs = t.elapsed().as_secs_f64();
-    println!("{} images, {mpix:.1} Mpixel encoded in {:.0} ms ({:.0} Mpixel/s, incl. upload + readback)", sources.len(), secs * 1000.0, mpix / secs);
-
-    let psnrs: Vec<f64> = sources
-        .par_iter()
-        .zip(&encoded)
-        .map(|((w, h, rgba), blocks)| {
-            let info = lodforge_dds::DdsInfo { width: *w, height: *h, mip_count: 1, format: lodforge_dds::Format::Bc7, layers: 1, srgb: false, data_offset: 0 };
-            let dec = lodforge_dds::decode(blocks, &info, 0).expect("decode own BC7");
-            let mse = rgba.iter().zip(&dec.rgba).map(|(a, b)| (f64::from(*a) - f64::from(*b)).powi(2)).sum::<f64>() / rgba.len() as f64;
-            if mse == 0.0 { 99.0 } else { 10.0 * (255.0 * 255.0 / mse).log10() }
-        })
-        .collect();
-    let mean = psnrs.iter().sum::<f64>() / psnrs.len() as f64;
-    let min = psnrs.iter().cloned().fold(f64::INFINITY, f64::min);
-    println!("round-trip PSNR vs decoded source: mean {mean:.2} dB, min {min:.2} dB");
-    Ok(())
-}
-
 /// Decodes two DDS files (top mip) and reports differing pixels per `block`-sized square.
 pub fn dds_diff(a: &Path, b: &Path, block: u32) -> Result<()> {
     let load = |p: &Path| -> Result<lodforge_dds::Image> {

@@ -131,7 +131,7 @@ jobs:
           Requires WebView2 for the UI and the Microsoft Visual C++ v14 x64 Redistributable for the CLI.
           Game/mod resources and compatible runtimes are not included.
           Source commit: $env:RELEASE_COMMIT. Matching source and SHA-256 checksums are attached.
-          Read README.md and docs/parity.md before using a separate test profile and backed-up saves.
+          Read README.md and docs/limitations.md first. Use a separate test profile and backed-up saves.
           Unsigned binaries may trigger Windows SmartScreen. Checksums detect corruption, not publisher identity.
           Review licensing clearance and release qualification before publishing this draft.
           "@

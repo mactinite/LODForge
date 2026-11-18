@@ -32,11 +32,6 @@ impl Rule {
             Rule::Tile { src, .. } | Rule::Full { src, .. } => src,
         }
     }
-    pub fn keeps_alpha(&self) -> bool {
-        match self {
-            Rule::Tile { alpha, .. } | Rule::Full { alpha, .. } => *alpha,
-        }
-    }
 }
 
 /// Lower-case, backslashes, no leading `data\`.

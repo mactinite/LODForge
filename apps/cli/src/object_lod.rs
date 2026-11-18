@@ -31,7 +31,6 @@ use crate::profile::{Profile, ProfileArgs};
 /// LODForge's grass density in percent when neither `--grass-density` nor the export sets one.
 /// DynDOLOD defaults to 100% (8.7 GB of Tamriel LOD4 with HD grass); its docs advise 50% or less
 /// for HD grass, and the size scales about linearly with density.
-#[allow(dead_code)]
 pub const DEFAULT_GRASS_DENSITY: f32 = 50.0;
 
 #[derive(clap::Args)]
@@ -92,16 +91,6 @@ pub struct Args {
     /// Build and serialize but do not write files (timing).
     #[arg(long)]
     pub dry_run: bool,
-    /// Build the export and atlas from the load order (xEdit's object LOD export port) instead of
-    /// reading xLODGen's LODGen*.txt and atlas maps.
-    #[arg(long)]
-    pub from_load_order: bool,
-    /// Worldspace for --from-load-order.
-    #[arg(long, default_value = "Tamriel")]
-    pub world: String,
-    /// With --from-load-order: also render the atlas textures into the output folder.
-    #[arg(long)]
-    pub atlas_textures: bool,
     /// Which export dialect to read: xLODGen's (16 columns, options on the command line) or
     /// DynDOLOD's (17 columns, options in the header); `auto` detects it from the header keys.
     #[arg(long, value_enum, default_value = "auto")]
@@ -205,46 +194,25 @@ pub fn run_with(p: &Profile, a: &Args) -> Result<()> {
     let total = Instant::now();
     let vfs = &p.vfs;
     let mode = CompareMode::from_args(a);
-    // (export, atlas) per season, from the load order or from the export files.
+    // (export, atlas) per season, from the export files.
     let mut jobs: Vec<(ExportFile, AtlasMap)> = Vec::new();
-    if a.from_load_order {
-        let t = Instant::now();
-        let inputs = crate::object_export::load_inputs(p, &a.world)?;
-        let gpu = if a.atlas_textures && !a.dry_run { Some(lodforge_gpu::Gpu::new()?) } else { None };
-        let mut seasons = vec![None];
-        for s in &a.seasons {
-            seasons.push(Some(crate::object_export::season_from_code(s).with_context(|| format!("unknown season {s}"))?));
+    let default_dir = a.profile.instance.join(r"tools\xLODGen\Edit Scripts");
+    let mut exports: Vec<PathBuf> = if a.export.is_empty() { vec![default_dir.join("LODGen.txt")] } else { a.export.clone() };
+    for s in &a.seasons {
+        exports.push(default_dir.join(format!("LODGen.{s}.txt")));
+    }
+    for export_path in &exports {
+        let text = read_text(export_path)?;
+        let export = match a.flavor.dialect() {
+            Some(d) => ExportFile::parse_with(&text, d),
+            None => ExportFile::parse(&text),
+        };
+        if export.worldspace.is_empty() {
+            bail!("no Worldspace= in {}", export_path.display());
         }
-        for season in seasons {
-            let (export, st) = crate::object_export::build_export(p, &inputs, season);
-            let layout = crate::object_export::atlas_layout(p, &inputs, &st, season);
-            let atlas = AtlasMap::parse(&layout.map_text()).map_err(anyhow::Error::msg)?;
-            if let Some(gpu) = &gpu {
-                let pages = crate::object_atlas::render(&p.vfs, &layout, gpu, &crate::object_atlas::Formats::BC7_FULL)?;
-                crate::object_atlas::write(&a.out, &pages)?;
-            }
-            jobs.push((export, atlas));
-        }
-        println!("export + atlas{} from the load order: {} ms", if gpu.is_some() { " (with textures)" } else { "" }, t.elapsed().as_millis());
-    } else {
-        let default_dir = a.profile.instance.join(r"tools\xLODGen\Edit Scripts");
-        let mut exports: Vec<PathBuf> = if a.export.is_empty() { vec![default_dir.join("LODGen.txt")] } else { a.export.clone() };
-        for s in &a.seasons {
-            exports.push(default_dir.join(format!("LODGen.{s}.txt")));
-        }
-        for export_path in &exports {
-            let text = read_text(export_path)?;
-            let export = match a.flavor.dialect() {
-                Some(d) => ExportFile::parse_with(&text, d),
-                None => ExportFile::parse(&text),
-            };
-            if export.worldspace.is_empty() {
-                bail!("no Worldspace= in {}", export_path.display());
-            }
-            let atlas_path = a.atlas.clone().unwrap_or_else(|| PathBuf::from(&export.atlas_map));
-            let atlas = if atlas_path.as_os_str().is_empty() { AtlasMap::default() } else { AtlasMap::parse(&read_text(&atlas_path)?).map_err(anyhow::Error::msg)? };
-            jobs.push((export, atlas));
-        }
+        let atlas_path = a.atlas.clone().unwrap_or_else(|| PathBuf::from(&export.atlas_map));
+        let atlas = if atlas_path.as_os_str().is_empty() { AtlasMap::default() } else { AtlasMap::parse(&read_text(&atlas_path)?).map_err(anyhow::Error::msg)? };
+        jobs.push((export, atlas));
     }
     if a.grass.is_some() != a.grass_map.is_some() {
         bail!("grass LOD needs both --grass (the cache folder) and --grass-map");

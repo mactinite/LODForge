@@ -1,7 +1,7 @@
 // Every `lodforge build` option the UI exposes, with its flag, default and explanation. The
 // Advanced view renders from this list, the Guided view sets a subset through quality levels, and
 // toArgs() turns the values into the CLI argument list (the backend checks each flag against its
-// own allow-list). Inventory: docs/ui-options-inventory.md.
+// own allow-list). Reference: docs/build-options.md.
 
 export type OptionValue = string | number | boolean;
 

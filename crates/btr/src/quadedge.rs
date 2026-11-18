@@ -91,10 +91,6 @@ impl QuadEdges {
         inv_rot(self.onext(inv_rot(e)))
     }
     #[inline]
-    pub fn rprev(&self, e: EdgeId) -> EdgeId {
-        self.onext(sym(e))
-    }
-    #[inline]
     pub fn org(&self, e: EdgeId) -> u32 {
         self.org[e as usize]
     }

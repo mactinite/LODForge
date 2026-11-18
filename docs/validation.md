@@ -13,8 +13,7 @@ Keep reference output separate from LODForge output.
 Copy reference exports **with all side files** and make their absolute paths
 resolve to the pinned copies. `AltTextures`, `VC`, `FlatTextures`, terrain data and
 atlas maps in the installed tool's export directory are overwritten by later runs.
-The [baseline log](baseline.md) documents a misleading 33.59% vs 98.44% result
-caused by reading side files from a different run.
+Reading side files from a different run once turned a 98.44% match into 33.59%.
 
 For a clean E2E comparison, exclude old LOD and TexGen output mods explicitly.
 Build into a fresh directory. For rolling-update tests, deliberately reuse a
@@ -76,7 +75,7 @@ LODForge build: they could conceal missing generated assets. A deliberately
 sparse runtime overlay must instead declare its pinned full-output dependency
 with `--asset-root`; report it as an overlay, not a complete generation.
 The example is intentionally narrower
-than full plugin/form validation; see the [measured scope](validation-20261019.md).
+than full plugin/form validation.
 Whole-page alpha coverage is diagnostic when atlas layouts differ; compare
 corresponding tiles before drawing per-material conclusions.
 
@@ -102,8 +101,7 @@ comparison command automates all of them.
 - **Seasons/worlds:** compare the same selected worlds and season eligibility,
   including empty outputs that suppress vanilla LOD.
 - **Grass:** compare BTO to BTO using the same cache and density. Test Grass
-  Optimizations separately. `auto` can generate unfiltered placements where
-  caches are absent.
+  Optimizations separately. Cells without a cache file get no grass.
 - **Performance:** time equivalent inputs/features on the same machine; record
   warm/cold cache, wall time, peak memory and output size. Historical speedups
   are profile-specific, not general guarantees.
@@ -139,8 +137,7 @@ Community Shaders, PBR and seasonal runtime versions.
 6. Save/reload; rebuild with retained IDs/token and test reload again.
    Test fresh identity only with a fresh save. Never promise save safety from
    byte-identical plugin output alone. Compare the **full** rebuilt package,
-   not only plugins/data: the [full validation](validation-full-20261019.md)
-   found geometry variation hidden by byte-identical runtime files. Variation
+   not only plugins/data: geometry can vary behind byte-identical runtime files. Variation
    alone is not a failure: load a pre-rebuild save against the complete rebuilt
    package, check runtime identities/state and visual transitions, then save and
    reload again. Define the supported upgrade boundary; unchanged-input testing
@@ -156,14 +153,7 @@ DLL initialization is useful evidence, not full runtime certification.
 
 ### Driving the game from an agent (skyrim-mcp)
 
-The repository's [`.mcp.json`](../.mcp.json) registers the `skyrim-mcp` server
-(`D:\workspace\SkyrimMCP\server\dist\index.js`, run with Node 22). Claude Code asks
-once to approve project servers. The server provides:
-
-- **MO2:** `mo2_list_profiles`, `mo2_set_mod_enabled`, `mo2_create_test_profile`;
-- **game control:** `game_launch`, `game_load`, `game_console` (`coc` / `cow` to put the player
-  under the camera), `game_move`, `game_quit`;
-- **capture and comparison:** `game_screenshot` and `image_compare` (SSIM).
-
-Use `game_screenshot source=frame preset=clean` for LOD comparisons. Community Shaders HDR
-clips window grabs (see docs/baseline.md "Clean in-game comparison").
+A local `.mcp.json` (not tracked) can register the `skyrim-mcp` server, which provides MO2
+profile control, game launch, console and movement, and `game_screenshot` / `image_compare`. Use
+`game_screenshot source=frame preset=clean` for LOD comparisons: Community Shaders HDR clips
+window grabs ([gotchas](gotchas.md)).

@@ -48,14 +48,6 @@ impl BBox {
         self.add(p);
     }
 
-    /// Extends the box to contain `other`.
-    pub fn grow_box(&mut self, other: &BBox) {
-        if !other.is_empty() {
-            self.add(other.min);
-            self.add(other.max);
-        }
-    }
-
     pub fn is_empty(&self) -> bool {
         (0..3).any(|i| self.min[i] > self.max[i])
     }

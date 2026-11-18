@@ -127,13 +127,6 @@ pub struct Worldspace {
 }
 
 impl Worldspace {
-    /// Cell range covered by the object bounds (NAM0/NAM9), inclusive.
-    pub fn bounds_cells(&self) -> Option<((i32, i32), (i32, i32))> {
-        let (lo, hi) = self.object_bounds?;
-        let c = |v: f32| (v / 4096.0).floor() as i32;
-        Some(((c(lo[0]), c(lo[1])), (c(hi[0]), c(hi[1]))))
-    }
-
     /// The LAND used for each cell: a LAND of the CELL that holds the grid position. Two different
     /// CELL records at the same coordinates are resolved as the game does, the later-loaded one
     /// replacing the earlier (`cells`), and the LANDs under the replaced cell are not used; so a

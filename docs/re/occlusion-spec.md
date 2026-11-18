@@ -1,6 +1,6 @@
 # Occlusion (CELL TVDT, Occlusion.esp): scrubbed specification
 
-Written 2026-10-19 as the analyst step of [Target 1](../reimplementation-plan.md) so that a
+Written 2026-10-19 as the analyst step of [Target 1 of the re-implementation plan](../licensing.md#clean-room-method) so that a
 fresh session can re-implement `crates/dyndolod/src/occlusion.rs` without ever seeing DynDOLOD's
 internals. Everything here comes from public documentation, the MPL-2.0 xEdit record
 definitions, the shipped configuration, LODForge's own files and the golden output of a real

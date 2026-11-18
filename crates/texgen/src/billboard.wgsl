@@ -5,7 +5,7 @@
 // texel, view-space normal encoding, material terms) and the uniform / vertex layout of
 // render.rs, without reference to any other billboard shader. Where the description leaves a
 // detail open, the plain physical reading was tried first and the golden TexGen billboards
-// arbitrated (docs/baseline.md, "Billboard shader re-derivation"); each such choice is noted at
+// arbitrated; each such choice is noted at
 // the place it is made.
 //
 // Output conventions (render.rs): the target is RGBA8 without blending, drawn with MSAA, so the

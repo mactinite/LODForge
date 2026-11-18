@@ -1,11 +1,11 @@
 # Terrain LOD specification (scrubbed, stage B0.1)
 
-Written 2026-10-19 by the analyst session of [reimplementation-plan.md](../reimplementation-plan.md)
+Written 2026-10-19 by the analyst session of [the re-implementation plan](../licensing.md#clean-room-method)
 ("Stage B0.1"). It is the only description of terrain LOD meshes the stage B1 implementer may use,
 next to the inputs listed in the Process record (section 6). Every statement carries its source:
 
 - `[golden]` observed in xLODGen / DynDOLOD output under `D:\Modlists\LODForge-golden\` with
-  [scripts/golden/Dump-GoldenBtr.py](../../scripts/golden/Dump-GoldenBtr.py) (a reader written from the
+  `Dump-GoldenBtr.py` (a reader written from the
   NIF format specification; it contains no generation logic). Unless stated otherwise the run is
   `no-seasons-20261017-031139` (xLODGen 4.1.5o beta, LODGen 3.0.36 as shipped with it, Tamriel, the
   skyrim-cs Default profile of 2026-10-17).

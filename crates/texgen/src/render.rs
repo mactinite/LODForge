@@ -403,7 +403,7 @@ impl Renderer {
             mipmap_filter: wgpu::FilterMode::Linear,
             // TexGen samples the source mips with anisotropic filtering: without it the alpha-tested
             // foliage of the golden billboards is matched only with a ~-1 mip bias, with it the mean
-            // width and height ratios are 1.000 (docs/baseline.md P8 step 2).
+            // width and height ratios are 1.000.
             anisotropy_clamp: 16,
             ..Default::default()
         });

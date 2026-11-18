@@ -1,38 +1,9 @@
-> **2026-10-19: the generator was removed from `main`** (a product decision: the modlist uses NGIO's own in-game
-> precache; the generator also followed disassembly of the game engine, which LODForge no longer carries). The file-format section (§3) remains the
-> reference for the `.cgid` reader/writer in `crates/grass`; the rest of this document is historical research. The
-> generator and the `lodforge grass-cache` command live on branch `g1-grass-cache`. `--grass bto` now reads the
-> NGIO cache only; cells without a cache file get no grass.
+# NGIO grass cache (`.cgid`): file format
 
-# Offline grass cache (.cgid): RE spec
-
-Status: research spike, 2026-10-17. Nothing is implemented yet. Target game build: SkyrimSE.exe 1.7.104.0
-(`D:\Modlists\skyrim-cs\Stock Game`). Cache producer being replaced: No Grass In Objects NG v1.6.14
-(GPL-3, source at `D:\Modlists\ref\ngio-ng`) plus Grass Cache Helper NG 1.0.3.
-
-Goal: write the same `Data\Grass\<World>x%04dy%04d.cgid` files NGIO's in-game precache writes, from
-plugins and assets only, so the game and DynDOLOD grass LOD load them unchanged.
-
-## 1. Verdict
-
-| Piece | Status | Source of truth |
-|---|---|---|
-| File format | **Recovered and verified**: 3,201/3,201 real files parse exactly (19.1 M instances), and group bounds match the formula in 75,420/75,420 groups | engine writer/loader + NGIO `SaveGrassGroup` |
-| Instance encoding (16 halfwords) | Recovered | NGIO `GrassPatchCreation::Encode` |
-| Patch iteration per cell/quad | Recovered | engine `AddCellGrass` |
-| Grass types and 3x3 density per patch | Recovered | engine per-vertex param builder |
-| LAND decode the engine actually uses (VHGT, VNML, VCLR, BTXT/ATXT/VTXT quirks) | Recovered | engine LAND loader |
-| Height/normal/colour interpolation | Recovered | engine `GetLandCoordData` / `GetLandData` |
-| Candidate placement, RNG, water, slope | Recovered (NGIO port; engine for the fallback) | NGIO `GrassPatchCreation::Generate`, engine `CreateGrassPatch` |
-| Raycast filter ("no grass in objects") | Semantics recovered. The offline collision world is **the main build cost** | NGIO `RaycastHelper` / `PhysicsRaycast` |
-| Grass on cliffs, per-shape ignore rules | Semantics only; later milestone | NGIO |
-
-Everything except collision is a pure function of plugin data, INI values and GRAS model bounds, so it
-can match NGIO NG bit for bit. Section 12 has the effort and risk estimate.
-
-## 2. Addresses (1.7.104, AE Address Library IDs)
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
+Reference for the `.cgid` reader/writer in `crates/grass`. LODForge does not generate grass
+caches: `--grass bto` and the runtime's far grass read the cache that No Grass In Objects NG
+writes in game; cells without a cache file get no grass. Section numbers are kept from the
+original research document, whose other sections live in the development notes.
 
 ## 3. File format (little-endian, verified)
 
@@ -89,71 +60,3 @@ quads → patches → vertex grass params (§5). Order matters only for byte-ide
 `r = [c,-s,0; s,c,0; 0,0,1]` with `c = orientation draw`, `s = sqrt(1-c²)`. With fitsToSlope it is multiplied by the
 basis `[t×n | t | n]`, where `t = SlopeTangent(n)` (NGIO, smallest-axis rule). `n` is the triangle face normal (§7).
 Half conversion is DirectXMath `XMConvertFloatToHalf` (round to nearest even), which Rust `half::f16::from_f32` matches.
-
-## 5. Patch iteration
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
-
-## 6. Grass types and density at a vertex
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
-
-## 7. LAND as the engine sees it
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
-
-## 8. Interpolation
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
-
-## 9. Candidate placement
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
-
-## 10. Water and slope
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
-
-## 11. Settings the generator must read
-
-From the profile's Skyrim.ini/SkyrimPrefs.ini plus any INI overrides mods ship (and NGIO's
-`GrassControl.ini` / `_NGIO.ini` overrides): `iMinGrassSize`, `iMaxGrassTypesPerTexure`,
-`fTexturePctThreshold`, `fWaveOffsetRange`, the source of grassEvalSize/grassPatchSize (open, from the manager ctor),
-NGIO `Global-grass-scale`, `Ray-cast-*`, `Skip-/Only-pregenerate-world-spaces`, `Grass-cliffs-*`. Grass Cache
-Helper NG toggles worldspace NoGrass flags (log: removes it from WhiterunWorld, adds it to KatariahWorld).
-
-## 12. Raycast filter
-
-> Moved to the quarantine folder on 2026-10-20: this section described the game engine's / NGIO's grass placement internals (function addresses, field offsets, pseudo-code). The offline generator that used it was removed from `main`; the `.cgid` reader needs only sections 3 and 4.
-
-## 13. Validation plan
-
-1. Golden A: in-game precache with `Ray-cast-enabled=false`, `Grass-cliffs-enabled=false`, Tamriel only.
-   Offline output should be **byte-identical** apart from type/group order and the junk triCount. Diff per
-   instance with a tool in the shape of `scripts/grass-re/cgid_parse.py` / `cgid_stats.py`: positions, rotation, shade, variation.
-2. Golden B: the normal precache (another session ran one on skyrim-cs today: `overwrite\grass`, 3,201 Tamriel
-   files, NGIO-NG.log). Judge raycast parity as the % of instances kept/rejected identically.
-3. Load test: drop the offline cache in, `bAllowCreateGrass=0` (NGIO `Only-load-from-cache`), and screenshot-compare
-   a few cells via skyrim-mcp. Then feed DynDOLOD grass LOD.
-
-## 14. Open items
-
-- Source of grassEvalSize/grassPatchSize (BGSGrassManager ctor) and `maxInstancesPerGroup`.
-- Which LAND override the runtime uses when several plugins have one.
-- Exact SE 1.5.97 / 1.6.x deltas (CreateGrassParams layout without densityMultiplier; slope index formula).
-- Landscape collision layer vs the raycast mask; enable-parent / disabled refs in the collision world.
-- How often the native-placement fallback triggers on real load orders.
-- Season variants: GRAS/LTEX swaps from Seasons of Skyrim INIs, one cache per season.
-
-## 15. Effort and risk
-
-| Milestone | Scope | Estimate (agent days) | Risk |
-|---|---|---|---|
-| G1 placement without raycast | LAND engine-view decode, §5–§10, writer, CLI `lodforge grass-cache` | 2–3 | Low. Everything is specified; bit-exact parity is likely |
-| G2 texture block + ignore lists + settings/INI plumbing + seasons | §11, §12 texture part | 1–2 | Low |
-| G3 collision world | Havok NIF shape parsing incl. compressed mesh, BVH, ray/capsule/box tests, REFR gather | 5–10 | **Medium-high**. Compressed-mesh decoding and edge parity drive it |
-| G4 grass cliffs | NGIO cliff surfaces, needs G3 | 2–3 | Medium; optional (not in cache files during generation) |
-
-Runtime estimate (Tamriel, ~3.5k land cells): about 0.5–1 G candidates at tens of ns each, plus ~40 M collision tests
-at ~1 µs, on 20 threads. That is seconds to low minutes, against hours in game. G1 alone already gives a
-loadable cache, the same as NGIO with raycasting off.

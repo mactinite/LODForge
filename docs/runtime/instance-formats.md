@@ -518,8 +518,7 @@ Shapes without a texture are dropped.
 ## 7b. Dynamic LOD (`LFDY`, `<World>.dyn.bin`, since 1.7)
 
 Replaces DynDOLOD.esp's stand-in references, DynDOLOD.esm's large-reference markers and the
-`DynDOLOD_NG_<World>.txt` data for LODForge Runtime (M5, behaviour in
-`docs/runtime/dyndolod-replacement-spec.md`). One file per worldspace that has dynamic items,
+`DynDOLOD_NG_<World>.txt` data for LODForge Runtime (M5). One file per worldspace that has dynamic items,
 child-world copies, an underside or large references; no season files (seasonal models are a
 chunk). Written by `build --runtime lodforge` next to the other files. No plugin records: the
 runtime draws every item itself through the pack/instance path (or a NIF clone for animated and
@@ -581,8 +580,8 @@ Meta chunks (besides `WRLD`, `PLUG`, `PARM`, `BTOK`):
 **`DHDR`**: `u16 world_plugin`, `u16 reserved`, `u32 world_form` (the worldspace record),
 `i16 sw_x`, `i16 sw_y` (LOD origin cell, lodsettings), `u8 near_grid`, `u8 far_grid` (defaults,
 odd diameters in cells), `u16 flags` (bit 0: every eligible large reference was instanced, so a large
-reference missing from `.statics.bin` is in the `.bto` or has no LOD; off for outputs updated by
-`runtime-dyn`, whose large references keep the earlier routing), `f32 glow_multiple`, `str lod_world` (EditorID whose LOD
+reference missing from `.statics.bin` is in the `.bto` or has no LOD; off in outputs that the removed
+`runtime-dyn` upgrade command brought to 1.7, whose large references keep the earlier routing), `f32 glow_multiple`, `str lod_world` (EditorID whose LOD
 this world uses; the world itself for a main world).
 
 **`DMDL`** (models): `u32 count`, then per entry: `u32 flags` (bit 0 full model, bit 1 animated,
@@ -687,11 +686,6 @@ default, next to the `.dyn.bin` files. `--runtime-no-dyndolod-plugins` leaves th
 is still written) for a runtime that draws everything from the `.dyn.bin` files; use it once the
 plugin covers dynamic LOD, the lists and large references.
 
-`lodforge runtime-dyn --data <earlier output> [--out <staging>]` brings an earlier runtime output
-to 1.7 without a full build: fresh export, `.dyn.bin` files, `StaticMeshes.bin` rebuilt with their
-models (+ static atlas pages), `BTOK` stamped into every runtime file, `Build.txt`. Its `.bto`
-files are not touched, so `DHDR` bit 0 is off.
-
 ### Build token (`BTOK`, all files since 1.7) and `Build.txt`
 
 `BTOK`: `str token` (32 characters, digits and upper-case letters; one per output folder, kept
@@ -772,9 +766,7 @@ kinds, raw and zstd.
 ## 9. Sizes and limits
 
 - Tamriel on skyrim-cs-base (measured, zstd 3): 93,544 trees -> 2.31 MB; 46,006 3D tree LOD
-  instances -> 1.21 MB; 29.7 M grass instances -> 236 MB (297 MB raw). Details in
-  [exporters-results-20261024.md](exporters-results-20261024.md) and
-  [grass-lfg-sizes.md](grass-lfg-sizes.md).
+  instances -> 1.21 MB; 29.7 M grass instances -> 236 MB (297 MB raw). Measured 2026-10-24.
 - Limits: 65,535 tree types / meshes / grass types per file, 255 grass types per cell, 2^32 - 1
   records per section, cell coordinates in i16.
 

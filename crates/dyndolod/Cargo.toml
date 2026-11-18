@@ -8,7 +8,6 @@ description = "Clean-room DynDOLOD-compatible object LOD export (rules, LOD mode
 [dependencies]
 rayon.workspace = true
 lodforge-esp.workspace = true
-lodforge-archive.workspace = true
 lodforge-objlod.workspace = true
 lodforge-nif.workspace = true
 lodforge-dds.workspace = true
